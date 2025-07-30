@@ -2,6 +2,8 @@ from sqlalchemy import (
     Table, Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, MetaData
 )
 import enum
+from datetime import datetime
+
 
 metadata = MetaData()
 
@@ -50,6 +52,18 @@ site_control = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("is_site_on", Boolean, default=True)
+)
+
+wordpress_project = Table(
+    "wordpress_project",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(255), nullable=False, unique=True),
+    Column("url", String(500), nullable=True),
+    Column("description", Text, nullable=True),
+    Column("is_active", Boolean, default=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
 # 3. Customer table
