@@ -78,8 +78,8 @@ message = Table(
     "message",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("sender_id", Integer, ForeignKey("user.id"), nullable=False),
-    Column("receiver_id", Integer, ForeignKey("user.id"), nullable=False),
+    Column("sender_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("receiver_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
     Column("subject", String(255), nullable=False),
     Column("body", Text, nullable=False),
     Column("sent_at", DateTime, nullable=False)
