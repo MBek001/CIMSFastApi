@@ -506,3 +506,61 @@ async def bulk_delete_customers(
     await session.commit()
 
     return SuccessResponse(message=f"{len(delete_data.customer_ids)} ta mijoz muvaffaqiyatli o'chirildi")
+
+
+# crm.py fayli boshida
+from fastapi import Request
+
+# crm_schemes.py fayli boshida
+from models.admin_models import CustomerStatus
+
+from schemes.crm_schemes import CustomerAPICreateRequest
+
+
+
+@router.post("/api/customers", response_model=CreateResponse, summary="API orqali mijoz yaratish")
+async def create_customer_api(
+        customer_data: CustomerAPICreateRequest,
+        request: Request,
+        session: AsyncSession = Depends(get_async_session)
+):
+    """
+    API orqali mijoz yaratish (token autentifikatsiya bilan)
+    """
+    # Token tekshirish
+    token = request.headers.get('X-API-TOKEN')
+    if token != "your_secret_api_token":  # Bu yerda settings dan oling
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden"
+        )
+
+    # Telefon raqami mavjudligini tekshirish
+    existing_customer_result = await session.execute(
+        select(customer).where(customer.c.phone_number == customer_data.phone_number)
+    )
+    if existing_customer_result.fetchone():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bu telefon raqami allaqachon mavjud"
+        )
+
+    # Yangi mijoz yaratish
+    customer_dict = {
+        "full_name": customer_data.full_name,
+        "platform": customer_data.platform,
+        "username": customer_data.username,
+        "phone_number": customer_data.phone_number,
+        "status": customer_data.status,
+        "assistant_name": customer_data.assistant_name,
+        "notes": customer_data.notes,
+        "created_at": datetime.now()
+    }
+
+    result = await session.execute(insert(customer).values(**customer_dict))
+    await session.commit()
+
+    return CreateResponse(
+        message="Mijoz muvaffaqiyatli yaratildi",
+        id=result.inserted_primary_key[0]
+    )

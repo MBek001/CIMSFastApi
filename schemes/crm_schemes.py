@@ -153,3 +153,32 @@ class CustomerAPIResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+
+
+
+
+# --- API uchun Customer Create Schema ---
+class CustomerAPICreateRequest(BaseModel):
+    full_name: str
+    platform: str
+    username: str
+    phone_number: str
+    status: CustomerStatus
+    assistant_name: str
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "full_name": "John Doe",
+                "platform": "Telegram",
+                "username": "@johndoe",
+                "phone_number": "+998901234567",
+                "status": "need_to_call",
+                "assistant_name": "Assistant Name",
+                "notes": "Qo'shimcha ma'lumotlar"
+            }
+        }

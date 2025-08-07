@@ -3,7 +3,9 @@ from typing import Optional
 from decimal import Decimal
 from models.user_models import UserRole
 
-
+from pydantic import BaseModel
+from typing import Optional, Dict
+from models.user_models import UserRole
 class UserCreate(BaseModel):
     email: EmailStr
     name: str
@@ -27,10 +29,10 @@ class UserResponse(BaseModel):
     company_code: str
     role: UserRole
     is_active: bool
+    permissions: Optional[Dict[str, bool]] = None  # Yangi field qo'shildi
 
     class Config:
         from_attributes = True
-
 
 class Token(BaseModel):
     access_token: str

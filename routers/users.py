@@ -563,16 +563,64 @@ async def toggle_payment_status(
 
 
 
-# permission uchun
 
-@router.get("/users/{user_id}/permissions", response_model=dict, summary="User ruxsatlarini olish")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# user.py - Updated endpoints
+
+from fastapi import HTTPException, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, insert, delete
+from schemes.schemes_users import (
+    UserPermissionUpdateRequest,
+    UserPermissionAddRequest,
+    UserPermissionResponse,
+    AllUsersPermissionsResponse,
+    SuccessResponse
+)
+from models.user_models import user, user_page_permission, PageName
+from database import get_async_session
+
+# --- 11. USER PERMISSIONS OLISH (TRUE/FALSE FORMAT) ---
+@router.get("/users/{user_id}/permissions", response_model=UserPermissionResponse, summary="User ruxsatlarini olish")
 async def get_user_permissions(
         user_id: int,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
     """
-    Foydalanuvchining joriy sahifa ruxsatlarini ko'rish
+    Foydalanuvchining joriy sahifa ruxsatlarini checkbox format bilan ko'rish
+    Response: {"ceo": true, "payment_list": false, "project_toggle": true, ...}
     """
     # User mavjudligini tekshirish
     user_result = await session.execute(
@@ -591,31 +639,51 @@ async def get_user_permissions(
         select(user_page_permission.c.page_name)
         .where(user_page_permission.c.user_id == user_id)
     )
-    permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
+    user_permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
 
-    # Barcha mavjud sahifalar ro'yxati
-    all_pages = [page.value for page in PageName]
+    # Barcha sahifalar uchun true/false obyekt yaratish
+    permissions_object = {}
+    for page in PageName:
+        permissions_object[page.value] = page.value in user_permissions
 
-    return {
-        "user_id": user_id,
-        "user_email": user_data.email,
-        "user_name": f"{user_data.name} {user_data.surname}",
-        "current_permissions": permissions,
-        "available_pages": all_pages,
-        "permissions_count": len(permissions)
-    }
+    # Display nomlar bilan ham ko'rsatish
+    permissions_display = {}
+    for page_name, has_permission in permissions_object.items():
+        if page_name == 'ceo':
+            permissions_display['Dashboard'] = has_permission
+        elif page_name == 'payment_list':
+            permissions_display['Payment'] = has_permission
+        elif page_name == 'project_toggle':
+            permissions_display['Wordpress'] = has_permission
+        elif page_name == 'crm':
+            permissions_display['Sales CRM'] = has_permission
+        elif page_name == 'finance_list':
+            permissions_display['Finance'] = has_permission
+        else:
+            permissions_display[page_name] = has_permission
+
+    return UserPermissionResponse(
+        user_id=user_id,
+        user_email=user_data.email,
+        user_name=f"{user_data.name} {user_data.surname}",
+        permissions=permissions_object,
+        # permissions_display=permissions_display,
+        active_permissions_count=len(user_permissions),
+        total_available_pages=len(PageName)
+    )
 
 
-# --- 12. USER PERMISSIONS YANGILASH ---
+# --- 12. USER PERMISSIONS YANGILASH (TRUE/FALSE FORMAT) ---
 @router.put("/users/{user_id}/permissions", response_model=SuccessResponse, summary="User ruxsatlarini yangilash")
 async def update_user_permissions(
         user_id: int,
-        permissions_data: dict,  # {"page_names": ["ceo", "payment_list"]}
+        permissions_data: UserPermissionUpdateRequest,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
     """
-    Foydalanuvchi sahifa ruxsatlarini to'liq yangilash
+    Foydalanuvchi sahifa ruxsatlarini checkbox format bilan yangilash
+    Request format: {"ceo": true, "payment_list": false, "project_toggle": true}
     """
     # User mavjudligini tekshirish
     user_result = await session.execute(
@@ -629,51 +697,48 @@ async def update_user_permissions(
             detail="Foydalanuvchi topilmadi"
         )
 
-    # Kelgan page_names ni tekshirish
-    page_names = permissions_data.get("page_names", [])
-    valid_pages = [page.value for page in PageName]
-
-    # Noto'g'ri sahifa nomlarini tekshirish
-    invalid_pages = [page for page in page_names if page not in valid_pages]
-    if invalid_pages:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Noto'g'ri sahifa nomlari: {invalid_pages}. Mavjud sahifalar: {valid_pages}"
-        )
+    # Schema ni dict formatiga o'tkazish
+    permissions_dict = permissions_data.to_dict()
 
     # Avvalgi barcha ruxsatlarni o'chirish
     await session.execute(
         delete(user_page_permission).where(user_page_permission.c.user_id == user_id)
     )
 
-    # Yangi ruxsatlarni qo'shish
-    if page_names:
-        permissions_to_insert = []
-        for page_name in page_names:
+    # Faqat true bo'lgan ruxsatlarni qo'shish
+    permissions_to_insert = []
+    enabled_pages = []
+
+    for page_name, is_enabled in permissions_dict.items():
+        if is_enabled:  # Faqat true bo'lganlarni qo'shamiz
             permissions_to_insert.append({
                 "user_id": user_id,
                 "page_name": PageName(page_name)
             })
+            enabled_pages.append(page_name)
 
+    # Ruxsatlarni bazaga qo'shish
+    if permissions_to_insert:
         await session.execute(insert(user_page_permission).values(permissions_to_insert))
 
     await session.commit()
 
     return SuccessResponse(
-        message=f"User {user_data.email} ning ruxsatlari yangilandi. Yangi ruxsatlar: {page_names}"
+        message=f"User {user_data.email} ning ruxsatlari yangilandi. Faol sahifalar: {enabled_pages if enabled_pages else 'Hech qanday ruxsat berilmadi'}"
     )
 
 
-# --- 13. USER GA RUXSAT QO'SHISH ---
+# --- 13. USER GA RUXSAT QO'SHISH (BARCHA SAHIFALAR TRUE/FALSE) ---
 @router.post("/users/{user_id}/permissions/add", response_model=SuccessResponse, summary="User ga ruxsat qo'shish")
 async def add_user_permission(
         user_id: int,
-        permission_data: dict,  # {"page_name": "payment_list"}
+        permissions_data: UserPermissionUpdateRequest,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
     """
-    Foydalanuvchiga yangi sahifa ruxsati qo'shish
+    Foydalanuvchiga sahifa ruxsatlarini qo'shish/yangilash
+    True bo'lgan sahifalar permissions ga qo'shiladi, false bo'lganlar qo'shilmaydi
     """
     # User mavjudligini tekshirish
     user_result = await session.execute(
@@ -687,48 +752,98 @@ async def add_user_permission(
             detail="Foydalanuvchi topilmadi"
         )
 
-    page_name = permission_data.get("page_name")
-    if not page_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="page_name majburiy"
-        )
+    # Schema ni dict formatiga o'tkazish
+    permissions_dict = permissions_data.to_dict()
 
-    # Page name tekshirish
-    valid_pages = [page.value for page in PageName]
-    if page_name not in valid_pages:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Noto'g'ri sahifa nomi: {page_name}. Mavjud sahifalar: {valid_pages}"
-        )
-
-    # Ruxsat allaqachon mavjudligini tekshirish
-    existing_permission = await session.execute(
-        select(user_page_permission).where(
-            user_page_permission.c.user_id == user_id,
-            user_page_permission.c.page_name == PageName(page_name)
-        )
+    # Hozirgi permissions olish
+    current_permissions_result = await session.execute(
+        select(user_page_permission.c.page_name)
+        .where(user_page_permission.c.user_id == user_id)
     )
+    current_permissions = [perm.page_name.value for perm in current_permissions_result.fetchall()]
 
-    if existing_permission.fetchone():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"User allaqachon {page_name} sahifasiga ruxsatga ega"
-        )
+    # Yangi permissions qo'shish
+    added_permissions = []
+    for page_name, is_enabled in permissions_dict.items():
+        if is_enabled and page_name not in current_permissions:
+            # Yangi permission qo'shish
+            await session.execute(
+                insert(user_page_permission).values(
+                    user_id=user_id,
+                    page_name=PageName(page_name)
+                )
+            )
+            added_permissions.append(page_name)
 
-    # Yangi ruxsat qo'shish
-    await session.execute(
-        insert(user_page_permission).values(
-            user_id=user_id,
-            page_name=PageName(page_name)
-        )
-    )
     await session.commit()
 
-    return SuccessResponse(
-        message=f"User {user_data.email} ga {page_name} sahifasi ruxsati qo'shildi"
-    )
+    if added_permissions:
+        return SuccessResponse(
+            message=f"User {user_data.email} ga quyidagi sahifalar ruxsati qo'shildi: {', '.join(added_permissions)}"
+        )
+    else:
+        return SuccessResponse(
+            message=f"User {user_data.email} uchun yangi ruxsatlar qo'shilmadi (barcha kerakli ruxsatlar allaqachon mavjud)"
+        )
 
+
+# --- 13.1. USER GA BITTA RUXSAT QO'SHISH (AGAR KERAK BO'LSA) ---
+@router.post("/users/{user_id}/permissions/add-single", response_model=SuccessResponse, summary="User ga ruxsat qo'shish")
+async def add_single_user_permission(
+        user_id: int,
+        permissions_data: UserPermissionAddRequest,
+        session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(require_ceo_access)
+):
+    """
+    Foydalanuvchiga sahifa ruxsatlarini qo'shish
+    True bo'lgan sahifalar permissions ga qo'shiladi, false bo'lganlar qo'shilmaydi
+    """
+    # User mavjudligini tekshirish
+    user_result = await session.execute(
+        select(user).where(user.c.id == user_id)
+    )
+    user_data = user_result.fetchone()
+
+    if not user_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Foydalanuvchi topilmadi"
+        )
+
+    # Schema ni dict formatiga o'tkazish
+    permissions_dict = permissions_data.to_dict()
+
+    # Hozirgi permissions olish
+    current_permissions_result = await session.execute(
+        select(user_page_permission.c.page_name)
+        .where(user_page_permission.c.user_id == user_id)
+    )
+    current_permissions = [perm.page_name.value for perm in current_permissions_result.fetchall()]
+
+    # Yangi permissions qo'shish
+    added_permissions = []
+    for page_name, is_enabled in permissions_dict.items():
+        if is_enabled and page_name not in current_permissions:
+            # Yangi permission qo'shish
+            await session.execute(
+                insert(user_page_permission).values(
+                    user_id=user_id,
+                    page_name=PageName(page_name)
+                )
+            )
+            added_permissions.append(page_name)
+
+    await session.commit()
+
+    if added_permissions:
+        return SuccessResponse(
+            message=f"User {user_data.email} ga quyidagi sahifalar ruxsati qo'shildi: {', '.join(added_permissions)}"
+        )
+    else:
+        return SuccessResponse(
+            message=f"User {user_data.email} uchun yangi ruxsatlar qo'shilmadi (barcha kerakli ruxsatlar allaqachon mavjud yoki hech qanday ruxsat tanlanmadi)"
+        )
 
 # --- 14. USER DAN RUXSAT OLIB TASHLASH ---
 @router.delete("/users/{user_id}/permissions/{page_name}", response_model=SuccessResponse,
@@ -791,7 +906,7 @@ async def remove_user_permission(
 
 
 # --- 15. BARCHA USERLAR VA ULARNING RUXSATLARI ---
-@router.get("/users/permissions/overview", response_model=dict, summary="Barcha userlar ruxsatlari ko'rinish")
+@router.get("/users/permissions/overview", response_model=AllUsersPermissionsResponse, summary="Barcha userlar ruxsatlari ko'rinish")
 async def get_all_users_permissions_overview(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
@@ -843,15 +958,15 @@ async def get_all_users_permissions_overview(
     # Barcha mavjud sahifalar
     all_pages = [page.value for page in PageName]
 
-    return {
-        "users": users_permissions,
-        "total_users": len(users_permissions),
-        "available_pages": all_pages,
-        "summary": {
+    return AllUsersPermissionsResponse(
+        users=users_permissions,
+        total_users=len(users_permissions),
+        available_pages=all_pages,
+        summary={
             "users_with_ceo_access": len([u for u in users_permissions if "ceo" in u["permissions"]]),
             "users_with_payment_access": len([u for u in users_permissions if "payment_list" in u["permissions"]]),
             "users_with_wordpress_access": len([u for u in users_permissions if "project_toggle" in u["permissions"]]),
             "users_with_crm_access": len([u for u in users_permissions if "crm" in u["permissions"]]),
             "users_with_finance_access": len([u for u in users_permissions if "finance_list" in u["permissions"]])
         }
-    }
+    )
