@@ -73,10 +73,10 @@ customer = Table(
     Column("id", Integer, primary_key=True),
     Column("full_name", String(255), nullable=False),
     Column("platform", String(255), nullable=False),
-    Column("username", String(255), nullable=False),
+    Column("username", String(255), nullable=True),
     Column("phone_number", String(20), nullable=False),
     Column("status", Enum(CustomerStatus), nullable=False),
-    Column("assistant_name", String(255), nullable=False),
+    Column("assistant_name", String(255), nullable=True),
     Column("notes", Text, nullable=True),
     Column("created_at", DateTime, nullable=False)
 )

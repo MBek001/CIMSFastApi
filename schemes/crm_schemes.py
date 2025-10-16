@@ -163,10 +163,10 @@ class CustomerAPIResponse(BaseModel):
 class CustomerAPICreateRequest(BaseModel):
     full_name: str
     platform: str
-    username: str
+    username:Optional[str] = None
     phone_number: str
     status: CustomerStatus
-    assistant_name: str
+    assistant_name:  Optional[str] = None
     notes: Optional[str] = None
 
     class Config:

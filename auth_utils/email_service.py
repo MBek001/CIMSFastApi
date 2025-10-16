@@ -61,7 +61,7 @@ class EmailService:
             <p>Assalomu alaykum!</p>
             <p>CIMS tizimida ro'yxatdan o'tish uchun quyidagi kodni kiriting:</p>
             <div style="background: #007bff; color: white; font-size: 24px; font-weight: bold; text-align: center; padding: 15px; border-radius: 8px; margin: 20px 0;">{code}</div>
-            <p><strong>Muhim:</strong> Bu kod 5 daqiqa amal qiladi.</p>
+            <p><strong>Muhim:</strong> Bu kod 1 daqiqa amal qiladi.</p>
             <p>Hurmat bilan, CIMS jamoasi</p>
         </div>
         """
@@ -78,7 +78,7 @@ class EmailService:
             <p>Assalomu alaykum!</p>
             <p>Parolingizni tiklash uchun quyidagi kodni kiriting:</p>
             <div style="background: #dc3545; color: white; font-size: 24px; font-weight: bold; text-align: center; padding: 15px; border-radius: 8px; margin: 20px 0;">{code}</div>
-            <p><strong>Muhim:</strong> Bu kod 30 daqiqa amal qiladi.</p>
+            <p><strong>Muhim:</strong> Bu kod 1 daqiqa amal qiladi.</p>
             <p>Hurmat bilan, CIMS jamoasi</p>
         </div>
         """

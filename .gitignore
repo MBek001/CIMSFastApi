@@ -1,0 +1,102 @@
+# ==========================
+# 🐍 Python umumiy sozlamalari
+# ==========================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Mac / Windows / Linux tizim fayllari
+.DS_Store
+Thumbs.db
+
+# ==========================
+# 🔒 Maxfiy ma'lumotlar
+# ==========================
+
+# .env fayllar (token, parol, API kalitlar)
+.env
+.env.*
+!example.env
+
+# ==========================
+# 🗃️ Ma'lumotlar bazasi fayllari
+# ==========================
+
+# SQLite fayllari
+*.db
+*.sqlite3
+
+# Backup yoki loglar
+*.bak
+*.log
+*.log.*
+
+# ==========================
+# 🧠 IDE va Editor fayllari
+# ==========================
+
+# PyCharm / IntelliJ
+.idea/
+# VSCode
+.vscode/
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# ==========================
+# 📦 Docker (agar ishlatsang)
+# ==========================
+
+# Docker build va volume fayllari
+*.pid
+*.tar
+*.bak
+docker-compose.override.yml
+.env.docker
+
+# ==========================
+# ⚙️ Cache / Temporary
+# ==========================
+
+*.tmp
+*.temp
+*.swp
+*.swo
+.cache/
+pytest_cache/
+__pypackages__/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.pytest_cache/
+.dmypy.json
+
+# ==========================
+# 📄 Docs / Exports (ixtiyoriy)
+# ==========================
+
+/exports/
+/backups/
+/docs/generated/
+
+# ==========================
+# 🧰 OS uchun
+# ==========================
+
+# Windows
+ehthumbs.db
+desktop.ini
+# macOS
+.AppleDouble
+.LSOverride
+Icon?
