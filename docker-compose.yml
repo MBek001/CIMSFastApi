@@ -22,12 +22,10 @@ services:
       - db
     env_file:
       - .env
-    ports:
-      - "${APP_PORT}:${APP_PORT}"
+    expose:
+      - "8000"
     command: >
-      sh -c "alembic stamp head &&
-             uvicorn run:app --host ${APP_HOST} --port ${APP_PORT} --workers 4"
-    # NOTE: 'alembic stamp head' replaces 'alembic upgrade head' to avoid re-running migrations on existing tables
+      sh -c "uvicorn run:app --host 0.0.0.0 --port 8000 --workers 4"
     volumes:
       - .:/app
 
@@ -41,9 +39,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      # Map our Nginx config file
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      # SSL certificates and challenge files
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - certbot-etc:/etc/letsencrypt
       - certbot-www:/var/www/certbot
 
