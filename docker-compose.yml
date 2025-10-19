@@ -57,7 +57,7 @@ services:
                --email admin@cognilabs.org
                --agree-tos
                --no-eff-email
-               -d cims.cognilabs.org
+               -d api.project.cims.cognilabs.org
 
 volumes:
   pg_data:
