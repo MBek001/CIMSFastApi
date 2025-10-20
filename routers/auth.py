@@ -3,36 +3,37 @@ from fastapi.security import OAuth2PasswordRequestForm
 from schemes.schemes_auth import *
 from auth_utils.auth_func import *
 from auth_utils.email_service import email_service
-from auth_utils.in_memory_storage import storage
+
 from config import VERIFICATION_CODE_EXPIRE_MINUTES, PASSWORD_RESET_EXPIRE_MINUTES
 from sqlalchemy import func
 router = APIRouter(prefix="/auth",tags=['Autentifikatsiya'])
+from auth_utils.db_code_storage import db_code_storage
 
 
-# 1. RO'YXATDAN O'TISH
+
 @router.post("/register", response_model=SuccessResponse, summary="Ro'yxatdan o'tish")
 async def register(
-        user_data: UserCreate,
-        background_tasks: BackgroundTasks,
-        session: AsyncSession = Depends(get_async_session)
+    user_data: UserCreate,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_async_session),
 ):
     # Email mavjudligini tekshirish
     result = await session.execute(select(user).where(user.c.email == user_data.email))
     existing_user = result.fetchone()
+    print(existing_user)
 
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Bu email allaqachon ro'yxatdan o'tgan"
+            detail="Bu email allaqachon ro'yxatdan o'tgan",
         )
 
-    # Database'da biror user borligini tekshirish
+    # Database'dagi foydalanuvchilar soni
     users_count_result = await session.execute(select(func.count(user.c.id)))
     users_count = users_count_result.scalar()
-
-    # Agar database bo'sh bo'lsa, birinchi userni CEO qilish
     is_first_user = users_count == 0
 
+    # Birinchi user CEO bo‘ladi
     if is_first_user:
         role = UserRole.CEO
         company_code = "ceo"
@@ -41,14 +42,13 @@ async def register(
         is_superuser = True
         print(f"🚀 Birinchi user yaratilmoqda: {user_data.email} - CEO sifatida")
     else:
-        # Qolgan userlar o'z ma'lumotlari bilan
         role = user_data.role
         company_code = user_data.company_code
         is_admin = False
         is_staff = False
         is_superuser = False
 
-    # Yangi foydalanuvchi yaratish
+    # Parolni xeshlash
     hashed_password = get_password_hash(user_data.password)
 
     user_dict = {
@@ -59,78 +59,74 @@ async def register(
         "company_code": company_code,
         "telegram_id": user_data.telegram_id,
         "role": role,
-        "is_active": False,  # Email tasdiqlanmaguncha faol emas
+        "is_active": False,
         "is_admin": is_admin,
         "is_staff": is_staff,
-        "is_superuser": is_superuser
+        "is_superuser": is_superuser,
     }
 
-    # User yaratish va ID olish
     result = await session.execute(insert(user).values(**user_dict))
     user_id = result.inserted_primary_key[0]
 
-    # Agar birinchi user bo'lsa, barcha sahifa ruxsatlarini berish
+    # Birinchi userga barcha sahifalarga ruxsat
     if is_first_user:
         permissions_to_add = [
             {"user_id": user_id, "page_name": PageName.ceo},
             {"user_id": user_id, "page_name": PageName.payment_list},
             {"user_id": user_id, "page_name": PageName.project_toggle},
             {"user_id": user_id, "page_name": PageName.crm},
-            {"user_id": user_id, "page_name": PageName.finance_list}
+            {"user_id": user_id, "page_name": PageName.finance_list},
         ]
-
-        for permission in permissions_to_add:
-            await session.execute(insert(user_page_permission).values(**permission))
-
+        for p in permissions_to_add:
+            await session.execute(insert(user_page_permission).values(**p))
         print(f"✅ CEO ga barcha sahifa ruxsatlari berildi")
 
     await session.commit()
 
-    # Verification kod yaratish
+    # Email verification code
     code = email_service.generate_verification_code()
-    storage.set_code(f"verify_email:{user_data.email}", code, VERIFICATION_CODE_EXPIRE_MINUTES)
+    await db_code_storage.set_code(session, user_id, code, "verify_email")
 
     background_tasks.add_task(email_service.send_verification_email, user_data.email, code)
 
-    # Response message
-    if is_first_user:
-        message = f"🎉 Birinchi CEO admin yaratildi! {user_data.email} ga tasdiqlash kodi yuborildi. Sizga barcha sahifa ruxsatlari berildi."
-    else:
-        message = f"Ro'yxatdan o'tish muvaffaqiyatli! {user_data.email} ga tasdiqlash kodi yuborildi."
+    msg = (
+        f"🎉 Birinchi CEO yaratildi! {user_data.email} ga tasdiqlash kodi yuborildi."
+        if is_first_user
+        else f"Ro'yxatdan o'tish muvaffaqiyatli! {user_data.email} ga tasdiqlash kodi yuborildi."
+    )
 
-    return SuccessResponse(message=message)
+    return SuccessResponse(message=msg)
+
 
 # 2. EMAIL TASDIQLASH
 @router.post("/verify-email", response_model=Token, summary="Email tasdiqlash")
 async def verify_email(
-        verification: EmailVerificationConfirm,
-        session: AsyncSession = Depends(get_async_session)
+    verification: EmailVerificationConfirm,
+    session: AsyncSession = Depends(get_async_session)
 ):
-    # Storage dan kod tekshirish
-    saved_code = storage.get_code(f"verify_email:{verification.email}")
+    # 1. Foydalanuvchini topamiz
+    result = await session.execute(select(user.c.id).where(user.c.email == verification.email))
+    user_id = result.scalar()
+
+    if not user_id:
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+
+    # 2. Bazadagi kodni olish
+    saved_code = await db_code_storage.get_code(session, user_id, "verify_email")
 
     if not saved_code or saved_code != verification.code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Tasdiqlash kodi noto'g'ri yoki muddati tugagan"
-        )
+        raise HTTPException(status_code=400, detail="Tasdiqlash kodi noto‘g‘ri yoki topilmadi")
 
-    # Foydalanuvchini faollashtirish
-    result = await session.execute(
-        update(user).where(user.c.email == verification.email).values(is_active=True)
+    # 3. Foydalanuvchini faollashtirish
+    await session.execute(
+        update(user).where(user.c.id == user_id).values(is_active=True)
     )
-
-    if result.rowcount == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Foydalanuvchi topilmadi"
-        )
-
     await session.commit()
-    storage.delete_code(f"verify_email:{verification.email}")
 
+    # 4. Kodni 0 qilib qo‘yish
+    await db_code_storage.invalidate_code(session, user_id, "verify_email")
 
-    # JWT token yaratish
+    # 5. JWT token qaytarish
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": verification.email},
@@ -140,26 +136,29 @@ async def verify_email(
     return Token(access_token=access_token, token_type="bearer")
 
 
+
 # 3. VERIFICATION KODNI QAYTA YUBORISH
 @router.post("/resend-verification", response_model=SuccessResponse)
 async def resend_verification_code(
-        request: EmailVerificationRequest,
-        background_tasks: BackgroundTasks,
-        session: AsyncSession = Depends(get_async_session)
+    request: EmailVerificationRequest,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_async_session),
 ):
-    # Foydalanuvchi tekshirish
     result = await session.execute(select(user).where(user.c.email == request.email))
     user_data = result.fetchone()
 
     if not user_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Foydalanuvchi topilmadi")
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
 
     if user_data.is_active:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email allaqachon tasdiqlangan")
+        raise HTTPException(status_code=400, detail="Email allaqachon tasdiqlangan")
 
-    # Yangi kod yuborish
+    # user_id olish
+    result_id = await session.execute(select(user.c.id).where(user.c.email == request.email))
+    user_id = result_id.scalar()
+
     code = email_service.generate_verification_code()
-    storage.set_code(f"verify_email:{request.email}", code, VERIFICATION_CODE_EXPIRE_MINUTES)
+    await db_code_storage.set_code(session, user_id, code, "verify_email")
 
     background_tasks.add_task(email_service.send_verification_email, request.email, code)
 
@@ -169,31 +168,26 @@ async def resend_verification_code(
 # 4. LOGIN
 @router.post("/login", response_model=Token, summary="Tizimga kirish")
 async def login(
-        form_data: OAuth2PasswordRequestForm = Depends(),
-        session: AsyncSession = Depends(get_async_session)
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    session: AsyncSession = Depends(get_async_session),
 ):
-    # Foydalanuvchi topish
     result = await session.execute(select(user).where(user.c.email == form_data.username))
     user_data = result.fetchone()
 
     if not user_data or not verify_password(form_data.password, user_data.password):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=401,
             detail="Email yoki parol noto'g'ri",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
     if not user_data.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Akkaunt faol emas. Email tasdiqlashni bajaring."
-        )
+        raise HTTPException(status_code=400, detail="Akkaunt faol emas. Email tasdiqlashni bajaring.")
 
-    # JWT token yaratish
+    # Token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user_data.email},
-        expires_delta=access_token_expires
+        data={"sub": user_data.email}, expires_delta=access_token_expires
     )
 
     return Token(access_token=access_token, token_type="bearer")
@@ -202,17 +196,16 @@ async def login(
 # 5. PAROLNI UNUTISH
 @router.post("/forgot-password", response_model=SuccessResponse)
 async def forgot_password(
-        request: PasswordResetRequest,
-        background_tasks: BackgroundTasks,
-        session: AsyncSession = Depends(get_async_session)
+    request: PasswordResetRequest,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_async_session),
 ):
-    # Foydalanuvchi tekshirish
-    result = await session.execute(select(user).where(user.c.email == request.email))
-    user_data = result.fetchone()
+    result = await session.execute(select(user.c.id).where(user.c.email == request.email))
+    user_id = result.scalar()
 
-    if user_data:
+    if user_id:
         code = email_service.generate_verification_code()
-        storage.set_code(f"reset_password:{request.email}", code, PASSWORD_RESET_EXPIRE_MINUTES)
+        await db_code_storage.set_code(session, user_id, code, "reset_password")
 
         background_tasks.add_task(email_service.send_password_reset_email, request.email, code)
 
@@ -222,29 +215,27 @@ async def forgot_password(
 # 6. PAROLNI TIKLASH
 @router.post("/reset-password", response_model=SuccessResponse)
 async def reset_password(
-        reset_data: PasswordResetConfirm,
-        session: AsyncSession = Depends(get_async_session)
+    reset_data: PasswordResetConfirm,
+    session: AsyncSession = Depends(get_async_session),
 ):
-    # Kod tekshirish
-    saved_code = storage.get_code(f"reset_password:{reset_data.email}")
+    result = await session.execute(select(user.c.id).where(user.c.email == reset_data.email))
+    user_id = result.scalar()
+
+    if not user_id:
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+
+    saved_code = await db_code_storage.get_code(session, user_id, "reset_password")
 
     if not saved_code or saved_code != reset_data.code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Tiklash kodi noto'g'ri yoki muddati tugagan"
-        )
+        raise HTTPException(status_code=400, detail="Kod noto‘g‘ri yoki topilmadi")
 
     # Parolni yangilash
     hashed_password = get_password_hash(reset_data.new_password)
-    result = await session.execute(
-        update(user).where(user.c.email == reset_data.email).values(password=hashed_password)
-    )
-
-    if result.rowcount == 0:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Foydalanuvchi topilmadi")
-
+    await session.execute(update(user).where(user.c.id == user_id).values(password=hashed_password))
     await session.commit()
-    storage.delete_code(f"reset_password:{reset_data.email}")
+
+    # Kodni 0 ga o‘zgartirish
+    await db_code_storage.invalidate_code(session, user_id, "reset_password")
 
     return SuccessResponse(message="Parol muvaffaqiyatli yangilandi")
 

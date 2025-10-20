@@ -17,18 +17,24 @@ app = FastAPI(
     description="Table-based SQLAlchemy bilan Auth Sistema",
 )
 
-# ✅ CORS settings (allow multiple frontends)
-origins = [
-    "https://cims-two.vercel.app",
-    "https://cims.cognilabs.org",
-]
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=[
+#         "https://cims-two.vercel.app",
+#         "https://cims.cognilabs.org",
+#     ],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,          # ruxsat etilgan domenlar
-    allow_credentials=True,         # cookie / tokenlar uchun
-    allow_methods=["*"],            # barcha metodlar
-    allow_headers=["*"],            # barcha headerlar
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ✅ Routers

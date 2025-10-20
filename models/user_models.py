@@ -1,5 +1,6 @@
 from sqlalchemy import (
-    Table, Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, ForeignKey, MetaData
+    Table,UniqueConstraint,
+    Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, ForeignKey, MetaData
 )
 import enum
 
@@ -46,10 +47,11 @@ user_page_permission = Table(
     "user_page_permission",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("user_id", Integer, ForeignKey("user.id"), nullable=False),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
     Column("page_name", Enum(PageName), nullable=False),
-    # unique constraint (user, page_name)
+    UniqueConstraint("user_id", "page_name", name="uq_user_page_permission")
 )
+
 
 # -- CreditCard table --
 credit_card = Table(
@@ -94,4 +96,21 @@ user_payment = Table(
     Column("date", Date, nullable=False),
     Column("summ", DECIMAL(19, 2), nullable=False),
     Column("payment", Boolean, default=False)
+)
+
+
+# -- VerificationCode table --
+verification_code = Table(
+    "verification_code",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False
+    ),
+    Column("code", String(10), nullable=False),
+    Column("type", String(50), nullable=False),  # 'verify_email' yoki 'reset_password'
+    UniqueConstraint("user_id", "type", name="unique_user_code")  # ✅ Har user uchun har type unique
 )
