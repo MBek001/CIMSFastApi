@@ -17,25 +17,19 @@ app = FastAPI(
     description="Table-based SQLAlchemy bilan Auth Sistema",
 )
 
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=[
-#         "https://cims-two.vercel.app",
-#         "https://cims.cognilabs.org",
-#     ],
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://cims-two.vercel.app",
+        "https://cims.cognilabs.org",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+
 
 # ✅ Routers
 app.include_router(auth_router)
