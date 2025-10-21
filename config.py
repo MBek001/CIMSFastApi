@@ -23,13 +23,14 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 3000
 # EMAIL_FROM = os.environ.get('EMAIL_FROM', default=SMTP_USERNAME)
 #
 
-
-
+# -----------------------------
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
 SMTP_HOST = os.environ.get('SMTP_HOST')
 SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
-EMAIL_FROM = os.environ.get('EMAIL_FROM', default=SMTP_USERNAME)
+
 
 
 VERIFICATION_CODE_EXPIRE_MINUTES = 30
