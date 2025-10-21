@@ -202,9 +202,11 @@ async def forgot_password(
 ):
     result = await session.execute(select(user.c.id).where(user.c.email == request.email))
     user_id = result.scalar()
+    print(user_id)
 
     if user_id:
         code = email_service.generate_verification_code()
+        print(code)
         await db_code_storage.set_code(session, user_id, code, "reset_password")
 
         background_tasks.add_task(email_service.send_password_reset_email, request.email, code)

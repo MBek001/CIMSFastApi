@@ -16,6 +16,12 @@ SECRET_KEY = os.environ.get('SECRET_KEY', default='uzbekiston-juda-xavfsiz-kalit
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 3000
 
+# SMTP_HOST = os.environ.get('SMTP_HOST')
+# SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+# SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
+# SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
+# EMAIL_FROM = os.environ.get('EMAIL_FROM', default=SMTP_USERNAME)
+#
 
 
 

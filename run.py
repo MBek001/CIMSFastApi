@@ -19,15 +19,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://cims-two.vercel.app",
-        "https://cims.cognilabs.org",
-    ],
+    allow_origins=["https://cims-two.vercel.app"],  # takror yo‘q
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 
 
