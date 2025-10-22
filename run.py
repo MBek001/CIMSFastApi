@@ -25,7 +25,8 @@ app = FastAPI(
 # CORS (handled only here, not in nginx)
 # --------------------------------------------------
 origins = [
-    "https://cims-two.vercel.app",  # ✅ Frontend domain (single origin)
+    # "https://cims-two.vercel.app",  # ✅ Frontend domain (single origin)
+    "https://cims.cognilabs.org"
 ]
 
 app.add_middleware(
