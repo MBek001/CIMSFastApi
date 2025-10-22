@@ -524,28 +524,7 @@ async def create_customer_api(
         request: Request,
         session: AsyncSession = Depends(get_async_session)
 ):
-    """
-    API orqali mijoz yaratish (token autentifikatsiya bilan)
-    """
-    # Token tekshirish
-    token = request.headers.get('X-API-TOKEN')
-    if token != "your_secret_api_token":  # Bu yerda settings dan oling
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden"
-        )
-
-    # Telefon raqami mavjudligini tekshirish
-    existing_customer_result = await session.execute(
-        select(customer).where(customer.c.phone_number == customer_data.phone_number)
-    )
-    if existing_customer_result.fetchone():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Bu telefon raqami allaqachon mavjud"
-        )
-
-    # Yangi mijoz yaratish
+    
     customer_dict = {
         "full_name": customer_data.full_name,
         "platform": customer_data.platform,
