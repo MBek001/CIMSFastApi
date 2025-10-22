@@ -11,23 +11,35 @@ from routers.finance import router as finance_router
 from routers.finance_advanced import advanced_router as advanced_router
 
 
+# --------------------------------------------------
+# FASTAPI APP CONFIG
+# --------------------------------------------------
 app = FastAPI(
     title="CIMS Table-Based Auth API",
     version="1.0.0",
     description="Table-based SQLAlchemy bilan Auth Sistema",
 )
 
+
+# --------------------------------------------------
+# CORS (handled only here, not in nginx)
+# --------------------------------------------------
+origins = [
+    "https://cims-two.vercel.app",  # ✅ Frontend domain (single origin)
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://cims-two.vercel.app"],  # takror yo‘q
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-
-# ✅ Routers
+# --------------------------------------------------
+# ROUTERS
+# --------------------------------------------------
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(crm_router)
@@ -36,13 +48,14 @@ app.include_router(finance_router)
 app.include_router(advanced_router)
 
 
-# ✅ Custom 404 redirect
+# --------------------------------------------------
+# ERROR & ROOT HANDLERS
+# --------------------------------------------------
 @app.exception_handler(404)
 async def custom_404_handler(request: Request, exc: HTTPException):
     return RedirectResponse(url="/auth/login")
 
 
-# ✅ Root endpoint
 @app.get("/")
 async def root():
     return {
@@ -52,7 +65,9 @@ async def root():
     }
 
 
-# ✅ Fix main entrypoint (was '__run__', should be '__main__')
+# --------------------------------------------------
+# ENTRYPOINT
+# --------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("run:app", host="0.0.0.0", port=8000, reload=True)
