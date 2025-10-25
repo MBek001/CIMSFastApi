@@ -12,7 +12,7 @@ from config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 
 # Ikki xil authentication usuli
 security = HTTPBearer(auto_error=False)  # Token kiritish uchun
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)  # Login form uchun
+# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)  # Login form uchun
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -40,28 +40,18 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-
 async def get_current_user(
-        http_credentials: HTTPAuthorizationCredentials = Depends(security),
-        oauth2_token: str = Depends(oauth2_scheme),
-        session: AsyncSession = Depends(get_async_session)
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    session: AsyncSession = Depends(get_async_session)
 ):
-    """Joriy foydalanuvchini olish (ikki usul orqali)"""
+    """Foydalanuvchini token orqali aniqlash"""
+    token = credentials.credentials
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Token noto'g'ri yoki mavjud emas",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
-    # Token ni olish (HTTPBearer yoki OAuth2PasswordBearer orqali)
-    token = None
-    if http_credentials:
-        token = http_credentials.credentials
-    elif oauth2_token:
-        token = oauth2_token
-
-    if not token:
-        raise credentials_exception
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -73,7 +63,6 @@ async def get_current_user(
 
     result = await session.execute(select(user).where(user.c.email == email))
     user_data = result.fetchone()
-
     if not user_data:
         raise credentials_exception
 
@@ -81,7 +70,7 @@ async def get_current_user(
 
 
 def get_current_active_user(current_user=Depends(get_current_user)):
-    """Faol foydalanuvchini olish"""
+    """Faol foydalanuvchini tekshirish"""
     if not current_user.is_active:
         raise HTTPException(status_code=400, detail="Foydalanuvchi faol emas")
     return current_user

@@ -133,6 +133,7 @@ class PageName(str, Enum):
     project_toggle = "project_toggle"
     crm = "crm"
     finance_list = "finance_list"
+    update_list = "update_list"
 
 
 class UserPermissionUpdateRequest(BaseModel):
@@ -145,6 +146,7 @@ class UserPermissionUpdateRequest(BaseModel):
     project_toggle: bool = Field(default=False, description="Wordpress sahifasiga ruxsat")
     crm: bool = Field(default=False, description="Sales CRM sahifasiga ruxsat")
     finance_list: bool = Field(default=False, description="Finance sahifasiga ruxsat")
+    update_list: bool = Field(default=False, description="Update sahifasiga ruxsat")
 
     class Config:
         schema_extra = {
@@ -153,7 +155,8 @@ class UserPermissionUpdateRequest(BaseModel):
                 "payment_list": False,
                 "project_toggle": True,
                 "crm": False,
-                "finance_list": True
+                "finance_list": True,
+                "update_list": True,
             }
         }
 
@@ -164,7 +167,8 @@ class UserPermissionUpdateRequest(BaseModel):
             "payment_list": self.payment_list,
             "project_toggle": self.project_toggle,
             "crm": self.crm,
-            "finance_list": self.finance_list
+            "finance_list": self.finance_list,
+            "update_list": self.update_list,
         }
 
 
@@ -179,6 +183,7 @@ class UserPermissionAddRequest(BaseModel):
     project_toggle: bool = Field(default=False, description="Wordpress sahifasiga ruxsat")
     crm: bool = Field(default=False, description="Sales CRM sahifasiga ruxsat")
     finance_list: bool = Field(default=False, description="Finance sahifasiga ruxsat")
+    update_list: bool = Field(default=False, description="Update sahifasiga ruxsat")
 
     class Config:
         schema_extra = {
@@ -187,7 +192,8 @@ class UserPermissionAddRequest(BaseModel):
                 "payment_list": False,
                 "project_toggle": True,
                 "crm": False,
-                "finance_list": True
+                "finance_list": True,
+                "update_list": True
             }
         }
 
@@ -198,7 +204,8 @@ class UserPermissionAddRequest(BaseModel):
             "payment_list": self.payment_list,
             "project_toggle": self.project_toggle,
             "crm": self.crm,
-            "finance_list": self.finance_list
+            "finance_list": self.finance_list,
+            "update_list": self.update_list,
         }
 
 class UserPermissionResponse(BaseModel):
@@ -224,14 +231,16 @@ class UserPermissionResponse(BaseModel):
                     "payment_list": False,
                     "project_toggle": True,
                     "crm": False,
-                    "finance_list": True
+                    "finance_list": True,
+                    "update_list":True
                 },
                 "permissions_display": {
                     "Dashboard": True,
                     "Payment": False,
                     "Wordpress": True,
                     "Sales CRM": False,
-                    "Finance": True
+                    "Finance": True,
+                    "Update": True
                 },
                 "active_permissions_count": 3,
                 "total_available_pages": 5
@@ -275,3 +284,30 @@ class SuccessResponse(BaseModel):
                 "message": "Operatsiya muvaffaqiyatli bajarildi"
             }
         }
+
+
+
+# --- DAILY METRICS SCHEMES ---
+class TodayCustomerInfo(BaseModel):
+    id: int
+    full_name: str
+    platform: str
+    username: Optional[str] = None
+    phone_number: str
+    status: str
+    assistant_name: Optional[str] = None
+    created_at: str  # ISO
+
+    class Config:
+        from_attributes = True
+
+
+class DailyMetricsResponse(BaseModel):
+    today_customers: List[TodayCustomerInfo]
+    need_to_call_count: int
+    total_balance_uzs: float
+    total_balance_formatted: str
+    due_payments_today: int
+
+    class Config:
+        from_attributes = True

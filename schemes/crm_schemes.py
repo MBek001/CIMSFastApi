@@ -1,7 +1,15 @@
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 from datetime import datetime
+from enum import Enum
 from models.admin_models import CustomerStatus
+
+
+# --- ENUMS ---
+class ConversationLanguageEnum(str, Enum):
+    UZ = "uz"
+    RU = "ru"
+    EN = "en"
 
 
 # --- BASE RESPONSE MODELS ---
@@ -18,42 +26,46 @@ class CreateResponse(BaseModel):
 class CustomerCreateRequest(BaseModel):
     full_name: str = Field(..., min_length=1, max_length=255, description="Mijozning to'liq ismi")
     platform: str = Field(..., min_length=1, max_length=255, description="Platform nomi")
-    username: str = Field(..., min_length=1, max_length=255, description="Foydalanuvchi nomi")
+    username: Optional[str] = Field(None, max_length=255, description="Foydalanuvchi nomi")
     phone_number: str = Field(..., min_length=1, max_length=20, description="Telefon raqami")
     status: CustomerStatus = Field(..., description="Mijoz holati")
-    assistant_name: str = Field(..., min_length=1, max_length=255, description="Yordamchi ismi")
+    assistant_name: Optional[str] = Field(None, max_length=255, description="Yordamchi ismi")
     notes: Optional[str] = Field(None, description="Qo'shimcha eslatmalar")
+    conversation_language: Optional[ConversationLanguageEnum] = Field(
+        default=ConversationLanguageEnum.UZ,
+        description="Suhbat tili"
+    )
 
     @validator('phone_number')
     def validate_phone_number(cls, v):
-        # Telefon raqami validatsiyasi
         if not v.strip():
             raise ValueError('Telefon raqami bo\'sh bo\'lishi mumkin emas')
         return v.strip()
 
-    @validator('full_name', 'platform', 'username', 'assistant_name')
+    @validator('full_name', 'platform')
     def validate_not_empty(cls, v):
         if not v.strip():
             raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
         return v.strip()
 
+    @validator('username', 'assistant_name')
+    def validate_optional_not_empty(cls, v):
+        if v is not None and not v.strip():
+            raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
+        return v.strip() if v else v
+
 
 class CustomerUpdateRequest(BaseModel):
     full_name: Optional[str] = Field(None, min_length=1, max_length=255, description="Mijozning to'liq ismi")
     platform: Optional[str] = Field(None, min_length=1, max_length=255, description="Platform nomi")
-    username: Optional[str] = Field(None, min_length=1, max_length=255, description="Foydalanuvchi nomi")
+    username: Optional[str] = Field(None, max_length=255, description="Foydalanuvchi nomi")
     phone_number: Optional[str] = Field(None, min_length=1, max_length=20, description="Telefon raqami")
     status: Optional[CustomerStatus] = Field(None, description="Mijoz holati")
-    assistant_name: Optional[str] = Field(None, min_length=1, max_length=255, description="Yordamchi ismi")
+    assistant_name: Optional[str] = Field(None, max_length=255, description="Yordamchi ismi")
     notes: Optional[str] = Field(None, description="Qo'shimcha eslatmalar")
+    conversation_language: Optional[ConversationLanguageEnum] = Field(None, description="Suhbat tili")
 
-    @validator('phone_number')
-    def validate_phone_number(cls, v):
-        if v is not None and not v.strip():
-            raise ValueError('Telefon raqami bo\'sh bo\'lishi mumkin emas')
-        return v.strip() if v else v
-
-    @validator('full_name', 'platform', 'username', 'assistant_name')
+    @validator('phone_number', 'full_name', 'platform', 'username', 'assistant_name')
     def validate_not_empty(cls, v):
         if v is not None and not v.strip():
             raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
@@ -69,11 +81,14 @@ class CustomerResponse(BaseModel):
     id: int
     full_name: str
     platform: str
-    username: str
+    username: Optional[str]
     phone_number: str
     status: str
-    assistant_name: str
+    assistant_name: Optional[str]
     notes: Optional[str]
+    audio_file_id: Optional[str]
+    audio_url: Optional[str] = None  # ✅ Yangi maydon qo‘shildi
+    conversation_language: Optional[str]
     created_at: str
 
     class Config:
@@ -105,6 +120,9 @@ class CustomerListResponse(BaseModel):
     status_choices: List[StatusChoice] = Field(..., description="Status tanlovlari")
     permissions: List[str] = Field(..., description="Foydalanuvchi huquqlari")
     selected_status: Optional[str] = Field(None, description="Tanlangan status")
+    period_stats: Dict[str, int] = Field(
+        ..., description="Bugungi, haftalik, oylik va 3 oylik mijozlar soni"
+    )
 
 
 # --- SEARCH AND FILTER MODELS ---
@@ -114,16 +132,20 @@ class CustomerSearchRequest(BaseModel):
     show_all: bool = Field(False, description="Barcha mijozlarni ko'rsatish")
 
 
-# --- API TOKEN MODEL (External API uchun) ---
-class CustomerCreateAPIRequest(BaseModel):
+# --- API TOKEN MODELS (External API uchun) ---
+class CustomerAPICreateRequest(BaseModel):
     """Tashqi API orqali mijoz yaratish uchun"""
     full_name: str = Field(..., min_length=1, max_length=255)
     platform: str = Field(..., min_length=1, max_length=255)
-    username: str = Field(..., min_length=1, max_length=255)
+    username: Optional[str] = Field(None, max_length=255)
     phone_number: str = Field(..., min_length=1, max_length=20)
     status: CustomerStatus = Field(default=CustomerStatus.need_to_call)
-    assistant_name: str = Field(..., min_length=1, max_length=255)
+    assistant_name: Optional[str] = Field(None, max_length=255)
     notes: Optional[str] = Field(None)
+    conversation_language: Optional[ConversationLanguageEnum] = Field(
+        default=ConversationLanguageEnum.UZ,
+        description="Suhbat tili"
+    )
 
     @validator('phone_number')
     def validate_phone_number(cls, v):
@@ -131,43 +153,17 @@ class CustomerCreateAPIRequest(BaseModel):
             raise ValueError('Telefon raqami bo\'sh bo\'lishi mumkin emas')
         return v.strip()
 
-    @validator('full_name', 'platform', 'username', 'assistant_name')
+    @validator('full_name', 'platform')
     def validate_not_empty(cls, v):
         if not v.strip():
             raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
         return v.strip()
 
-
-class CustomerAPIResponse(BaseModel):
-    """Tashqi API javob modeli"""
-    id: int
-    full_name: str
-    platform: str
-    username: str
-    phone_number: str
-    status: str
-    assistant_name: str
-    notes: Optional[str]
-    created_at: str
-    message: str = "Mijoz muvaffaqiyatli yaratildi"
-
-    class Config:
-        from_attributes = True
-
-
-
-
-
-
-# --- API uchun Customer Create Schema ---
-class CustomerAPICreateRequest(BaseModel):
-    full_name: str
-    platform: str
-    username:Optional[str] = None
-    phone_number: str
-    status: CustomerStatus
-    assistant_name:  Optional[str] = None
-    notes: Optional[str] = None
+    @validator('username', 'assistant_name')
+    def validate_optional_not_empty(cls, v):
+        if v is not None and not v.strip():
+            raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
+        return v.strip() if v else v
 
     class Config:
         from_attributes = True
@@ -179,6 +175,33 @@ class CustomerAPICreateRequest(BaseModel):
                 "phone_number": "+998901234567",
                 "status": "need_to_call",
                 "assistant_name": "Assistant Name",
-                "notes": "Qo'shimcha ma'lumotlar"
+                "notes": "Qo'shimcha ma'lumotlar",
+                "conversation_language": "uz"
             }
         }
+
+
+class CustomerAPIResponse(BaseModel):
+    """Tashqi API javob modeli"""
+    id: int
+    full_name: str
+    platform: str
+    username: Optional[str]
+    phone_number: str
+    status: str
+    assistant_name: Optional[str]
+    notes: Optional[str]
+    audio_file_id: Optional[str]
+    conversation_language: Optional[str]
+    created_at: str
+    message: str = "Mijoz muvaffaqiyatli yaratildi"
+
+    class Config:
+        from_attributes = True
+
+
+# --- AUDIO RESPONSE MODEL ---
+class AudioResponse(BaseModel):
+    """Audio URL javob modeli"""
+    audio_url: str
+    file_id: str

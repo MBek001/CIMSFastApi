@@ -1,3 +1,4 @@
+# routers/finance.py
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,10 +16,13 @@ from models.user_models import user, user_page_permission, UserRole, PageName, c
 from schemes.schemes_finance import (
     FinanceCreateRequest, FinanceUpdateRequest, FinanceResponse, FinanceListResponse,
     TransferRequest, DashboardResponse, SuccessResponse, CreateResponse,
-    DonationResetResponse, BalanceInfo, ExchangeRateResponse
+    DonationResetResponse, BalanceInfo, ExchangeRateResponse, CardTopUpRequest
 )
 from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
+
+# Valyuta util'lari
+from utils.currency import CurrencyService, get_last_rate_from_db
 
 router = APIRouter(prefix="/finance", tags=['Finance Management'])
 
@@ -34,75 +38,78 @@ def require_finance_access(current_user=Depends(get_current_active_user)):
     return current_user
 
 
-# --- HELPER FUNCTIONS ---
-async def get_current_exchange_rate(session: AsyncSession) -> Decimal:
-    """Joriy valyuta kursini olish"""
-    result = await session.execute(
-        select(exchange_rate.c.usd_to_uzs)
-        .order_by(exchange_rate.c.updated_at.desc())
-        .limit(1)
-    )
-    rate = result.scalar()
-    return rate if rate else Decimal('12700.00')
+# --- Hamma joy faqat DB'dagi so‘nggi kursni ishlatishi uchun getter ---
+async def get_db_exchange_rate(session: AsyncSession) -> Decimal:
+    return await get_last_rate_from_db(session)
 
 
+# --- Helper: Donation balansini olish ---
 async def get_donation_balance(session: AsyncSession) -> Decimal:
-    """Donation balansini olish"""
     result = await session.execute(select(donation_balance.c.total_donation))
     balance = result.scalar()
     return balance if balance else Decimal('0')
 
 
-async def calculate_card_balances(session: AsyncSession):
-    """Karta balanslarini hisoblash"""
-    current_rate = await get_current_exchange_rate(session)
+# --- Helper: karta nomini ko'rsatish ---
+def get_card_display(card_value: str) -> str:
+    card_displays = {
+        "card1": "Company Account UZB",
+        "card2": "Uzcard UZB",
+        "card3": "Company Account US"
+    }
+    return card_displays.get(card_value, card_value)
 
-    card1_balance = Decimal('0')  # Company Account UZB (UZS)
-    card2_balance = Decimal('0')  # Uzcard UZB (UZS)
-    card3_balance = Decimal('0')  # Company Account US (USD)
+
+# --- Helper: Balans hisoblash (faqat DB kursi bilan) ---
+async def calculate_card_balances(session: AsyncSession):
+    current_rate = await get_db_exchange_rate(session)
+
+    card1_balance = Decimal('0')  # UZS
+    card2_balance = Decimal('0')  # UZS
+    card3_balance = Decimal('0')  # USD
     potential_income = Decimal('0')
     potential_outcome = Decimal('0')
 
     today = datetime.now().date()
     next_30 = today + timedelta(days=30)
 
-    # Barcha finance yozuvlarini olish
     result = await session.execute(select(finance))
-    finances = result.fetchall()
+    finances_rows = result.fetchall()
 
-    for fin in finances:
+    for fin in finances_rows:
         # Donation ni mos valyutaga aylantirish
-        donation_in_currency = fin.donation
         if fin.currency == CurrencyType.USD:
             donation_in_currency = fin.donation / fin.exchange_rate
         else:
             donation_in_currency = fin.donation
 
-        # Net amount hisoblash
+        # Net amount (sign bilan)
         if fin.type == FinanceType.incomer:
             netto_amount = fin.summ - donation_in_currency
-        else:  # outcomer
+        else:
             netto_amount = -fin.summ
 
+        # UZSga aylantirish (UZS bo‘lsa o‘zini olamiz)
         netto_amount_uzs = netto_amount * current_rate if fin.currency == CurrencyType.USD else netto_amount
 
-        # Real tranzaksiyalar balansga ta'sir qiladi
+        # Real tranzaksiyalar — balansga ta'sir qiladi
         if fin.transaction_status == TransactionStatus.real:
             if fin.card == CardType.card1:
                 card1_balance += netto_amount_uzs
             elif fin.card == CardType.card2:
                 card2_balance += netto_amount_uzs
             elif fin.card == CardType.card3:
+                # USD kartasi balansini USD ko‘rinishida yuritamiz
                 card3_balance += netto_amount
 
-        # Statistik tranzaksiyalar potential balansga ta'sir qiladi
+        # Statistik tranzaksiyalar — potentsialga ta'sir (keyingi 30 kunda)
         elif fin.transaction_status == TransactionStatus.statistical and today < fin.date <= next_30:
             if fin.type == FinanceType.incomer:
                 potential_income += netto_amount_uzs
             else:
                 potential_outcome += abs(netto_amount_uzs)
 
-        # Monthly tranzaksiyalar
+        # Monthly takrorlar
         if fin.status == FinanceStatus.monthly and fin.initial_date:
             repeat_date = fin.initial_date
             while repeat_date <= next_30:
@@ -120,7 +127,7 @@ async def calculate_card_balances(session: AsyncSession):
                     else:
                         potential_outcome += abs(netto_amount_uzs)
 
-                # Bir oy qo'shish
+                # Keyingi oyga o'tkazish
                 if repeat_date.month == 12:
                     repeat_date = repeat_date.replace(year=repeat_date.year + 1, month=1)
                 else:
@@ -149,74 +156,61 @@ async def finance_dashboard(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Finance dashboard - barcha finance ma'lumotlari va balanslar
-    """
-    # Barcha finance yozuvlarini olish
-    result = await session.execute(
-        select(finance).order_by(finance.c.date.desc())
-    )
-    finances = result.fetchall()
+    # Barcha finance yozuvlari
+    result = await session.execute(select(finance).order_by(finance.c.date.desc()))
+    finances_rows = result.fetchall()
 
-    # User permissions olish
+    # Permissions
     permissions_result = await session.execute(
         select(user_page_permission.c.page_name)
         .where(user_page_permission.c.user_id == current_user.id)
     )
     permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
 
-    # Permission nomlarini o'zgartirish
     page_order = ['ceo', 'payment_list', 'project_toggle', 'crm', 'finance_list']
     modified_permissions = []
     for page in page_order:
         if page in permissions:
-            if page == 'ceo':
-                modified_permissions.append('Dashboard')
-            elif page == 'payment_list':
-                modified_permissions.append('Payment')
-            elif page == 'project_toggle':
-                modified_permissions.append('Wordpress')
-            elif page == 'crm':
-                modified_permissions.append('Sales CRM')
-            elif page == 'finance_list':
-                modified_permissions.append('Finance')
-            else:
-                modified_permissions.append(page)
+            modified_permissions.append({
+                'ceo': 'Dashboard',
+                'payment_list': 'Payment',
+                'project_toggle': 'Wordpress',
+                'crm': 'Sales CRM',
+                'finance_list': 'Finance'
+            }.get(page, page))
 
-    # Balanslarni hisoblash
+    # Balans
     balances = await calculate_card_balances(session)
 
     # Donation balance
     donation_bal = await get_donation_balance(session)
 
-    # Exchange rate
-    current_rate = await get_current_exchange_rate(session)
+    # Exchange rate (faqat DB)
+    current_rate = await get_db_exchange_rate(session)
 
-    # Member credit cards
+    # Members va kartalari
     members_result = await session.execute(
-        select(user.c.id, user.c.name, user.c.surname)
-        .where(user.c.role == UserRole.member)
+        select(user.c.id, user.c.name, user.c.surname).where(user.c.role == UserRole.member)
     )
     members = members_result.fetchall()
 
     member_data = []
-    for member in members:
+    for m in members:
         cards_result = await session.execute(
             select(credit_card.c.card_number, credit_card.c.is_primary)
-            .where(credit_card.c.user_id == member.id, credit_card.c.is_active == True)
+            .where(credit_card.c.user_id == m.id, credit_card.c.is_active == True)
         )
         cards = cards_result.fetchall()
-
         member_data.append({
-            "name": member.name,
-            "surname": member.surname,
-            "cards": [{"card_number": card.card_number, "is_primary": card.is_primary} for card in cards]
+            "name": m.name,
+            "surname": m.surname,
+            "cards": [{"card_number": c.card_number, "is_primary": c.is_primary} for c in cards]
         })
 
-    # Finance list yaratish
+    # Finance list
     finance_list = []
-    for fin in finances:
-        finance_dict = {
+    for fin in finances_rows:
+        finance_list.append({
             "id": fin.id,
             "type": fin.type.value,
             "status": fin.status.value,
@@ -232,8 +226,7 @@ async def finance_dashboard(
             "exchange_rate": float(fin.exchange_rate) if fin.exchange_rate else 0,
             "transaction_status": fin.transaction_status.value,
             "initial_date": fin.initial_date.isoformat() if fin.initial_date else None
-        }
-        finance_list.append(finance_dict)
+        })
 
     return DashboardResponse(
         finances=finance_list,
@@ -251,16 +244,6 @@ async def finance_dashboard(
     )
 
 
-def get_card_display(card_value: str) -> str:
-    """Karta nomini ko'rsatish uchun"""
-    card_displays = {
-        "card1": "Company Account UZB",
-        "card2": "Uzcard UZB",
-        "card3": "Company Account US"
-    }
-    return card_displays.get(card_value, card_value)
-
-
 # --- 2. FINANCE YARATISH ---
 @router.post("/create", response_model=CreateResponse, summary="Yangi finance yozuvi yaratish")
 async def create_finance(
@@ -268,40 +251,25 @@ async def create_finance(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Yangi finance yozuvi yaratish
-    """
-    # Exchange rate olish
-    current_rate = await get_current_exchange_rate(session)
+    current_rate = await get_db_exchange_rate(session)
 
     # Currency ni card asosida belgilash
-    currency = CurrencyType.UZS
-    if finance_data.card in [CardType.card1, CardType.card2]:
-        currency = CurrencyType.UZS
-    elif finance_data.card == CardType.card3:
-        currency = CurrencyType.USD
+    currency = CurrencyType.UZS if finance_data.card in [CardType.card1, CardType.card2] else CurrencyType.USD
 
     # Donation hisoblash
     donation_amount = Decimal('0')
     if finance_data.type == FinanceType.incomer and finance_data.donation_percentage > 0:
         donation_in_currency = finance_data.summ * (finance_data.donation_percentage / 100)
-        if currency == CurrencyType.USD:
-            donation_amount = donation_in_currency * current_rate
-        else:
-            donation_amount = donation_in_currency
+        donation_amount = donation_in_currency if currency == CurrencyType.UZS else (donation_in_currency * current_rate)
 
         # Donation balance yangilash
         current_donation = await get_donation_balance(session)
-        await session.execute(
-            update(donation_balance).values(total_donation=current_donation + donation_amount)
-        )
+        await session.execute(update(donation_balance).values(total_donation=current_donation + donation_amount))
 
-    # Initial date belgilash (monthly uchun)
-    initial_date = None
-    if finance_data.status == FinanceStatus.monthly:
-        initial_date = finance_data.date
+    # Initial date (monthly)
+    initial_date = finance_data.date if finance_data.status == FinanceStatus.monthly else None
 
-    # Finance yaratish
+    # Yozuv
     finance_dict = {
         "type": finance_data.type,
         "status": finance_data.status,
@@ -321,10 +289,7 @@ async def create_finance(
     result = await session.execute(insert(finance).values(**finance_dict))
     await session.commit()
 
-    return CreateResponse(
-        message="Finance yozuvi muvaffaqiyatli yaratildi",
-        id=result.inserted_primary_key[0]
-    )
+    return CreateResponse(message="Finance yozuvi muvaffaqiyatli yaratildi", id=result.inserted_primary_key[0])
 
 
 # --- 3. FINANCE YANGILASH ---
@@ -335,59 +300,35 @@ async def update_finance(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Mavjud finance yozuvini yangilash
-    """
-    # Finance mavjudligini tekshirish
-    existing_result = await session.execute(
-        select(finance).where(finance.c.id == finance_id)
-    )
+    existing_result = await session.execute(select(finance).where(finance.c.id == finance_id))
     existing_finance = existing_result.fetchone()
-
     if not existing_finance:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Finance yozuvi topilmadi"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance yozuvi topilmadi")
 
-    # Exchange rate olish
-    current_rate = await get_current_exchange_rate(session)
+    current_rate = await get_db_exchange_rate(session)
 
-    # Eski donation ni donation balance dan ayirish
+    # Eski donation ni kamaytirib qo'yamiz
     if existing_finance.donation:
         current_donation = await get_donation_balance(session)
-        await session.execute(
-            update(donation_balance).values(total_donation=current_donation - existing_finance.donation)
-        )
+        await session.execute(update(donation_balance).values(total_donation=current_donation - existing_finance.donation))
 
-    # Currency belgilash
-    currency = CurrencyType.UZS
-    if finance_data.card in [CardType.card1, CardType.card2]:
-        currency = CurrencyType.UZS
-    elif finance_data.card == CardType.card3:
-        currency = CurrencyType.USD
+    # Currency
+    currency = CurrencyType.UZS if finance_data.card in [CardType.card1, CardType.card2] else CurrencyType.USD
 
-    # Yangi donation hisoblash
+    # Yangi donation
     donation_amount = Decimal('0')
     if finance_data.type == FinanceType.incomer and finance_data.donation_percentage > 0:
         donation_in_currency = finance_data.summ * (finance_data.donation_percentage / 100)
-        if currency == CurrencyType.USD:
-            donation_amount = donation_in_currency * current_rate
-        else:
-            donation_amount = donation_in_currency
+        donation_amount = donation_in_currency if currency == CurrencyType.UZS else (donation_in_currency * current_rate)
 
-        # Donation balance yangilash
         current_donation = await get_donation_balance(session)
-        await session.execute(
-            update(donation_balance).values(total_donation=current_donation + donation_amount)
-        )
+        await session.execute(update(donation_balance).values(total_donation=current_donation + donation_amount))
 
-    # Initial date belgilash
+    # Initial date
     initial_date = existing_finance.initial_date
     if finance_data.status == FinanceStatus.monthly and not initial_date:
         initial_date = finance_data.date
 
-    # Yangilanadigan ma'lumotlar
     update_data = {
         "type": finance_data.type,
         "status": finance_data.status,
@@ -404,11 +345,8 @@ async def update_finance(
         "initial_date": initial_date
     }
 
-    await session.execute(
-        update(finance).where(finance.c.id == finance_id).values(**update_data)
-    )
+    await session.execute(update(finance).where(finance.c.id == finance_id).values(**update_data))
     await session.commit()
-
     return SuccessResponse(message="Finance yozuvi muvaffaqiyatli yangilandi")
 
 
@@ -419,70 +357,40 @@ async def delete_finance(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Finance yozuvini o'chirish
-    """
-    # Finance mavjudligini tekshirish
-    existing_result = await session.execute(
-        select(finance).where(finance.c.id == finance_id)
-    )
+    existing_result = await session.execute(select(finance).where(finance.c.id == finance_id))
     existing_finance = existing_result.fetchone()
-
     if not existing_finance:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Finance yozuvi topilmadi"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance yozuvi topilmadi")
 
-    # Donation balance ni yangilash
     if existing_finance.donation:
         current_donation = await get_donation_balance(session)
-        await session.execute(
-            update(donation_balance).values(total_donation=current_donation - existing_finance.donation)
-        )
+        await session.execute(update(donation_balance).values(total_donation=current_donation - existing_finance.donation))
 
-    # Finance o'chirish
     await session.execute(delete(finance).where(finance.c.id == finance_id))
     await session.commit()
-
     return SuccessResponse(message="Finance yozuvi muvaffaqiyatli o'chirildi")
 
 
-# --- 5. TRANSFER (Kartalar o'rtasida pul o'tkazish) ---
+# --- 5. TRANSFER ---
 @router.post("/transfer", response_model=SuccessResponse, summary="Kartalar o'rtasida transfer")
 async def finance_transfer(
         transfer_data: TransferRequest,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Kartalar o'rtasida pul o'tkazish
-    """
     if transfer_data.from_card == transfer_data.to_card:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Bir xil kartaga o'tkazib bo'lmaydi"
-        )
-
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bir xil kartaga o'tkazib bo'lmaydi")
     if transfer_data.amount <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Transfer summasi 0 dan katta bo'lishi kerak"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer summasi 0 dan katta bo'lishi kerak")
 
-    current_rate = await get_current_exchange_rate(session)
+    current_rate = await get_db_exchange_rate(session)
 
-    # From card currency
-    from_currency = CurrencyType.UZS if transfer_data.from_card in [CardType.card1,
-                                                                    CardType.card2] else CurrencyType.USD
-
-    # Tax hisoblash
+    from_currency = CurrencyType.UZS if transfer_data.from_card in [CardType.card1, CardType.card2] else CurrencyType.USD
     tax_amount = transfer_data.amount * (transfer_data.tax_percentage / 100)
     net_amount = transfer_data.amount - tax_amount
-
     today = datetime.now().date()
 
-    # From card dan chiqarish
+    # From card (outcome)
     from_finance_dict = {
         "type": FinanceType.outcomer,
         "status": FinanceStatus.one_time,
@@ -497,24 +405,20 @@ async def finance_transfer(
         "exchange_rate": current_rate,
         "transaction_status": TransactionStatus.real
     }
-
-    from_result = await session.execute(insert(finance).values(**from_finance_dict))
+    await session.execute(insert(finance).values(**from_finance_dict))
 
     # To card currency
     to_currency = CurrencyType.UZS if transfer_data.to_card in [CardType.card1, CardType.card2] else CurrencyType.USD
 
-    # Currency conversion
+    # Convert
     if transfer_data.from_card == CardType.card3 and transfer_data.to_card in [CardType.card1, CardType.card2]:
-        # USD dan UZS ga
         net_amount_converted = net_amount * current_rate
     elif transfer_data.from_card in [CardType.card1, CardType.card2] and transfer_data.to_card == CardType.card3:
-        # UZS dan USD ga
         net_amount_converted = net_amount / current_rate
     else:
-        # Bir xil valyuta
         net_amount_converted = net_amount
 
-    # To card ga qo'shish
+    # To card (income)
     to_finance_dict = {
         "type": FinanceType.incomer,
         "status": FinanceStatus.one_time,
@@ -529,12 +433,11 @@ async def finance_transfer(
         "exchange_rate": current_rate,
         "transaction_status": TransactionStatus.real
     }
-
-    to_result = await session.execute(insert(finance).values(**to_finance_dict))
+    await session.execute(insert(finance).values(**to_finance_dict))
     await session.commit()
 
     return SuccessResponse(
-        message=f"Transfer muvaffaqiyatli amalga oshirildi. From: {transfer_data.from_card.value}, To: {transfer_data.to_card.value}, Amount: {transfer_data.amount}, Net: {net_amount_converted:.2f}"
+        message=f"Transfer OK. From: {transfer_data.from_card.value}, To: {transfer_data.to_card.value}, Amount: {transfer_data.amount}, Net: {net_amount_converted:.2f}"
     )
 
 
@@ -544,99 +447,66 @@ async def reset_donation_balance(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Donation balansini 0 ga reset qilish (faqat CEO yoki Finance Director)
-    """
     if current_user.company_code not in ["ceo", "finance_director"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Faqat CEO yoki Finance Director donation balansini reset qila oladi"
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Faqat CEO yoki Finance Director donation balansini reset qila oladi")
 
-    await session.execute(
-        update(donation_balance).values(total_donation=Decimal('0'))
-    )
+    await session.execute(update(donation_balance).values(total_donation=Decimal('0')))
     await session.commit()
 
-    return DonationResetResponse(
-        success=True,
-        message="Donation balansi muvaffaqiyatli 0 qilindi",
-        new_balance=0.0
-    )
+    return DonationResetResponse(success=True, message="Donation balansi 0 qilindi", new_balance=0.0)
 
 
-# --- 7. EXCHANGE RATE OLISH VA YANGILASH ---
-@router.get("/exchange-rate", response_model=ExchangeRateResponse, summary="Joriy valyuta kursini olish")
+# --- 7. EXCHANGE RATE (DB'dan ko'rish) ---
+@router.get("/exchange-rate", response_model=ExchangeRateResponse, summary="Joriy valyuta kursini olish (DB)")
 async def get_exchange_rate(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Joriy USD/UZS valyuta kursini olish
-    """
-    current_rate = await get_current_exchange_rate(session)
-
-    return ExchangeRateResponse(
-        usd_to_uzs=float(current_rate),
-        formatted_rate=f"{current_rate:,.2f}"
-    )
+    current_rate = await get_db_exchange_rate(session)
+    return ExchangeRateResponse(usd_to_uzs=float(current_rate), formatted_rate=f"{current_rate:,.2f}")
 
 
-@router.put("/exchange-rate/{new_rate}", response_model=SuccessResponse, summary="Valyuta kursini yangilash")
-async def update_exchange_rate(
-        new_rate: float,
-        session: AsyncSession = Depends(get_async_session),
-        current_user=Depends(require_finance_access)
+# --- 8. EXCHANGE RATE (LIVE API + DBga yozish) ---
+@router.get("/exchange-rate/live", response_model=ExchangeRateResponse, summary="USD→UZS jonli kurs (API)")
+async def get_live_exchange_rate(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_finance_access),
 ):
     """
-    Valyuta kursini yangilash (faqat CEO)
+    Tashqi API dan kursni olib (CurrencyFreaks), DBga yozadi va javob qaytaradi.
     """
-    if current_user.company_code != "ceo":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Faqat CEO valyuta kursini yangilashi mumkin"
-        )
-
-    if new_rate <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Valyuta kursi 0 dan katta bo'lishi kerak"
-        )
-
-    # Yangi exchange rate yozuvi yaratish
-    rate_dict = {
-        "usd_to_uzs": Decimal(str(new_rate)),
-        "updated_at": datetime.now()
-    }
-
-    await session.execute(insert(exchange_rate).values(**rate_dict))
-    await session.commit()
-
-    return SuccessResponse(
-        message=f"Valyuta kursi muvaffaqiyatli yangilandi: 1 USD = {new_rate:,.2f} UZS"
-    )
+    service = CurrencyService()
+    live = await service.fetch_usd_to_uzs()
+    await service.write_rate_to_db(session, live)
+    return ExchangeRateResponse(usd_to_uzs=float(live), formatted_rate=f"{live:,.2f}")
 
 
-# --- 8. FINANCE YOZUVINI OLISH ---
+@router.post("/exchange-rate/sync", response_model=SuccessResponse, summary="Kursni majburan API dan yangilash")
+async def sync_exchange_rate(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_finance_access),
+):
+    """
+    Majburan CurrencyFreaks'dan kursni olib DBga yozadi (keshni yangilaydi).
+    """
+    service = CurrencyService()
+    live = await service.fetch_usd_to_uzs()
+    await service.write_rate_to_db(session, live)
+    return SuccessResponse(message=f"Kurs yangilandi: 1 USD = {live:,.2f} UZS")
+
+
+# --- 9. FINANCE YOZUVINI OLISH ---
 @router.get("/{finance_id}", response_model=FinanceResponse, summary="Finance yozuvini olish")
-async def get_finance(
+async def get_finance_item(
         finance_id: int,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Bitta finance yozuvining to'liq ma'lumotlarini olish
-    """
-    result = await session.execute(
-        select(finance).where(finance.c.id == finance_id)
-    )
+    result = await session.execute(select(finance).where(finance.c.id == finance_id))
     finance_data = result.fetchone()
-
     if not finance_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Finance yozuvi topilmadi"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance yozuvi topilmadi")
 
     return FinanceResponse(
         id=finance_data.id,
@@ -657,7 +527,7 @@ async def get_finance(
     )
 
 
-# --- 9. FINANCE LISTINI OLISH (PAGINATION BILAN) ---
+# --- 10. FINANCE LIST (Pagination) ---
 @router.get("/", response_model=FinanceListResponse, summary="Finance yozuvlari ro'yxati")
 async def get_finance_list(
         page: int = 1,
@@ -665,28 +535,18 @@ async def get_finance_list(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_finance_access)
 ):
-    """
-    Finance yozuvlarining sahifalashtirilib olingan ro'yxati
-    """
-    # Offset hisoblash
     offset = (page - 1) * per_page
-
-    # Umumiy yozuvlar soni
     count_result = await session.execute(select(func.count(finance.c.id)))
     total_count = count_result.scalar()
 
-    # Finance yozuvlarini olish
     result = await session.execute(
-        select(finance)
-        .order_by(finance.c.date.desc())
-        .limit(per_page)
-        .offset(offset)
+        select(finance).order_by(finance.c.date.desc()).limit(per_page).offset(offset)
     )
-    finances = result.fetchall()
+    rows = result.fetchall()
 
     finance_list = []
-    for fin in finances:
-        finance_dict = {
+    for fin in rows:
+        finance_list.append({
             "id": fin.id,
             "type": fin.type.value,
             "status": fin.status.value,
@@ -702,10 +562,8 @@ async def get_finance_list(
             "exchange_rate": float(fin.exchange_rate) if fin.exchange_rate else 0,
             "transaction_status": fin.transaction_status.value,
             "initial_date": fin.initial_date.isoformat() if fin.initial_date else None
-        }
-        finance_list.append(finance_dict)
+        })
 
-    # Sahifalar soni
     total_pages = (total_count + per_page - 1) // per_page
 
     return FinanceListResponse(
@@ -717,3 +575,45 @@ async def get_finance_list(
         has_next=page < total_pages,
         has_prev=page > 1
     )
+
+
+# --- 11. TOP UP ---
+@router.post("/topup", response_model=SuccessResponse, summary="Kartaga pul qo'shish (Top Up)")
+async def topup_card(
+    data: CardTopUpRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_finance_access),
+):
+    current_rate = await get_db_exchange_rate(session)
+    today = datetime.now().date()
+
+    currency = CurrencyType.UZS if data.card in [CardType.card1, CardType.card2] else CurrencyType.USD
+
+    donation_amount = Decimal('0')
+    if data.donation_percentage and data.donation_percentage > 0:
+        donation_in_currency = data.amount * (data.donation_percentage / 100)
+        donation_amount = donation_in_currency if currency == CurrencyType.UZS else (donation_in_currency * current_rate)
+
+        current_donation = await get_donation_balance(session)
+        await session.execute(update(donation_balance).values(total_donation=current_donation + donation_amount))
+
+    fin_row = {
+        "type": FinanceType.incomer,
+        "status": FinanceStatus.one_time,
+        "card": data.card,
+        "service": "Top Up",
+        "summ": data.amount,
+        "currency": currency,
+        "date": today,
+        "donation": donation_amount,
+        "donation_percentage": data.donation_percentage or Decimal('0'),
+        "tax_percentage": Decimal('0'),
+        "exchange_rate": current_rate,
+        "transaction_status": data.transaction_status,
+        "initial_date": None
+    }
+
+    await session.execute(insert(finance).values(**fin_row))
+    await session.commit()
+
+    return SuccessResponse(message=f"Top Up OK: {data.card.value} +{data.amount}")

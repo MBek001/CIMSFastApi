@@ -15,6 +15,11 @@ from schemes.schemes_users import (
 from auth_utils.auth_func import get_current_active_user, get_password_hash
 from database import get_async_session
 
+from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
+from models.user_models import  user_payment
+from  models.admin_models import customer,CustomerStatus
+from routers.finance import  get_db_exchange_rate,calculate_card_balances
+
 router = APIRouter(prefix="/ceo", tags=['CEO Dashboard'])
 
 
@@ -34,9 +39,7 @@ async def ceo_dashboard(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
-    """
-    CEO dashboard - barcha userlar ro'yxati va statistikalarni ko'rsatadi
-    """
+
     # Barcha userlarni olish
     result = await session.execute(select(user))
     users = result.fetchall()
@@ -72,6 +75,8 @@ async def ceo_dashboard(
                 modified_permissions.append('Sales CRM')
             elif perm == 'finance_list':
                 modified_permissions.append('Finance')
+            elif perm == 'update_list':
+                modified_permissions.append('Update')
             else:
                 modified_permissions.append(perm)
 
@@ -97,6 +102,82 @@ async def ceo_dashboard(
             "active_user_count": active_user_count,
             "inactive_user_count": inactive_user_count
         }
+    )
+
+@router.get("/metrics/today", response_model=DailyMetricsResponse,
+            summary="Bugungi metrikalar: customers, need_to_call count, total balance, due payments today")
+async def get_today_metrics(
+
+session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(require_ceo_access)
+
+):
+    """
+    - Bugun yaratilgan customerlar ro'yxati (customer.created_at = bugun)
+    - 'need_to_call' holatidagi customerlar soni
+    - Total Balance (card1 + card2 + card3 * USD->UZS), faqat DB'dagi eng so'nggi kurs bilan
+    - Due payments today: user_payment.date = bugun va payment = false bo'lgan yozuvlar soni
+    """
+    today = datetime.now().date()
+
+    # 1) Bugungi customerlar
+    today_cust_res = await session.execute(
+        select(
+            customer.c.id,
+            customer.c.full_name,
+            customer.c.platform,
+            customer.c.username,
+            customer.c.phone_number,
+            customer.c.status,
+            customer.c.assistant_name,
+            customer.c.created_at,
+        ).where(func.date(customer.c.created_at) == today)
+         .order_by(customer.c.created_at.desc())
+    )
+    today_customers_rows = today_cust_res.fetchall()
+
+    today_customers: list[TodayCustomerInfo] = []
+    for row in today_customers_rows:
+        today_customers.append(
+            TodayCustomerInfo(
+                id=row.id,
+                full_name=row.full_name,
+                platform=row.platform,
+                username=row.username,
+                phone_number=row.phone_number,
+                status=row.status.value if hasattr(row.status, "value") else str(row.status),
+                assistant_name=row.assistant_name,
+                created_at=row.created_at.isoformat() if row.created_at else None,
+            )
+        )
+
+    # 2) need_to_call holati soni
+    need_to_call_res = await session.execute(
+        select(func.count()).where(customer.c.status == CustomerStatus.need_to_call)
+    )
+    need_to_call_count = int(need_to_call_res.scalar() or 0)
+
+    # 3) Total balance (faqat DB kursi bilan)
+    current_rate = await get_db_exchange_rate(session)
+    balances = await calculate_card_balances(session)
+    total_balance_uzs = balances["card1_balance"] + balances["card2_balance"] + (balances["card3_balance"] * current_rate)
+
+    # 4) Due payments today (to'lanmagan bugungi to'lovlar)
+    due_pay_res = await session.execute(
+        select(func.count())
+        .where(
+            user_payment.c.date == today,
+            (user_payment.c.payment == False)  # noqa: E712
+        )
+    )
+    due_payments_today = int(due_pay_res.scalar() or 0)
+
+    return DailyMetricsResponse(
+        today_customers=today_customers,
+        need_to_call_count=need_to_call_count,
+        total_balance_uzs=float(total_balance_uzs),
+        total_balance_formatted=f"{total_balance_uzs:,.2f}",
+        due_payments_today=due_payments_today,
     )
 
 
@@ -659,6 +740,8 @@ async def get_user_permissions(
             permissions_display['Sales CRM'] = has_permission
         elif page_name == 'finance_list':
             permissions_display['Finance'] = has_permission
+        elif page_name == 'update_list':
+            permissions_display['Update'] = has_permission
         else:
             permissions_display[page_name] = has_permission
 
@@ -940,6 +1023,8 @@ async def get_all_users_permissions_overview(
                 modified_permissions.append('Sales CRM')
             elif perm == 'finance_list':
                 modified_permissions.append('Finance')
+            elif perm == 'update_list':
+                modified_permissions.append('Update')
             else:
                 modified_permissions.append(perm)
 
@@ -967,6 +1052,7 @@ async def get_all_users_permissions_overview(
             "users_with_payment_access": len([u for u in users_permissions if "payment_list" in u["permissions"]]),
             "users_with_wordpress_access": len([u for u in users_permissions if "project_toggle" in u["permissions"]]),
             "users_with_crm_access": len([u for u in users_permissions if "crm" in u["permissions"]]),
-            "users_with_finance_access": len([u for u in users_permissions if "finance_list" in u["permissions"]])
+            "users_with_finance_access": len([u for u in users_permissions if "finance_list" in u["permissions"]]),
+            "users_with_update":len([u for u in users_permissions if "update_list" in u["permissions"]]),
         }
     )

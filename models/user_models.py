@@ -21,6 +21,7 @@ class PageName(enum.Enum):
     project_toggle = "project_toggle"
     crm = "crm"
     finance_list = "finance_list"
+    update_list = "update_list"
 
 
 
@@ -70,9 +71,14 @@ monthly_update = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("user_id", Integer, ForeignKey("user.id"), nullable=False),
-    Column("update_date", Date, nullable=False),
+    Column("year", Integer, nullable=False),                     # 📅 Yil (masalan 2025)
+    Column("month", String(20), nullable=False),                  # 📆 Oy nomi yoki raqam (masalan 'September' yoki '09')
+    Column("update_date", Date, nullable=False),                  # Qachon kiritilgan
     Column("update_percentage", DECIMAL(5, 2), default=0.00),
-    Column("potential_monthly", DECIMAL(10, 2), default=0.00)
+    Column("potential_monthly", DECIMAL(10, 2), default=0.00),
+    Column("salary_amount", DECIMAL(10, 2), default=0.00),        # 💰 Oylik miqdor
+    Column("next_payment_date", Date, nullable=True),
+    Column('note', String(500),nullable=True)
 )
 
 # -- Message table --

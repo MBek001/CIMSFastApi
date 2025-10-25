@@ -37,6 +37,11 @@ class TransactionStatus(enum.Enum):
     real = "real"
     statistical = "statistical"
 
+class ConversationLanguage(enum.Enum):
+        UZ = "uz"
+        RU = "ru"
+        EN = "en"
+
 # 1. Payment table
 payment = Table(
     "payment",
@@ -71,13 +76,16 @@ customer = Table(
     "customer",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("full_name", String(255), nullable=False),
+    Column("full_name", String(500), nullable=False),
     Column("platform", String(255), nullable=False),
     Column("username", String(255), nullable=True),
-    Column("phone_number", String(20), nullable=False),
+    Column("phone_number", String(500), nullable=False),
     Column("status", Enum(CustomerStatus), nullable=False),
     Column("assistant_name", String(255), nullable=True),
     Column("notes", Text, nullable=True),
+    Column("audio_file_id", String(500), nullable=True),  # Telegram file ID
+    Column("audio_url", String(1000), nullable=True),     # (agar kerak bo'lsa)
+    Column("conversation_language", Enum(ConversationLanguage), nullable=True, default=ConversationLanguage.UZ),
     Column("created_at", DateTime, nullable=False)
 )
 

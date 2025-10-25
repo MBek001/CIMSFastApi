@@ -242,3 +242,16 @@ class YearlyFinanceReport(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CardTopUpRequest(BaseModel):
+    card: CardType
+    amount: Decimal
+    donation_percentage: Decimal = Decimal('0')
+    transaction_status: TransactionStatus = TransactionStatus.real  # top up odatda real
+
+    @validator('amount')
+    def validate_amount(cls, v):
+        if v <= 0:
+            raise ValueError('Summ 0 dan katta bo\'lishi kerak')
+        return v
