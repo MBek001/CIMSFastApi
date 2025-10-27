@@ -164,7 +164,7 @@ async def get_latest_customers(
         for c in customers
     ]
 
-
+# 170-341
 
 # --- 1. CRM DASHBOARD - Barcha mijozlar ro'yxati ---
 @router.get("/dashboard", response_model=CustomerListResponse, summary="Sales CRM Dashboard")
@@ -178,7 +178,7 @@ async def crm_dashboard(
     """
     Sales CRM dashboard - barcha mijozlar ro'yxati va statistikalarni ko'rsatadi
     """
-    # Huquq tekshiruvi (o‘zgarmaydi)
+    # Huquq tekshiruvi
     permissions_result = await session.execute(
         select(user_page_permission.c.page_name)
         .where(
@@ -192,51 +192,55 @@ async def crm_dashboard(
             detail="CRM sahifasiga kirish huquqingiz yo'q"
         )
 
-    # 🔍 Qidiruv va filter logikasi
-    query_conditions = []
-    if search and search.strip():
-        search_term = f"%{search.strip()}%"
-        query_conditions.append(
-            or_(
-                customer.c.full_name.ilike(search_term),
-                customer.c.platform.ilike(search_term),
-                customer.c.phone_number == search.strip(),
-                customer.c.username.ilike(search_term),
-                customer.c.assistant_name.ilike(search_term),
-                cast(customer.c.status, String).ilike(search_term)
-            )
-        )
-
-    if status_filter and not show_all:
-        query_conditions.append(customer.c.status == status_filter)
-
-    # 🔸 Mijozlarni olish
-    if query_conditions:
-        customers_result = await session.execute(
-            select(customer)
-            .where(*query_conditions)
-            .order_by(desc(customer.c.created_at))
-        )
-    else:
-        customers_result = await session.execute(
-            select(customer).order_by(desc(customer.c.created_at))
-        )
-
+    # 🔹 Database-dan barcha customerlarni olish (encrypt holda)
+    base_query = select(customer).order_by(desc(customer.c.created_at))
+    
+    # Agar faqat status filter bo'lsa, uni database-da qo'llaymiz (optimizatsiya)
+    if status_filter and not show_all and not (search and search.strip()):
+        base_query = base_query.where(customer.c.status == status_filter)
+    
+    customers_result = await session.execute(base_query)
     customers_data = customers_result.fetchall()
 
-    # 🔓 Shifrlangan ma’lumotlarni deshifrlab qaytarish
-    customers_list = []
+    # 🔓 Deshifrlab va filter qilish (Python-da)
+    filtered_customers = []
+    search_term = search.strip().lower() if search and search.strip() else None
+
     for c in customers_data:
+        # Ma'lumotlarni deshifrlash
+        decrypted_name = decrypt_text(c.full_name)
+        decrypted_phone = decrypt_text(c.phone_number)
+        
+        # 🔍 Qidiruv logikasi (deshifrlangan ma'lumotlar bo'yicha)
+        if search_term:
+            # Barcha maydonlarni tekshirish
+            if not any([
+                search_term in decrypted_name.lower(),
+                search_term in decrypted_phone,
+                search_term in (c.platform or "").lower(),
+                search_term in (c.username or "").lower(),
+                search_term in (c.assistant_name or "").lower(),
+                search_term in c.status.value.lower()
+            ]):
+                continue  # Bu customer mos kelmasa, keyingisiga o'tamiz
+        
+        # Status filter (agar qidiruv bilan birga bo'lsa)
+        if status_filter and not show_all and search_term:
+            if c.status != status_filter:
+                continue
+        
+        # Audio URL yaratish
         audio_url = None
         if c.audio_file_id:
             audio_url = f"https://api.project.cims.cognilabs.org/crm/customers/audio/{c.audio_file_id}"
-
-        customers_list.append({
+        
+        # Ro'yxatga qo'shish
+        filtered_customers.append({
             "id": c.id,
-            "full_name": decrypt_text(c.full_name),          # 🟢 deshifrlash
+            "full_name": decrypted_name,
             "platform": c.platform,
             "username": c.username,
-            "phone_number": decrypt_text(c.phone_number),    # 🟢 deshifrlash
+            "phone_number": decrypted_phone,
             "status": c.status.value,
             "assistant_name": c.assistant_name,
             "notes": c.notes,
@@ -246,7 +250,7 @@ async def crm_dashboard(
             "created_at": c.created_at.isoformat()
         })
 
-    # 🔹 Quyidagi qismlar o‘zgarmaydi (statistikalar, foizlar, permissions va h.k.)
+    # 🔹 Statistikalarni hisoblash (o'zgarmaydi)
     status_stats_result = await session.execute(
         select(
             func.count(customer.c.id).label('total_customers'),
@@ -315,7 +319,7 @@ async def crm_dashboard(
     period_stats = period_stats_result.fetchone()
 
     return CustomerListResponse(
-        customers=customers_list,
+        customers=filtered_customers,  # 🟢 Deshifrlangan va filterlangan ro'yxat
         status_stats={
             "total_customers": stats.total_customers,
             "need_to_call": stats.need_to_call,
