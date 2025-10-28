@@ -896,35 +896,36 @@ async def filter_customers_by_platform(
         current_user=Depends(get_current_user),
 ):
     """Mijozlarni platform bo‘yicha filterlaydi"""
-    try:
-        result = await session.execute(
-            select(customer)
-            .where(func.lower(customer.c.platform) == platform.lower())
-            .order_by(desc(customer.c.created_at))
+
+    # Platforma nomi bo'yicha filterlash
+    result = await session.execute(
+        select(customer)
+        .where(func.lower(customer.c.platform) == platform.lower())  # Kichik harflarga o'tkazish
+        .order_by(desc(customer.c.created_at))
+    )
+    customers = result.fetchall()
+
+    # Mijozlar bo'lmasa 404 xatolikni yuborish
+    if not customers:
+        raise HTTPException(status_code=404, detail="Berilgan platforma bo‘yicha mijoz topilmadi")
+
+    return [
+        CustomerResponse(
+            id=c.id,
+            full_name=decrypt_text(c.full_name),
+            platform=c.platform,
+            username=c.username,
+            phone_number=decrypt_text(c.phone_number),
+            status=c.status.value,
+            assistant_name=c.assistant_name,
+            notes=c.notes,
+            audio_file_id=c.audio_file_id,
+            conversation_language=c.conversation_language,
+            created_at=c.created_at.isoformat()
         )
-        customers = result.fetchall()
+        for c in customers
+    ]
 
-        if not customers:
-            raise HTTPException(status_code=404, detail="Berilgan platforma bo‘yicha mijoz topilmadi")
-
-        return [
-            CustomerResponse(
-                id=c.id,
-                full_name=decrypt_text(c.full_name),
-                platform=c.platform,
-                username=c.username,
-                phone_number=decrypt_text(c.phone_number),
-                status=c.status.value,
-                assistant_name=c.assistant_name,
-                notes=c.notes,
-                audio_file_id=c.audio_file_id,
-                conversation_language=c.conversation_language,
-                created_at=c.created_at.isoformat()
-            )
-            for c in customers
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Xatolik: {str(e)}")
 
 from sqlalchemy import and_
 
@@ -944,39 +945,40 @@ async def filter_customers_by_date(
     Sana oralig‘iga yoki bitta sanaga ko‘ra mijozlarni filterlaydi.
     Agar faqat `start_date` berilsa — o‘sha kunlik yozuvlar chiqadi.
     """
-    try:
-        # Agar end_date berilmasa, start_date ni o‘sha kun deb olamiz
-        if not end_date:
-            end_date = start_date
+  
+    # Agar end_date berilmasa, start_date ni o‘sha kun deb olamiz
+    if not end_date:
+        end_date = start_date  # end_date bo'sh bo'lsa, uni start_date ga tenglashtiramiz
 
-        result = await session.execute(
-            select(customer)
-            .where(and_(
-                customer.c.created_at >= start_date,
-                customer.c.created_at < end_date + timedelta(days=1)
-            ))
-            .order_by(desc(customer.c.created_at))
+    # Sana oralig'ida filtrlaymiz
+    result = await session.execute(
+        select(customer)
+        .where(and_(
+            customer.c.created_at >= start_date,
+            customer.c.created_at < end_date + timedelta(days=1)  # 1 kun qo'shish orqali tugash sanasini o'zgartrish
+        ))
+        .order_by(desc(customer.c.created_at))
+    )
+    customers = result.fetchall()
+
+    # Mijozlar topilmasa 404 xatolik yuborish
+    if not customers:
+        raise HTTPException(status_code=404, detail="Berilgan sana oralig‘ida mijoz topilmadi")
+
+    return [
+        CustomerResponse(
+            id=c.id,
+            full_name=decrypt_text(c.full_name),
+            platform=c.platform,
+            username=c.username,
+            phone_number=decrypt_text(c.phone_number),
+            status=c.status.value,
+            assistant_name=c.assistant_name,
+            notes=c.notes,
+            audio_file_id=c.audio_file_id,
+            conversation_language=c.conversation_language,
+            created_at=c.created_at.isoformat()
         )
-        customers = result.fetchall()
+        for c in customers
+    ]
 
-        if not customers:
-            raise HTTPException(status_code=404, detail="Berilgan sana oralig‘ida mijoz topilmadi")
-
-        return [
-            CustomerResponse(
-                id=c.id,
-                full_name=decrypt_text(c.full_name),
-                platform=c.platform,
-                username=c.username,
-                phone_number=decrypt_text(c.phone_number),
-                status=c.status.value,
-                assistant_name=c.assistant_name,
-                notes=c.notes,
-                audio_file_id=c.audio_file_id,
-                conversation_language=c.conversation_language,
-                created_at=c.created_at.isoformat()
-            )
-            for c in customers
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Xatolik: {str(e)}")
