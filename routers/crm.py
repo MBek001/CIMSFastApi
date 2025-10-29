@@ -24,7 +24,8 @@ from io import BytesIO
 from  auth_utils.auth_func import get_current_user
 from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
-from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram
+from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram, validate_audio_file
+
 router = APIRouter(prefix="/crm", tags=['Sales CRM'])
 
 
@@ -401,6 +402,7 @@ from models.admin_models import CustomerStatus
 
 from utils.crypto import encrypt_text
 
+
 @router.post("/customers", response_model=CreateResponse, summary="Yangi mijoz yaratish")
 async def create_customer(
         full_name: str = Form(...),
@@ -415,7 +417,10 @@ async def create_customer(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
-    # Huquq tekshiruvi (seniki o‘zgarishsiz)
+    """
+    Yangi mijoz yaratish - barcha audio formatlar bilan (MP3, OGG, WAV, M4A, ...)
+    """
+    # Huquq tekshiruvi
     permissions_result = await session.execute(
         select(user_page_permission.c.page_name)
         .where(
@@ -424,21 +429,30 @@ async def create_customer(
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
-        raise HTTPException(status_code=403, detail="Mijoz yaratish huquqingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Mijoz yaratish huquqingiz yo'q")
 
+    # Telefon raqami tekshiruvi
     if not phone_number.strip():
-        raise HTTPException(status_code=400, detail="Telefon raqami bo‘sh bo‘lmasligi kerak")
+        raise HTTPException(status_code=400, detail="Telefon raqami bo'sh bo'lmasligi kerak")
+
     # Audio yuklash
     audio_file_id = None
     if audio:
-        if not audio.content_type.startswith('audio/'):
-            raise HTTPException(status_code=400, detail="Faqat audio fayllar qabul qilinadi")
+        # Audio faylni validatsiya qilish
+        if not validate_audio_file(audio):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Faqat audio fayllar qabul qilinadi. Sizning fayl turi: {audio.content_type}"
+            )
+
+        # Telegram ga yuklash
         audio_file_id = await upload_audio_to_telegram(audio)
 
-    # 🟢 Shifrlanadigan maydonlar
+    # Shifrlanadigan maydonlar
     encrypted_full_name = encrypt_text(full_name)
     encrypted_phone = encrypt_text(phone_number)
 
+    # Mijozni yaratish
     customer_dict = {
         "full_name": encrypted_full_name,
         "platform": platform,
@@ -461,7 +475,96 @@ async def create_customer(
     )
 
 
+@router.put("/customers/{customer_id}", response_model=SuccessResponse, summary="Mijoz ma'lumotlarini yangilash")
+async def update_customer(
+        customer_id: int,
+        full_name: Optional[str] = Form(None),
+        platform: Optional[str] = Form(None),
+        phone_number: Optional[str] = Form(None),
+        customer_status: Optional[CustomerStatus] = Form(None),
+        username: Optional[str] = Form(None),
+        assistant_name: Optional[str] = Form(None),
+        notes: Optional[str] = Form(None),
+        conversation_language: Optional[ConversationLanguageEnum] = Form(None),
+        audio: Optional[UploadFile] = File(None),
+        session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(require_crm_access)
+):
+    """
+    Mijoz ma'lumotlarini to'liq yangilash - barcha audio formatlar bilan (MP3, OGG, WAV, M4A, ...)
+    """
+    # --- 1. Huquqni tekshirish ---
+    permissions_result = await session.execute(
+        select(user_page_permission.c.page_name)
+        .where(
+            user_page_permission.c.user_id == current_user.id,
+            user_page_permission.c.page_name == PageName.crm
+        )
+    )
+    if not permissions_result.fetchone() and current_user.company_code != "ceo":
+        raise HTTPException(
+            status_code=403,
+            detail="Mijoz ma'lumotlarini yangilash huquqingiz yo'q"
+        )
 
+    # --- 2. Mijoz mavjudligini tekshirish ---
+    existing_customer_result = await session.execute(
+        select(customer).where(customer.c.id == customer_id)
+    )
+    existing_customer = existing_customer_result.fetchone()
+
+    if not existing_customer:
+        raise HTTPException(
+            status_code=404,
+            detail="Mijoz topilmadi"
+        )
+
+    # --- 3. Yangilanadigan ma'lumotlarni tayyorlash ---
+    update_data = {}
+
+    if full_name is not None:
+        update_data["full_name"] = encrypt_text(full_name)
+    if platform is not None:
+        update_data["platform"] = platform
+    if username is not None:
+        update_data["username"] = username
+    if phone_number is not None:
+        update_data["phone_number"] = encrypt_text(phone_number)
+    if customer_status is not None:
+        update_data["status"] = customer_status
+    if assistant_name is not None:
+        update_data["assistant_name"] = assistant_name
+    if notes is not None:
+        update_data["notes"] = notes
+    if conversation_language is not None:
+        update_data["conversation_language"] = conversation_language.value.upper()
+
+    # --- 4. Audio yangilash (barcha formatlar) ---
+    if audio:
+        # Audio faylni validatsiya qilish
+        if not validate_audio_file(audio):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Faqat audio fayllar qabul qilinadi. Sizning fayl turi: {audio.content_type}"
+            )
+
+        # Telegramga yuklash
+        audio_file_id = await upload_audio_to_telegram(audio)
+        update_data["audio_file_id"] = audio_file_id
+
+    if not update_data:
+        raise HTTPException(
+            status_code=400,
+            detail="Yangilanadigan ma'lumot topilmadi"
+        )
+
+    # --- 5. Yangilash va commit ---
+    await session.execute(
+        update(customer).where(customer.c.id == customer_id).values(**update_data)
+    )
+    await session.commit()
+
+    return SuccessResponse(message="Mijoz ma'lumotlari muvaffaqiyatli yangilandi")
 
 
 @router.patch("/customers/{customer_id}", response_model=SuccessResponse, summary="Mijozni qisman yangilash")
@@ -479,7 +582,10 @@ async def patch_customer(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
-    """Qisman yangilash (faqat yuborilgan maydonlar o‘zgaradi)"""
+    """
+    Mijozni qisman yangilash - barcha audio formatlar bilan (MP3, OGG, WAV, M4A, ...)
+    Faqat yuborilgan maydonlar o'zgaradi
+    """
     # Huquqni tekshirish
     permissions_result = await session.execute(
         select(user_page_permission.c.page_name).where(
@@ -488,7 +594,7 @@ async def patch_customer(
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
-        raise HTTPException(status_code=403, detail="Mijozni yangilash huquqingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Mijozni yangilash huquqingiz yo'q")
 
     # Mavjud mijozni tekshirish
     result = await session.execute(select(customer).where(customer.c.id == customer_id))
@@ -515,10 +621,16 @@ async def patch_customer(
     if conversation_language:
         update_data["conversation_language"] = conversation_language.value.upper()
 
-    # Audio yangilash
+    # Audio yangilash (barcha formatlar)
     if audio:
-        if not audio.content_type.startswith('audio/'):
-            raise HTTPException(status_code=400, detail="Faqat audio fayllar qabul qilinadi")
+        # Audio faylni validatsiya qilish
+        if not validate_audio_file(audio):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Faqat audio fayllar qabul qilinadi. Sizning fayl turi: {audio.content_type}"
+            )
+
+        # Telegramga yuklash
         audio_file_id = await upload_audio_to_telegram(audio)
         update_data["audio_file_id"] = audio_file_id
 
@@ -529,101 +641,6 @@ async def patch_customer(
     await session.commit()
 
     return SuccessResponse(message="Mijoz ma'lumotlari qisman yangilandi")
-
-
-
-
-
-
-@router.put("/customers/{customer_id}", response_model=SuccessResponse, summary="Mijoz ma'lumotlarini yangilash")
-async def update_customer(
-        customer_id: int,
-        full_name: Optional[str] = Form(None),
-        platform: Optional[str] = Form(None),
-        phone_number: Optional[str] = Form(None),
-        customer_status: Optional[CustomerStatus] = Form(None),
-        username: Optional[str] = Form(None),
-        assistant_name: Optional[str] = Form(None),
-        notes: Optional[str] = Form(None),
-        conversation_language: Optional[ConversationLanguageEnum] = Form(None),
-        audio: Optional[UploadFile] = File(None),  # Yangi audio (ixtiyoriy)
-        session: AsyncSession = Depends(get_async_session),
-        current_user=Depends(require_crm_access)
-):
-    """
-    Mavjud mijoz ma'lumotlarini yangilash (audio bilan, shifrlash bilan)
-    """
-    # --- 1. Huquqni tekshirish ---
-    permissions_result = await session.execute(
-        select(user_page_permission.c.page_name)
-        .where(
-            user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.crm
-        )
-    )
-    if not permissions_result.fetchone() and current_user.company_code != "ceo":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Mijoz ma'lumotlarini yangilash huquqingiz yo'q"
-        )
-
-    # --- 2. Mijoz mavjudligini tekshirish ---
-    existing_customer_result = await session.execute(
-        select(customer).where(customer.c.id == customer_id)
-    )
-    existing_customer = existing_customer_result.fetchone()
-
-    if not existing_customer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Mijoz topilmadi"
-        )
-
-    # --- 3. Yangilanadigan ma'lumotlarni tayyorlash ---
-    update_data = {}
-
-    if full_name is not None:
-        update_data["full_name"] = encrypt_text(full_name)  # 🟢 ismni shifrlash
-    if platform is not None:
-        update_data["platform"] = platform
-    if username is not None:
-        update_data["username"] = username
-    if phone_number is not None:
-        update_data["phone_number"] = encrypt_text(phone_number)  # 🟢 raqamni shifrlash
-    if customer_status is not None:
-        update_data["status"] = customer_status
-    if assistant_name is not None:
-        update_data["assistant_name"] = assistant_name
-    if notes is not None:
-        update_data["notes"] = notes
-    if conversation_language is not None:
-        update_data["conversation_language"] = conversation_language.value.upper()
-
-    # --- 4. Audio yangilash ---
-    if audio:
-        if not audio.content_type.startswith('audio/'):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Faqat audio fayllar qabul qilinadi"
-            )
-
-        # Telegramga yuklash
-        audio_file_id = await upload_audio_to_telegram(audio)
-        update_data["audio_file_id"] = audio_file_id
-
-    if not update_data:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Yangilanadigan ma'lumot topilmadi"
-        )
-
-    # --- 5. Yangilash va commit ---
-    await session.execute(
-        update(customer).where(customer.c.id == customer_id).values(**update_data)
-    )
-    await session.commit()
-
-    return SuccessResponse(message="Mijoz ma'lumotlari muvaffaqiyatli yangilandi")
 
 
 
