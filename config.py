@@ -14,7 +14,8 @@ SECRET = os.environ.get('SECRET')
 
 SECRET_KEY = os.environ.get('SECRET_KEY', default='uzbekiston-juda-xavfsiz-kalit-1234567890')
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 3000
+ACCESS_TOKEN_EXPIRE_MINUTES = 3000  # Access token - 50 hours (for backward compatibility)
+REFRESH_TOKEN_EXPIRE_DAYS = 15  # Refresh token - 15 days
 
 # SMTP_HOST = os.environ.get('SMTP_HOST')
 # SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
