@@ -122,3 +122,16 @@ verification_code = Table(
     Column("type", String(50), nullable=False),  # 'verify_email' yoki 'reset_password'
     UniqueConstraint("user_id", "type", name="unique_user_code")  # ✅ Har user uchun har type unique
 )
+
+# -- RefreshToken table (NEW) --
+refresh_token = Table(
+    "refresh_token",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("token", String(500), nullable=False, unique=True, index=True),
+    Column("expires_at", DateTime, nullable=False),
+    Column("created_at", DateTime, nullable=False),
+    Column("is_active", Boolean, default=True),
+    Column("device_info", String(255), nullable=True)  # Optional: track device/browser
+)

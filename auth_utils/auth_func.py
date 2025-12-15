@@ -5,10 +5,11 @@ from passlib.context import CryptContext
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, insert, update
-from models.user_models import user, user_page_permission, UserRole, PageName
+from sqlalchemy import select, insert, update, delete
+from models.user_models import user, user_page_permission, UserRole, PageName, refresh_token
 from database import get_async_session
-from config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
+from config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+import secrets
 
 # Ikki xil authentication usuli
 security = HTTPBearer(auto_error=False)  # Token kiritish uchun
@@ -74,3 +75,102 @@ def get_current_active_user(current_user=Depends(get_current_user)):
     if not current_user.is_active:
         raise HTTPException(status_code=400, detail="Foydalanuvchi faol emas")
     return current_user
+
+
+# ========================================
+# REFRESH TOKEN FUNCTIONS (NEW)
+# ========================================
+
+def create_refresh_token(user_id: int, device_info: Optional[str] = None) -> tuple[str, datetime]:
+    """
+    Create a new refresh token
+    Returns: (token_string, expires_at_datetime)
+    """
+    # Generate secure random token
+    token_string = secrets.token_urlsafe(64)
+
+    # Calculate expiry (15 days)
+    expires_at = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+
+    return token_string, expires_at
+
+
+async def store_refresh_token(
+    session: AsyncSession,
+    user_id: int,
+    token_string: str,
+    expires_at: datetime,
+    device_info: Optional[str] = None
+) -> int:
+    """
+    Store refresh token in database
+    Returns: token_id
+    """
+    result = await session.execute(
+        insert(refresh_token).values(
+            user_id=user_id,
+            token=token_string,
+            expires_at=expires_at,
+            created_at=datetime.utcnow(),
+            is_active=True,
+            device_info=device_info
+        ).returning(refresh_token.c.id)
+    )
+    await session.commit()
+    return result.scalar()
+
+
+async def verify_refresh_token(session: AsyncSession, token_string: str) -> Optional[int]:
+    """
+    Verify refresh token and return user_id
+    Returns: user_id if valid, None if invalid
+    """
+    result = await session.execute(
+        select(refresh_token)
+        .where(
+            (refresh_token.c.token == token_string) &
+            (refresh_token.c.is_active == True) &
+            (refresh_token.c.expires_at > datetime.utcnow())
+        )
+    )
+    token_row = result.fetchone()
+
+    if not token_row:
+        return None
+
+    return token_row.user_id
+
+
+async def revoke_refresh_token(session: AsyncSession, token_string: str):
+    """
+    Revoke/invalidate a refresh token
+    """
+    await session.execute(
+        update(refresh_token)
+        .where(refresh_token.c.token == token_string)
+        .values(is_active=False)
+    )
+    await session.commit()
+
+
+async def revoke_all_user_tokens(session: AsyncSession, user_id: int):
+    """
+    Revoke all refresh tokens for a user (logout from all devices)
+    """
+    await session.execute(
+        update(refresh_token)
+        .where(refresh_token.c.user_id == user_id)
+        .values(is_active=False)
+    )
+    await session.commit()
+
+
+async def cleanup_expired_tokens(session: AsyncSession):
+    """
+    Delete expired refresh tokens (cleanup job)
+    """
+    await session.execute(
+        delete(refresh_token)
+        .where(refresh_token.c.expires_at < datetime.utcnow())
+    )
+    await session.commit()

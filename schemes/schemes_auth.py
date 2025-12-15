@@ -39,6 +39,19 @@ class Token(BaseModel):
     token_type: str
 
 
+class TokenWithRefresh(BaseModel):
+    """Token response with refresh token (NEW)"""
+    access_token: str
+    refresh_token: str
+    token_type: str
+    expires_in: int  # seconds
+
+
+class RefreshTokenRequest(BaseModel):
+    """Request model for refresh token (NEW)"""
+    refresh_token: str
+
+
 class EmailVerificationRequest(BaseModel):
     email: EmailStr
 

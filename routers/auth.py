@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header
 from fastapi.security import OAuth2PasswordRequestForm
 from schemes.schemes_auth import *
 from auth_utils.auth_func import *
 from auth_utils.email_service import email_service
+from typing import Optional
 
 from config import VERIFICATION_CODE_EXPIRE_MINUTES, PASSWORD_RESET_EXPIRE_MINUTES
 from sqlalchemy import func
@@ -123,17 +124,26 @@ async def verify_email(
     )
     await session.commit()
 
-    # 4. Kodni 0 qilib qo‘yish
+    # 4. Kodni 0 qilib qo'yish
     await db_code_storage.invalidate_code(session, user_id, "verify_email")
 
-    # 5. JWT token qaytarish
+    # 5. JWT access token yaratish
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": verification.email},
         expires_delta=access_token_expires
     )
 
-    return Token(access_token=access_token, token_type="bearer")
+    # 6. Refresh token yaratish va saqlash (NEW)
+    refresh_token_str, refresh_expires_at = create_refresh_token(user_id)
+    await store_refresh_token(session, user_id, refresh_token_str, refresh_expires_at)
+
+    return TokenWithRefresh(
+        access_token=access_token,
+        refresh_token=refresh_token_str,
+        token_type="bearer",
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60  # seconds
+    )
 
 
 
@@ -184,13 +194,22 @@ async def login(
     if not user_data.is_active:
         raise HTTPException(status_code=400, detail="Akkaunt faol emas. Email tasdiqlashni bajaring.")
 
-    # Token
+    # Access Token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user_data.email}, expires_delta=access_token_expires
     )
 
-    return Token(access_token=access_token, token_type="bearer")
+    # Refresh Token (NEW)
+    refresh_token_str, refresh_expires_at = create_refresh_token(user_data.id)
+    await store_refresh_token(session, user_data.id, refresh_token_str, refresh_expires_at)
+
+    return TokenWithRefresh(
+        access_token=access_token,
+        refresh_token=refresh_token_str,
+        token_type="bearer",
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60  # seconds
+    )
 
 
 # 5. PAROLNI UNUTISH
@@ -273,7 +292,85 @@ async def get_current_user_info(
         permissions=permissions_object
     )
 
-# 8. DASHBOARD REDIRECT
+# 8. REFRESH TOKEN (NEW)
+@router.post("/refresh", response_model=TokenWithRefresh, summary="Refresh token orqali yangi access token olish")
+async def refresh_access_token(
+    refresh_request: RefreshTokenRequest,
+    session: AsyncSession = Depends(get_async_session)
+):
+    """
+    Refresh token orqali yangi access va refresh tokenlar olish
+    Eski refresh token bekor qilinadi
+    """
+    # Verify refresh token
+    user_id = await verify_refresh_token(session, refresh_request.refresh_token)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token noto'g'ri yoki muddati tugagan"
+        )
+
+    # Get user data
+    result = await session.execute(select(user).where(user.c.id == user_id))
+    user_data = result.fetchone()
+
+    if not user_data or not user_data.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Foydalanuvchi faol emas"
+        )
+
+    # Revoke old refresh token
+    await revoke_refresh_token(session, refresh_request.refresh_token)
+
+    # Create new access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    new_access_token = create_access_token(
+        data={"sub": user_data.email},
+        expires_delta=access_token_expires
+    )
+
+    # Create new refresh token
+    new_refresh_token, refresh_expires_at = create_refresh_token(user_id)
+    await store_refresh_token(session, user_id, new_refresh_token, refresh_expires_at)
+
+    return TokenWithRefresh(
+        access_token=new_access_token,
+        refresh_token=new_refresh_token,
+        token_type="bearer",
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60  # seconds
+    )
+
+
+# 9. LOGOUT (NEW)
+@router.post("/logout", response_model=SuccessResponse, summary="Logout - refresh tokenni bekor qilish")
+async def logout(
+    refresh_request: RefreshTokenRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Logout - refresh tokenni bekor qilish
+    """
+    await revoke_refresh_token(session, refresh_request.refresh_token)
+    return SuccessResponse(message="Muvaffaqiyatli chiqildi")
+
+
+# 10. LOGOUT ALL DEVICES (NEW)
+@router.post("/logout-all", response_model=SuccessResponse, summary="Barcha qurilmalardan chiqish")
+async def logout_all_devices(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Barcha qurilmalardan chiqish - barcha refresh tokenlarni bekor qilish
+    """
+    await revoke_all_user_tokens(session, current_user.id)
+    return SuccessResponse(message="Barcha qurilmalardan muvaffaqiyatli chiqildi")
+
+
+# 11. DASHBOARD REDIRECT
 @router.get("/dashboard-redirect", response_model=RedirectResponse)
 async def dashboard_redirect(
         current_user=Depends(get_current_active_user),

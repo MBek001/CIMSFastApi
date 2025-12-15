@@ -408,7 +408,7 @@ async def create_customer(
         full_name: str = Form(...),
         platform: str = Form(...),
         phone_number: str = Form(...),
-        status: CustomerStatus = Form(...),
+        status: str = Form(...),  # Changed: now accepts string (dynamic status name)
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
@@ -419,6 +419,7 @@ async def create_customer(
 ):
     """
     Yangi mijoz yaratish - barcha audio formatlar bilan (MP3, OGG, WAV, M4A, ...)
+    Status: dinamik status name (string) - masalan: "contacted", "project_started", va hokazo
     """
     # Huquq tekshiruvi
     permissions_result = await session.execute(
@@ -448,6 +449,32 @@ async def create_customer(
         # Telegram ga yuklash
         audio_file_id = await upload_audio_to_telegram(audio)
 
+    # Validate status exists in customer_status table
+    from models.admin_models import customer_status_table
+    status_result = await session.execute(
+        select(customer_status_table)
+        .where(
+            (customer_status_table.c.name == status) &
+            (customer_status_table.c.is_active == True)
+        )
+    )
+    status_obj = status_result.fetchone()
+
+    if not status_obj:
+        # Fallback to enum if dynamic status not found
+        try:
+            enum_status = CustomerStatus[status]
+            status_enum_value = enum_status.value
+            status_name = status
+        except KeyError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Status '{status}' topilmadi. Mavjud statuslarni /crm/statuses/dynamic endpointidan oling"
+            )
+    else:
+        status_enum_value = status
+        status_name = status
+
     # Shifrlanadigan maydonlar
     encrypted_full_name = encrypt_text(full_name)
     encrypted_phone = encrypt_text(phone_number)
@@ -458,7 +485,8 @@ async def create_customer(
         "platform": platform,
         "username": username,
         "phone_number": encrypted_phone,
-        "status": status.value,
+        "status": CustomerStatus.contacted,  # Default enum for backward compatibility
+        "status_name": status_name,  # NEW: Dynamic status name
         "assistant_name": assistant_name,
         "notes": notes,
         "audio_file_id": audio_file_id,
@@ -468,6 +496,15 @@ async def create_customer(
 
     result = await session.execute(insert(customer).values(**customer_dict))
     await session.commit()
+
+    new_customer_id = result.inserted_primary_key[0]
+
+    # Auto-assign sales manager
+    from routers.crm_sales_manager import maybe_auto_assign_sales_manager
+    try:
+        await maybe_auto_assign_sales_manager(new_customer_id, session)
+    except Exception:
+        pass  # Ignore sales manager assignment errors
 
     return CreateResponse(
         message="Mijoz muvaffaqiyatli yaratildi",
