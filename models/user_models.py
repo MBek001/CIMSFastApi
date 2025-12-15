@@ -7,12 +7,13 @@ import enum
 from models.admin_models import metadata
 
 
-# --- ENUMS ---
+# --- ENUMS --- (kept for backward compatibility, but now we use dynamic role table)
 class UserRole(enum.Enum):
     CEO = "CEO"
     financial_director = "Financial Director"
     member = "Member"
     customer = "Customer"
+    sales_manager = "Sales Manager"  # NEW: Sales Manager role
 
 # -- UserPagePermission table --
 class PageName(enum.Enum):
@@ -38,6 +39,7 @@ user = Table(
     Column("telegram_id", String(50), nullable=True),
     Column("default_salary", DECIMAL(10, 2), default=0.00),
     Column("role", Enum(UserRole), default=UserRole.customer),
+    Column("role_name", String(100), nullable=True),  # NEW: Dynamic role from user_role table (optional, for custom roles)
     Column("is_active", Boolean, default=True),
     Column("is_admin", Boolean, default=False),
     Column("is_staff", Boolean, default=False),

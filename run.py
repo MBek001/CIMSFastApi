@@ -7,10 +7,12 @@ from starlette.responses import JSONResponse
 from routers.auth import router as auth_router
 from routers.users import router as users_router
 from routers.crm import router as crm_router
+from routers.crm_sales_manager import router as crm_sales_manager_router
 from routers.wordpress import router as wordpress_router
 from routers.finance import router as finance_router
 from routers.finance_advanced import advanced_router as advanced_router
-from  routers.updates import  router as updates_router
+from routers.updates import router as updates_router
+from routers.management import router as management_router
 
 from fastapi.responses import JSONResponse
 
@@ -48,9 +50,11 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(wordpress_router)
 app.include_router(crm_router)
+app.include_router(crm_sales_manager_router)
 app.include_router(finance_router)
 app.include_router(advanced_router)
 app.include_router(updates_router)
+app.include_router(management_router)
 
 
 # --------------------------------------------------

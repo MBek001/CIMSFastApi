@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Table, Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, MetaData
+    Table, Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, MetaData, ForeignKey, UniqueConstraint
 )
 import enum
 from datetime import datetime
@@ -7,7 +7,7 @@ from datetime import datetime
 
 metadata = MetaData()
 
-# Enums for choices
+# Enums for choices (kept for backward compatibility, but now we use dynamic tables)
 class CustomerStatus(enum.Enum):
     contacted = "contacted"
     project_started = "project_started"
@@ -81,6 +81,7 @@ customer = Table(
     Column("username", String(255), nullable=True),
     Column("phone_number", String(500), nullable=False),
     Column("status", Enum(CustomerStatus), nullable=False),
+    Column("status_name", String(100), nullable=True),  # NEW: Dynamic status from customer_status table (optional, for custom statuses)
     Column("assistant_name", String(255), nullable=True),
     Column("notes", Text, nullable=True),
     Column("audio_file_id", String(500), nullable=True),  # Telegram file ID
@@ -124,4 +125,56 @@ exchange_rate = Table(
     Column("id", Integer, primary_key=True),
     Column("usd_to_uzs", DECIMAL(15, 2), default=12700.00),
     Column("updated_at", DateTime, nullable=False)
+)
+
+# 7. Dynamic Customer Status table (NEW)
+customer_status_table = Table(
+    "customer_status",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(100), nullable=False, unique=True),  # e.g., "contacted", "project_started"
+    Column("display_name", String(255), nullable=False),  # e.g., "Contacted", "Project Started"
+    Column("description", Text, nullable=True),
+    Column("color", String(50), nullable=True),  # For UI color coding
+    Column("order", Integer, default=0),  # Display order
+    Column("is_active", Boolean, default=True),
+    Column("is_system", Boolean, default=False),  # System statuses can't be deleted
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 8. Dynamic User Role table (NEW)
+user_role_table = Table(
+    "user_role",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(100), nullable=False, unique=True),  # e.g., "sales_manager", "ceo"
+    Column("display_name", String(255), nullable=False),  # e.g., "Sales Manager", "CEO"
+    Column("description", Text, nullable=True),
+    Column("is_active", Boolean, default=True),
+    Column("is_system", Boolean, default=False),  # System roles can't be deleted
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 9. Sales Manager Assignment table (NEW)
+sales_manager_assignment = Table(
+    "sales_manager_assignment",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("customer_id", Integer, ForeignKey("customer.id", ondelete="CASCADE"), nullable=False),
+    Column("sales_manager_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("assigned_at", DateTime, default=datetime.utcnow),
+    Column("assigned_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),  # Who assigned (or NULL for auto-assign)
+    Column("is_active", Boolean, default=True),
+    UniqueConstraint("customer_id", name="uq_customer_assignment")  # One customer can only have one active assignment
+)
+
+# 10. Sales Manager Assignment Counter (for round-robin)
+sales_manager_counter = Table(
+    "sales_manager_counter",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("last_assigned_index", Integer, default=0),  # Track which sales manager was last assigned
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
