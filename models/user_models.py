@@ -23,7 +23,6 @@ class PageName(enum.Enum):
     crm = "crm"
     finance_list = "finance_list"
     update_list = "update_list"
-    international_sales = "international_sales"  # NEW: International sales page
 
 
 

@@ -44,7 +44,7 @@ class ConversationLanguage(enum.Enum):
 
 class CustomerType(enum.Enum):
     """Customer type for filtering"""
-    default = "default"  # Default/local customers
+    local = "local"  # Local customers
     international = "international"  # International customers
 
 # 1. Payment table
@@ -87,7 +87,7 @@ customer = Table(
     Column("phone_number", String(500), nullable=False),
     Column("status", Enum(CustomerStatus), nullable=False),
     Column("status_name", String(100), nullable=True),  # NEW: Dynamic status from customer_status table (optional, for custom statuses)
-    Column("type", Enum(CustomerType), nullable=True, default=None),  # NEW: Customer type (default/international)
+    Column("type", Enum(CustomerType), nullable=True, default=None),  # NEW: Customer type (local/international)
     Column("assistant_name", String(255), nullable=True),
     Column("notes", Text, nullable=True),
     Column("audio_file_id", String(500), nullable=True),  # Telegram file ID
