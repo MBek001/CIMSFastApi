@@ -9,6 +9,7 @@ from routers.users import router as users_router
 from routers.crm import router as crm_router
 from routers.crm_sales_manager import router as crm_sales_manager_router
 from routers.crm_dynamic_status import router as crm_dynamic_status_router
+from routers.sales_stats import router as sales_stats_router
 from routers.wordpress import router as wordpress_router
 from routers.finance import router as finance_router
 from routers.finance_advanced import advanced_router as advanced_router
@@ -54,6 +55,7 @@ app.include_router(wordpress_router)
 app.include_router(crm_router)
 app.include_router(crm_sales_manager_router)
 app.include_router(crm_dynamic_status_router)
+app.include_router(sales_stats_router)
 app.include_router(finance_router)
 app.include_router(advanced_router)
 app.include_router(updates_router)

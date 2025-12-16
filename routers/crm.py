@@ -9,7 +9,7 @@ from utils.crypto import decrypt_text
 from fastapi.responses import RedirectResponse
 from telegram.error import TelegramError
 # Import qilinadigan modellar
-from models.admin_models import customer, CustomerStatus
+from models.admin_models import customer, CustomerStatus, CustomerType
 from models.user_models import user_page_permission, PageName
 from schemes.crm_schemes import (
 CustomerResponse,
@@ -412,6 +412,7 @@ async def create_customer(
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
+        customer_type: Optional[str] = Form(None),  # NEW: Customer type (default/international)
         conversation_language: Optional[ConversationLanguageEnum] = Form(ConversationLanguageEnum.UZ),
         audio: Optional[UploadFile] = File(None),
         session: AsyncSession = Depends(get_async_session),
@@ -420,6 +421,7 @@ async def create_customer(
     """
     Yangi mijoz yaratish - barcha audio formatlar bilan (MP3, OGG, WAV, M4A, ...)
     Status: dinamik status name (string) - masalan: "contacted", "project_started", va hokazo
+    Type: "default" (local) yoki "international" - default null
     """
     # Huquq tekshiruvi
     permissions_result = await session.execute(
@@ -479,6 +481,14 @@ async def create_customer(
     encrypted_full_name = encrypt_text(full_name)
     encrypted_phone = encrypt_text(phone_number)
 
+    # Parse customer type
+    parsed_type = None
+    if customer_type:
+        if customer_type.lower() == "international":
+            parsed_type = CustomerType.international
+        elif customer_type.lower() == "default":
+            parsed_type = CustomerType.default
+
     # Mijozni yaratish
     customer_dict = {
         "full_name": encrypted_full_name,
@@ -487,6 +497,7 @@ async def create_customer(
         "phone_number": encrypted_phone,
         "status": CustomerStatus.contacted,  # Default enum for backward compatibility
         "status_name": status_name,  # NEW: Dynamic status name
+        "type": parsed_type,  # NEW: Customer type (default/international)
         "assistant_name": assistant_name,
         "notes": notes,
         "audio_file_id": audio_file_id,

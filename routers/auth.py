@@ -176,7 +176,7 @@ async def resend_verification_code(
 
 
 # 4. LOGIN
-@router.post("/login", response_model=Token, summary="Tizimga kirish")
+@router.post("/login", response_model=TokenWithRefresh, summary="Tizimga kirish")
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_async_session),
