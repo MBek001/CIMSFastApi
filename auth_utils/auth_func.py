@@ -46,6 +46,14 @@ async def get_current_user(
     session: AsyncSession = Depends(get_async_session)
 ):
     """Foydalanuvchini token orqali aniqlash"""
+    # Check if credentials exist
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token yuborilmagan. Authorization header kerak.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     token = credentials.credentials
 
     credentials_exception = HTTPException(
