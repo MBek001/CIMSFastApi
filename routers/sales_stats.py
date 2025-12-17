@@ -52,15 +52,12 @@ async def require_sales_access(
     current_user=Depends(get_current_active_user),
     session: AsyncSession = Depends(get_async_session)
 ):
-    """Check if user has CRM or International Sales access"""
+    """Check if user has CRM access"""
     result = await session.execute(
         select(user_page_permission.c.page_name)
         .where(
             (user_page_permission.c.user_id == current_user.id) &
-            (or_(
-                user_page_permission.c.page_name == PageName.crm,
-                user_page_permission.c.page_name == PageName.international_sales
-            ))
+            (user_page_permission.c.page_name == PageName.crm)
         )
     )
     permissions = result.fetchall()
@@ -103,7 +100,7 @@ def get_date_ranges():
 
 @router.get("/stats", response_model=SalesStatsResponse, summary="Sales statistika")
 async def get_sales_stats(
-    customer_type: Optional[str] = Query(None, description="Customer type filter: 'international' or 'default' or null for all"),
+    customer_type: Optional[str] = Query(None, description="Customer type filter: 'international' or 'local' or null for all"),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(require_sales_access)
 ):
@@ -117,7 +114,7 @@ async def get_sales_stats(
     customer_type parameter:
     - null/None: Barcha leadlar
     - "international": Faqat international leadlar
-    - "default": Faqat default leadlar
+    - "local": Faqat local leadlar (null ham shu yerga kiradi)
     """
     dates = get_date_ranges()
 
@@ -125,10 +122,10 @@ async def get_sales_stats(
     type_filter = None
     if customer_type == "international":
         type_filter = customer.c.type == CustomerType.international
-    elif customer_type == "default":
+    elif customer_type == "local":
         type_filter = or_(
-            customer.c.type == CustomerType.default,
-            customer.c.type == None  # null values treated as default
+            customer.c.type == CustomerType.local,
+            customer.c.type == None  # null values treated as local
         )
 
     # Count today's leads
@@ -185,7 +182,7 @@ async def get_sales_stats(
 @router.get("/detailed", response_model=DetailedSalesResponse, summary="Batafsil sales statistika")
 async def get_detailed_sales_stats(
     days: int = Query(30, ge=1, le=365, description="Necha kunlik ma'lumot ko'rsatish (1-365)"),
-    customer_type: Optional[str] = Query(None, description="Customer type filter: 'international' or 'default' or null for all"),
+    customer_type: Optional[str] = Query(None, description="Customer type filter: 'international' or 'local' or null for all"),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(require_sales_access)
 ):
@@ -203,9 +200,9 @@ async def get_detailed_sales_stats(
     type_filter = None
     if customer_type == "international":
         type_filter = customer.c.type == CustomerType.international
-    elif customer_type == "default":
+    elif customer_type == "local":
         type_filter = or_(
-            customer.c.type == CustomerType.default,
+            customer.c.type == CustomerType.local,
             customer.c.type == None
         )
 
@@ -334,7 +331,7 @@ async def get_international_leads(
             "phone_number": decrypt_text(c.phone_number),
             "status": c.status.value if hasattr(c.status, 'value') else str(c.status),
             "status_name": c.status_name,
-            "type": c.type.value if c.type else "default",
+            "type": c.type.value if c.type else "local",
             "assistant_name": c.assistant_name,
             "notes": c.notes,
             "conversation_language": c.conversation_language.value if c.conversation_language else "uz",

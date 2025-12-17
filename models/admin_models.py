@@ -44,7 +44,7 @@ class ConversationLanguage(enum.Enum):
 
 class CustomerType(enum.Enum):
     """Customer type for filtering"""
-    default = "default"  # Default/local customers
+    local = "local"  # Local customers
     international = "international"  # International customers
 
 # 1. Payment table
@@ -87,7 +87,7 @@ customer = Table(
     Column("phone_number", String(500), nullable=False),
     Column("status", Enum(CustomerStatus), nullable=False),
     Column("status_name", String(100), nullable=True),  # NEW: Dynamic status from customer_status table (optional, for custom statuses)
-    Column("type", Enum(CustomerType), nullable=True, default=None),  # NEW: Customer type (default/international)
+    Column("type", Enum(CustomerType), nullable=True, default=None),  # NEW: Customer type (local/international)
     Column("assistant_name", String(255), nullable=True),
     Column("notes", Text, nullable=True),
     Column("audio_file_id", String(500), nullable=True),  # Telegram file ID
@@ -183,4 +183,69 @@ sales_manager_counter = Table(
     Column("id", Integer, primary_key=True),
     Column("last_assigned_index", Integer, default=0),  # Track which sales manager was last assigned
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 11. Department table (NEW) - for organizing employees into departments
+department = Table(
+    "department",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(100), nullable=False, unique=True),  # e.g., "Dev Team", "Marketing Team"
+    Column("display_name", String(255), nullable=False),  # e.g., "Development Team"
+    Column("description", Text, nullable=True),
+    Column("expected_updates_per_week", Integer, default=5),  # How many updates expected per week
+    Column("is_active", Boolean, default=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 12. User Department mapping table (NEW)
+user_department = Table(
+    "user_department",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("department_id", Integer, ForeignKey("department.id", ondelete="CASCADE"), nullable=False),
+    Column("joined_at", DateTime, default=datetime.utcnow),
+    Column("is_active", Boolean, default=True),
+    UniqueConstraint("user_id", "department_id", name="uq_user_department")
+)
+
+# 13. Daily Update Log table (NEW) - stores updates from Telegram channel
+daily_update_log = Table(
+    "daily_update_log",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("telegram_username", String(100), nullable=True),  # Telegram username (from #username)
+    Column("update_date", Date, nullable=False, index=True),  # Date of the update
+    Column("update_content", Text, nullable=False),  # The actual update text
+    Column("telegram_message_id", String(100), nullable=True),  # Original telegram message ID
+    Column("is_valid", Boolean, default=True),  # Whether the update is considered valid
+    Column("parsed_at", DateTime, default=datetime.utcnow),  # When it was parsed from telegram
+    Column("created_at", DateTime, default=datetime.utcnow)
+)
+
+# 14. Update Configuration table (NEW) - system-wide update tracking settings
+update_config = Table(
+    "update_config",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("working_days_per_week", Integer, default=6),  # Expected working days per week
+    Column("min_update_length", Integer, default=20),  # Minimum characters for valid update
+    Column("update_deadline_hour", Integer, default=23),  # Hour by which update should be submitted (23:00)
+    Column("telegram_channel_id", String(100), nullable=True),  # Telegram channel ID for updates
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 15. Missed Update Notification table (NEW) - tracks when notifications were sent
+missed_update_notification = Table(
+    "missed_update_notification",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("missed_date", Date, nullable=False),
+    Column("notified_at", DateTime, default=datetime.utcnow),
+    Column("notification_sent", Boolean, default=False),
+    UniqueConstraint("user_id", "missed_date", name="uq_user_missed_date")
 )

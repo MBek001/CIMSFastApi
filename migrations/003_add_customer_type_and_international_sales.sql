@@ -1,6 +1,6 @@
--- Migration: Add Customer Type and International Sales Page
--- Date: 2025-12-15
--- Description: Adds customer type column and international_sales page permission
+-- Migration: Add Customer Type (local/international)
+-- Date: 2025-12-16
+-- Description: Adds customer type column (local/international, null allowed)
 
 -- ========================================
 -- 1. Add customer type column to customer table
@@ -8,7 +8,7 @@
 
 -- Create CustomerType enum if not exists
 DO $$ BEGIN
-    CREATE TYPE customertype AS ENUM ('default', 'international');
+    CREATE TYPE customertype AS ENUM ('local', 'international');
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
@@ -21,41 +21,21 @@ ADD COLUMN IF NOT EXISTS type customertype DEFAULT NULL;
 CREATE INDEX IF NOT EXISTS idx_customer_type ON customer(type);
 
 -- ========================================
--- 2. Add international_sales to PageName enum
--- ========================================
-
--- PostgreSQL doesn't allow adding enum values in a transaction-safe way directly
--- We need to add it using ALTER TYPE
-DO $$ BEGIN
-    -- Check if international_sales already exists
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_enum
-        WHERE enumlabel = 'international_sales'
-        AND enumtypid = (
-            SELECT oid FROM pg_type WHERE typname = 'pagename'
-        )
-    ) THEN
-        -- Add new enum value
-        ALTER TYPE pagename ADD VALUE 'international_sales';
-    END IF;
-END $$;
-
--- ========================================
 -- NOTES:
 -- ========================================
 -- This migration adds:
--- 1. customer.type column (default/international) - nullable, default NULL
--- 2. international_sales page to PageName enum
+-- 1. customer.type column (local/international) - nullable, default NULL
 --
 -- After running this migration:
--- 1. Existing customers will have type=NULL (treated as default)
--- 2. New customers can specify type="international" or "default"
--- 3. CEO can grant international_sales page permission to users
--- 4. Use /sales/stats and /sales/detailed endpoints for statistics
--- 5. Use /sales/international endpoint for international leads list
+-- 1. Existing customers will have type=NULL (treated as local)
+-- 2. New customers can specify type="international" or "local"
+-- 3. All leads are visible in CRM page - filter by type to see local/international
+-- 4. Use /sales/stats and /sales/detailed endpoints for statistics with type filtering
 --
 -- API Usage:
--- POST /crm/customers with customer_type="international" or "default"
--- GET /sales/stats?customer_type=international
--- GET /sales/detailed?days=30&customer_type=international
--- GET /sales/international
+-- POST /crm/customers with customer_type="international" or "local"
+-- GET /sales/stats?customer_type=local (local leads including null)
+-- GET /sales/stats?customer_type=international (only international leads)
+-- GET /sales/stats (all leads - no filter)
+-- GET /sales/detailed?days=30&customer_type=local
+-- GET /sales/international (only international leads list)

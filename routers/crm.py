@@ -412,7 +412,7 @@ async def create_customer(
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
-        customer_type: Optional[str] = Form(None),  # NEW: Customer type (default/international)
+        customer_type: Optional[str] = Form(None),  # NEW: Customer type (local/international)
         conversation_language: Optional[ConversationLanguageEnum] = Form(ConversationLanguageEnum.UZ),
         audio: Optional[UploadFile] = File(None),
         session: AsyncSession = Depends(get_async_session),
@@ -421,7 +421,7 @@ async def create_customer(
     """
     Yangi mijoz yaratish - barcha audio formatlar bilan (MP3, OGG, WAV, M4A, ...)
     Status: dinamik status name (string) - masalan: "contacted", "project_started", va hokazo
-    Type: "default" (local) yoki "international" - default null
+    Type: "local" yoki "international" - default null
     """
     # Huquq tekshiruvi
     permissions_result = await session.execute(
@@ -486,8 +486,8 @@ async def create_customer(
     if customer_type:
         if customer_type.lower() == "international":
             parsed_type = CustomerType.international
-        elif customer_type.lower() == "default":
-            parsed_type = CustomerType.default
+        elif customer_type.lower() == "local":
+            parsed_type = CustomerType.local
 
     # Mijozni yaratish
     customer_dict = {
@@ -497,7 +497,7 @@ async def create_customer(
         "phone_number": encrypted_phone,
         "status": CustomerStatus.contacted,  # Default enum for backward compatibility
         "status_name": status_name,  # NEW: Dynamic status name
-        "type": parsed_type,  # NEW: Customer type (default/international)
+        "type": parsed_type,  # NEW: Customer type (local/international)
         "assistant_name": assistant_name,
         "notes": notes,
         "audio_file_id": audio_file_id,
