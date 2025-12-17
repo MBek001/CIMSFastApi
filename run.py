@@ -14,6 +14,7 @@ from routers.wordpress import router as wordpress_router
 from routers.finance import router as finance_router
 from routers.finance_advanced import advanced_router as advanced_router
 from routers.updates import router as updates_router
+from routers.update_tracking import router as update_tracking_router
 from routers.management import router as management_router
 from routers.instagram import router as instagram_router
 
@@ -59,6 +60,7 @@ app.include_router(sales_stats_router)
 app.include_router(finance_router)
 app.include_router(advanced_router)
 app.include_router(updates_router)
+app.include_router(update_tracking_router)
 app.include_router(management_router)
 app.include_router(instagram_router)
 
