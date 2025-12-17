@@ -913,24 +913,28 @@ from auth_utils.auth_func import  get_current_user
 
 
 
-# 1️⃣ STATUS BO‘YICHA FILTER
-@router.get("/customers/filter/status", response_model=List[CustomerResponse], summary="Status bo‘yicha mijozlarni filterlash")
+# 1️⃣ STATUS BO'YICHA FILTER (Dynamic - customer_status jadvalidan)
+@router.get("/customers/filter/status", response_model=List[CustomerResponse], summary="Status bo'yicha mijozlarni filterlash")
 async def filter_customers_by_status(
-        status_filter: CustomerStatus = Query(..., description="Mijoz statusi bo‘yicha filter"),
+        status_filter: str = Query(..., description="Mijoz statusi bo'yicha filter (dynamic status name)"),
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(get_current_user),  # 🔹 faqat token validatsiya
 ):
-    """Mijozlarni status bo‘yicha filterlaydi"""
+    """
+    Mijozlarni status bo'yicha filterlaydi (dynamic status)
+    status_filter: status name (masalan: 'contacted', 'kerak', 'project_started')
+    """
     try:
+        # Filter by status_name (dynamic status) instead of status enum
         result = await session.execute(
             select(customer)
-            .where(customer.c.status == status_filter)
+            .where(customer.c.status_name == status_filter)
             .order_by(desc(customer.c.created_at))
         )
         customers = result.fetchall()
 
         if not customers:
-            raise HTTPException(status_code=404, detail="Berilgan status bo‘yicha mijoz topilmadi")
+            raise HTTPException(status_code=404, detail=f"'{status_filter}' status bo'yicha mijoz topilmadi")
 
         return [
             CustomerResponse(
@@ -939,7 +943,7 @@ async def filter_customers_by_status(
                 platform=c.platform,
                 username=c.username,
                 phone_number=decrypt_text(c.phone_number),
-                status=c.status.value,
+                status=c.status_name or c.status.value,  # Use status_name if available
                 assistant_name=c.assistant_name,
                 notes=c.notes,
                 audio_file_id=c.audio_file_id,
