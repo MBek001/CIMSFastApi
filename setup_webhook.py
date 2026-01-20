@@ -142,7 +142,11 @@ async def check_webhook():
 
         if webhook_info.last_error_date:
             from datetime import datetime
-            error_time = datetime.fromtimestamp(webhook_info.last_error_date)
+            # last_error_date timestamp (int) yoki datetime bo'lishi mumkin
+            if isinstance(webhook_info.last_error_date, int):
+                error_time = datetime.fromtimestamp(webhook_info.last_error_date)
+            else:
+                error_time = webhook_info.last_error_date
             print(f"\n⚠️  So'nggi xato ({error_time}):")
             print(f"   {webhook_info.last_error_message}")
 
