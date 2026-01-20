@@ -3,7 +3,7 @@ from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from fastapi import UploadFile, HTTPException
 import io
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 # Timeout sozlamalarini oshirish
 request = HTTPXRequest(
@@ -14,7 +14,8 @@ request = HTTPXRequest(
     pool_timeout=60.0
 )
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN, request=request)
+# AUDIO BOT - audio fayllarni yuklash uchun
+bot = Bot(token=TELEGRAM_AUDIO_BOT_TOKEN, request=request)
 
 
 async def upload_audio_to_telegram(audio_file: UploadFile) -> str:
