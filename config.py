@@ -40,9 +40,16 @@ PASSWORD_RESET_EXPIRE_MINUTES = 30
 
 
 # Telegram Bot Tokens - 2 ta alohida bot
-TELEGRAM_AUDIO_BOT_TOKEN = os.environ.get('TELEGRAM_AUDIO_BOT_TOKEN')  # Audio yuklash uchun
-TELEGRAM_UPDATE_BOT_TOKEN = os.environ.get('TELEGRAM_UPDATE_BOT_TOKEN')  # Webhook/update parser uchun
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')  # Audio yuborilayotgan chat ID
+TELEGRAM_AUDIO_BOT_TOKEN = os.environ.get('TELEGRAM_AUDIO_BOT_TOKEN')  # Audio bot tokeni
+TELEGRAM_UPDATE_BOT_TOKEN = os.environ.get('TELEGRAM_UPDATE_BOT_TOKEN')  # Update bot tokeni
+
+# Telegram Chat IDs - har bir bot uchun alohida guruh
+TELEGRAM_AUDIO_CHAT_ID = os.environ.get('TELEGRAM_AUDIO_CHAT_ID')  # Audio yuborilayotgan guruh ID
+TELEGRAM_UPDATE_CHAT_ID = os.environ.get('TELEGRAM_UPDATE_CHAT_ID')  # Yangilanishlar o'qilayotgan guruh ID
+
+# Backward compatibility uchun (eski kod ishlab turishi uchun)
+TELEGRAM_CHAT_ID = TELEGRAM_AUDIO_CHAT_ID  # Default: audio chat ID
+
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # Webhook URL
 
 

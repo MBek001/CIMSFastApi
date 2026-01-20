@@ -72,7 +72,11 @@ Group Privacy - DISABLE (Guruh xabarlarini o'qish uchun)
 
 **Eslatma:** Audio bot uchun bu sozlama shart emas (u faqat xabar yuboradi)
 
-### 3-qadam: Chat ID ni oling
+### 4-qadam: Chat ID larni oling
+
+Har bir bot uchun o'z guruhining ID sini olish kerak (yoki bir xil guruh bo'lsa, bir xil ID ishlatsa bo'ladi).
+
+#### Audio Bot Chat ID (TELEGRAM_AUDIO_CHAT_ID)
 
 **Opsiya A: Guruh uchun**
 
@@ -97,6 +101,21 @@ Group Privacy - DISABLE (Guruh xabarlarini o'qish uchun)
 1. [@userinfobot](https://t.me/userinfobot) ga `/start` yuboring
 2. Sizning Chat ID ni ko'rsatadi
 
+#### Update Bot Chat ID (TELEGRAM_UPDATE_CHAT_ID)
+
+Update bot kunlik yangilanishlar yoziladigan guruhda ishlaydi.
+
+1. **Update botni** yangilanishlar guruhiga qo'shing
+2. Guruhda biror xabar yozing
+3. Brauzerda oching:
+   ```
+   https://api.telegram.org/bot<UPDATE_BOT_TOKEN>/getUpdates
+   ```
+4. `"chat":{"id":-1001234567890` ni toping
+5. Bu TELEGRAM_UPDATE_CHAT_ID bo'ladi
+
+**Muhim:** Agar audio va update botlar bir xil guruhda ishlaydigan bo'lsa, bir xil Chat ID ni ikkala joyga ham qo'yishingiz mumkin.
+
 ---
 
 ## ⚙️ Sozlash
@@ -110,10 +129,11 @@ Group Privacy - DISABLE (Guruh xabarlarini o'qish uchun)
 
 # 1. AUDIO BOT - Audio fayllarni yuklash uchun
 TELEGRAM_AUDIO_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
-TELEGRAM_CHAT_ID=-1001234567890  # Audio yuborilayotgan guruh/kanal ID
+TELEGRAM_AUDIO_CHAT_ID=-1001234567890  # Audio yuborilayotgan guruh/kanal ID
 
 # 2. UPDATE BOT - Webhook va yangilanishlarni qabul qilish uchun
 TELEGRAM_UPDATE_BOT_TOKEN=0987654321:ZYXwvuTSRqponMLKjihGFEdcba
+TELEGRAM_UPDATE_CHAT_ID=-1002345678901  # Yangilanishlar o'qilayotgan guruh ID
 WEBHOOK_URL=https://your-domain.com  # Server domeningiz (HTTPS!)
 ```
 
@@ -121,8 +141,11 @@ WEBHOOK_URL=https://your-domain.com  # Server domeningiz (HTTPS!)
 
 - `TELEGRAM_AUDIO_BOT_TOKEN` - Audio bot uchun token (1-bot)
 - `TELEGRAM_UPDATE_BOT_TOKEN` - Update bot uchun token (2-bot)
-- `TELEGRAM_CHAT_ID` - Audio yuborilayotgan guruh/kanal ID (manfiy raqam)
+- `TELEGRAM_AUDIO_CHAT_ID` - Audio yuborilayotgan guruh/kanal ID (manfiy raqam)
+- `TELEGRAM_UPDATE_CHAT_ID` - Yangilanishlar o'qilayotgan guruh ID (manfiy raqam)
 - `WEBHOOK_URL` - Server domeni (HTTPS bo'lishi shart!)
+
+**Eslatma:** Agar ikkala bot ham bir xil guruhda ishlasa, `TELEGRAM_AUDIO_CHAT_ID` va `TELEGRAM_UPDATE_CHAT_ID` bir xil bo'lishi mumkin.
 
 ---
 

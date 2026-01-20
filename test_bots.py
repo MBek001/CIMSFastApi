@@ -17,7 +17,8 @@ load_dotenv()
 # Konfiguratsiya - 2 ta alohida bot
 TELEGRAM_AUDIO_BOT_TOKEN = os.getenv('TELEGRAM_AUDIO_BOT_TOKEN')
 TELEGRAM_UPDATE_BOT_TOKEN = os.getenv('TELEGRAM_UPDATE_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TELEGRAM_AUDIO_CHAT_ID = os.getenv('TELEGRAM_AUDIO_CHAT_ID')
+TELEGRAM_UPDATE_CHAT_ID = os.getenv('TELEGRAM_UPDATE_CHAT_ID')
 
 
 async def test_audio_bot():
@@ -31,9 +32,9 @@ async def test_audio_bot():
         print("   @BotFather dan audio bot uchun token oling")
         return False
 
-    if not TELEGRAM_CHAT_ID:
-        print("❌ XATO: TELEGRAM_CHAT_ID .env faylida topilmadi!")
-        print("   Guruh yoki kanal ID sini .env ga qo'shing")
+    if not TELEGRAM_AUDIO_CHAT_ID:
+        print("❌ XATO: TELEGRAM_AUDIO_CHAT_ID .env faylida topilmadi!")
+        print("   Audio yuborilayotgan guruh/kanal ID sini .env ga qo'shing")
         return False
 
     try:
@@ -55,17 +56,17 @@ async def test_audio_bot():
 
         # Test xabari yuborish
         print(f"\n📤 Test xabarini yuborish...")
-        print(f"   Chat ID: {TELEGRAM_CHAT_ID}")
+        print(f"   Chat ID: {TELEGRAM_AUDIO_CHAT_ID}")
 
         message = await bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
+            chat_id=TELEGRAM_AUDIO_CHAT_ID,
             text="🎵 Audio Bot Test\n\nBot muvaffaqiyatli ishlamoqda!\nAudio fayllarni yuborish tayyor."
         )
 
         print(f"✅ Xabar yuborildi! Message ID: {message.message_id}")
 
         # Chat ma'lumotlarini ko'rsatish
-        chat = await bot.get_chat(chat_id=TELEGRAM_CHAT_ID)
+        chat = await bot.get_chat(chat_id=TELEGRAM_AUDIO_CHAT_ID)
         print(f"\n📊 Chat ma'lumotlari:")
         print(f"   Turi: {chat.type}")
         if chat.title:
@@ -259,7 +260,8 @@ async def check_environment():
     env_vars = {
         'TELEGRAM_AUDIO_BOT_TOKEN': TELEGRAM_AUDIO_BOT_TOKEN,
         'TELEGRAM_UPDATE_BOT_TOKEN': TELEGRAM_UPDATE_BOT_TOKEN,
-        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
+        'TELEGRAM_AUDIO_CHAT_ID': TELEGRAM_AUDIO_CHAT_ID,
+        'TELEGRAM_UPDATE_CHAT_ID': TELEGRAM_UPDATE_CHAT_ID,
         'WEBHOOK_URL': os.getenv('WEBHOOK_URL'),
         'DB_NAME': os.getenv('DB_NAME'),
         'DB_HOST': os.getenv('DB_HOST'),
@@ -277,15 +279,16 @@ async def check_environment():
 
         print(f"{status} {key:30} = {display_value}")
 
-        if not value and key in ['TELEGRAM_AUDIO_BOT_TOKEN', 'TELEGRAM_UPDATE_BOT_TOKEN', 'TELEGRAM_CHAT_ID']:
+        if not value and key in ['TELEGRAM_AUDIO_BOT_TOKEN', 'TELEGRAM_UPDATE_BOT_TOKEN', 'TELEGRAM_AUDIO_CHAT_ID', 'TELEGRAM_UPDATE_CHAT_ID']:
             all_ok = False
 
     if not all_ok:
         print(f"\n⚠️  Ba'zi muhim o'zgaruvchilar o'rnatilmagan!")
         print(f"   .env faylini to'ldiring:")
-        print(f"   - TELEGRAM_AUDIO_BOT_TOKEN (audio yuklash uchun)")
-        print(f"   - TELEGRAM_UPDATE_BOT_TOKEN (webhook/update uchun)")
-        print(f"   - TELEGRAM_CHAT_ID (guruh ID)")
+        print(f"   - TELEGRAM_AUDIO_BOT_TOKEN (audio bot tokeni)")
+        print(f"   - TELEGRAM_UPDATE_BOT_TOKEN (update bot tokeni)")
+        print(f"   - TELEGRAM_AUDIO_CHAT_ID (audio yuborilayotgan guruh ID)")
+        print(f"   - TELEGRAM_UPDATE_CHAT_ID (yangilanishlar o'qilayotgan guruh ID)")
 
     return all_ok
 

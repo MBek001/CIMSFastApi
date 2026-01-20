@@ -3,7 +3,7 @@ from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from fastapi import UploadFile, HTTPException
 import io
-from config import TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID
 
 # Timeout sozlamalarini oshirish
 request = HTTPXRequest(
@@ -38,7 +38,7 @@ async def upload_audio_to_telegram(audio_file: UploadFile) -> str:
         # OGG va OPUS formatlar uchun send_voice ishlatish
         if file_extension in ['ogg', 'opus', 'oga'] or 'ogg' in content_type:
             message = await bot.send_voice(
-                chat_id=TELEGRAM_CHAT_ID,
+                chat_id=TELEGRAM_AUDIO_CHAT_ID,
                 voice=io.BytesIO(audio_content),
                 filename=audio_file.filename or 'audio.ogg',
                 read_timeout=180,    # 3 daqiqa
@@ -49,7 +49,7 @@ async def upload_audio_to_telegram(audio_file: UploadFile) -> str:
         # MP3, M4A, WAV, FLAC uchun send_audio
         elif file_extension in ['mp3', 'm4a', 'wav', 'flac', 'aac', 'wma']:
             message = await bot.send_audio(
-                chat_id=TELEGRAM_CHAT_ID,
+                chat_id=TELEGRAM_AUDIO_CHAT_ID,
                 audio=io.BytesIO(audio_content),
                 filename=audio_file.filename or 'audio.mp3',
                 title=audio_file.filename or 'Audio File',
@@ -61,7 +61,7 @@ async def upload_audio_to_telegram(audio_file: UploadFile) -> str:
         # Noma'lum formatlar uchun send_document
         else:
             message = await bot.send_document(
-                chat_id=TELEGRAM_CHAT_ID,
+                chat_id=TELEGRAM_AUDIO_CHAT_ID,
                 document=io.BytesIO(audio_content),
                 filename=audio_file.filename or 'audio_file',
                 read_timeout=180,    # 3 daqiqa
