@@ -111,7 +111,8 @@ async def test_update_bot():
         # Webhook ma'lumotlarini olish
         webhook_info = await bot.get_webhook_info()
         print(f"\n📡 Webhook ma'lumotlari:")
-        print(f"   URL: {webhook_info.url or 'O\'rnatilmagan'}")
+        url_text = webhook_info.url or "O'rnatilmagan"
+        print(f"   URL: {url_text}")
         print(f"   Pending updates: {webhook_info.pending_update_count}")
 
         if webhook_info.last_error_message:
@@ -170,7 +171,7 @@ async def test_update_parser():
             print(f"\n📊 Statistika:")
             print(f"   Qatorlar: {stats['line_count']}")
             print(f"   Bullet pointlar: {stats['bullet_count']}")
-            print(f"   Belgilar: {stats['char_count']}")
+            print(f"   Belgilar: {stats['character_count']}")
             print(f"   So'zlar: {stats['word_count']}")
 
             print(f"\n✨ Update parser bot to'liq ishlayapti!")

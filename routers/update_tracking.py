@@ -30,13 +30,41 @@ router = APIRouter(prefix="/update-tracking", tags=["Update Tracking"])
 # PYDANTIC MODELS
 # ========================================
 
+class TelegramUser(BaseModel):
+    """Telegram user info"""
+    id: int
+    first_name: str
+    username: Optional[str] = None
+    language_code: Optional[str] = None
+
+
+class TelegramChat(BaseModel):
+    """Telegram chat info"""
+    id: int
+    type: str
+    title: Optional[str] = None
+
+
+class TelegramMessage(BaseModel):
+    """Telegram message"""
+    message_id: int
+    from_: TelegramUser
+    chat: TelegramChat
+    date: int
+    text: Optional[str] = None
+
+    class Config:
+        # Allow 'from' as field name (it's a Python keyword)
+        populate_by_name = True
+        # Map 'from' to 'from_'
+        fields = {'from_': 'from'}
+
+
 class TelegramWebhookPayload(BaseModel):
-    """Telegram webhook payload"""
-    message_id: str
-    chat_id: str
-    text: str
-    from_user: Optional[str] = None
-    date: Optional[int] = None
+    """Telegram webhook payload - Standard Telegram format"""
+    update_id: int
+    message: Optional[TelegramMessage] = None
+    edited_message: Optional[TelegramMessage] = None
 
 
 class UpdateStats(BaseModel):
@@ -303,10 +331,16 @@ async def telegram_webhook(
 ):
     """
     Webhook endpoint for Telegram bot to send update messages
-    Parses the message and stores in database
+    Receives standard Telegram webhook format and processes messages
     """
+    # Get the message (could be regular message or edited message)
+    message = payload.message or payload.edited_message
+
+    if not message or not message.text:
+        return {"status": "ignored", "reason": "No text message"}
+
     # Parse the message
-    parsed = parse_update_message(payload.text)
+    parsed = parse_update_message(message.text)
 
     if not parsed:
         return {"status": "ignored", "reason": "Invalid format"}
@@ -345,7 +379,7 @@ async def telegram_webhook(
             .where(daily_update_log.c.id == existing_update.id)
             .values(
                 update_content=parsed['update_content'],
-                telegram_message_id=payload.message_id,
+                telegram_message_id=str(message.message_id),
                 is_valid=is_valid,
                 parsed_at=datetime.now()
             )
@@ -358,7 +392,7 @@ async def telegram_webhook(
                 telegram_username=parsed['telegram_username'],
                 update_date=parsed['update_date'],
                 update_content=parsed['update_content'],
-                telegram_message_id=payload.message_id,
+                telegram_message_id=str(message.message_id),
                 is_valid=is_valid,
                 parsed_at=datetime.now(),
                 created_at=datetime.now()
