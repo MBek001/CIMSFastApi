@@ -132,10 +132,13 @@ async def check_webhook():
         webhook_info = await bot.get_webhook_info()
 
         print(f"\n📊 Webhook ma'lumotlari:")
-        print(f"   URL: {webhook_info.url or 'O\'rnatilmagan'}")
+        url_text = webhook_info.url or "O'rnatilmagan"
+        print(f"   URL: {url_text}")
         print(f"   Kutilayotgan yangilanishlar: {webhook_info.pending_update_count}")
-        print(f"   Max bog'lanishlar: {webhook_info.max_connections or 'N/A'}")
-        print(f"   Ruxsat etilgan: {webhook_info.allowed_updates or 'Barchasi'}")
+        max_conn = webhook_info.max_connections or "N/A"
+        print(f"   Max bog'lanishlar: {max_conn}")
+        allowed = webhook_info.allowed_updates or "Barchasi"
+        print(f"   Ruxsat etilgan: {allowed}")
 
         if webhook_info.last_error_date:
             from datetime import datetime
