@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Bot Webhook Setup Script
-Bu skript Telegram botga webhook o'rnatadi va sozlaydi
+Bu skript Telegram UPDATE botga webhook o'rnatadi va sozlaydi
 """
 import asyncio
 import os
@@ -13,15 +13,15 @@ from telegram.error import TelegramError
 # .env faylini yuklash
 load_dotenv()
 
-# Konfiguratsiya
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Konfiguratsiya - UPDATE BOT uchun
+TELEGRAM_UPDATE_BOT_TOKEN = os.getenv('TELEGRAM_UPDATE_BOT_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
 
 async def setup_webhook():
     """Telegram bot uchun webhookni o'rnatadi"""
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ XATO: TELEGRAM_BOT_TOKEN .env faylida topilmadi!")
+    if not TELEGRAM_UPDATE_BOT_TOKEN:
+        print("❌ XATO: TELEGRAM_UPDATE_BOT_TOKEN .env faylida topilmadi!")
         print("   @BotFather dan bot token oling va .env ga qo'shing")
         return False
 
@@ -35,7 +35,7 @@ async def setup_webhook():
 
     try:
         print(f"🤖 Bot bilan ulanish...")
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
 
         # Bot ma'lumotlarini olish
         bot_info = await bot.get_me()
@@ -97,12 +97,12 @@ async def setup_webhook():
 
 async def delete_webhook():
     """Webhookni o'chiradi (polling uchun)"""
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ XATO: TELEGRAM_BOT_TOKEN topilmadi!")
+    if not TELEGRAM_UPDATE_BOT_TOKEN:
+        print("❌ XATO: TELEGRAM_UPDATE_BOT_TOKEN topilmadi!")
         return False
 
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
         print(f"🗑️  Webhookni o'chirish...")
         success = await bot.delete_webhook(drop_pending_updates=True)
 
@@ -120,12 +120,12 @@ async def delete_webhook():
 
 async def check_webhook():
     """Webhook holatini tekshiradi"""
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ XATO: TELEGRAM_BOT_TOKEN topilmadi!")
+    if not TELEGRAM_UPDATE_BOT_TOKEN:
+        print("❌ XATO: TELEGRAM_UPDATE_BOT_TOKEN topilmadi!")
         return False
 
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
         bot_info = await bot.get_me()
         print(f"🤖 Bot: @{bot_info.username}")
 
@@ -152,12 +152,12 @@ async def check_webhook():
 
 async def test_bot():
     """Botning asosiy funksiyalarini test qiladi"""
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ XATO: TELEGRAM_BOT_TOKEN topilmadi!")
+    if not TELEGRAM_UPDATE_BOT_TOKEN:
+        print("❌ XATO: TELEGRAM_UPDATE_BOT_TOKEN topilmadi!")
         return False
 
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
 
         # Bot ma'lumotlarini olish
         bot_info = await bot.get_me()
@@ -198,7 +198,7 @@ Misollar:
 
 Muhim:
     .env faylida quyidagilar bo'lishi kerak:
-    - TELEGRAM_BOT_TOKEN=your_bot_token
+    - TELEGRAM_UPDATE_BOT_TOKEN=your_bot_token
     - WEBHOOK_URL=https://your-domain.com
     """)
 

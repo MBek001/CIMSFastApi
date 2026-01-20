@@ -14,8 +14,9 @@ from telegram.request import HTTPXRequest
 # .env faylini yuklash
 load_dotenv()
 
-# Konfiguratsiya
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Konfiguratsiya - 2 ta alohida bot
+TELEGRAM_AUDIO_BOT_TOKEN = os.getenv('TELEGRAM_AUDIO_BOT_TOKEN')
+TELEGRAM_UPDATE_BOT_TOKEN = os.getenv('TELEGRAM_UPDATE_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 
@@ -25,8 +26,9 @@ async def test_audio_bot():
     print("🎵 AUDIO BOT TESTI")
     print("="*60)
 
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ XATO: TELEGRAM_BOT_TOKEN .env faylida topilmadi!")
+    if not TELEGRAM_AUDIO_BOT_TOKEN:
+        print("❌ XATO: TELEGRAM_AUDIO_BOT_TOKEN .env faylida topilmadi!")
+        print("   @BotFather dan audio bot uchun token oling")
         return False
 
     if not TELEGRAM_CHAT_ID:
@@ -43,7 +45,7 @@ async def test_audio_bot():
             write_timeout=180.0,
             pool_timeout=60.0
         )
-        bot = Bot(token=TELEGRAM_BOT_TOKEN, request=request)
+        bot = Bot(token=TELEGRAM_AUDIO_BOT_TOKEN, request=request)
 
         # Bot ma'lumotlarini olish
         bot_info = await bot.get_me()
@@ -84,15 +86,49 @@ async def test_audio_bot():
         return False
 
 
-async def test_update_parser():
-    """Update parser botni test qiladi"""
+async def test_update_bot():
+    """Update botni (webhook bot) test qiladi"""
     print("\n" + "="*60)
-    print("📝 UPDATE PARSER BOT TESTI")
+    print("📝 UPDATE BOT TESTI (Webhook)")
     print("="*60)
 
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ XATO: TELEGRAM_BOT_TOKEN topilmadi!")
+    if not TELEGRAM_UPDATE_BOT_TOKEN:
+        print("❌ XATO: TELEGRAM_UPDATE_BOT_TOKEN .env faylida topilmadi!")
+        print("   @BotFather dan update bot uchun token oling")
         return False
+
+    try:
+        # Update bot yaratish
+        bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
+
+        # Bot ma'lumotlarini olish
+        bot_info = await bot.get_me()
+        print(f"✅ Update bot topildi: @{bot_info.username}")
+        print(f"   Ism: {bot_info.first_name}")
+        print(f"   ID: {bot_info.id}")
+
+        # Webhook ma'lumotlarini olish
+        webhook_info = await bot.get_webhook_info()
+        print(f"\n📡 Webhook ma'lumotlari:")
+        print(f"   URL: {webhook_info.url or 'O\'rnatilmagan'}")
+        print(f"   Pending updates: {webhook_info.pending_update_count}")
+
+        if webhook_info.last_error_message:
+            print(f"   ⚠️  So'nggi xato: {webhook_info.last_error_message}")
+
+        print(f"\n✨ Update bot to'liq ishlayapti!")
+        return True
+
+    except Exception as e:
+        print(f"❌ Update bot xatosi: {e}")
+        return False
+
+
+async def test_update_parser():
+    """Update parser funksiyalarini test qiladi"""
+    print("\n" + "="*60)
+    print("🔍 UPDATE PARSER FUNKSIYALARI TESTI")
+    print("="*60)
 
     try:
         from utils.update_parser import (
@@ -221,7 +257,8 @@ async def check_environment():
     print("="*60)
 
     env_vars = {
-        'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
+        'TELEGRAM_AUDIO_BOT_TOKEN': TELEGRAM_AUDIO_BOT_TOKEN,
+        'TELEGRAM_UPDATE_BOT_TOKEN': TELEGRAM_UPDATE_BOT_TOKEN,
         'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
         'WEBHOOK_URL': os.getenv('WEBHOOK_URL'),
         'DB_NAME': os.getenv('DB_NAME'),
@@ -238,14 +275,17 @@ async def check_environment():
             if value:
                 display_value = value[:10] + "..." if len(value) > 10 else "***"
 
-        print(f"{status} {key:25} = {display_value}")
+        print(f"{status} {key:30} = {display_value}")
 
-        if not value and key in ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']:
+        if not value and key in ['TELEGRAM_AUDIO_BOT_TOKEN', 'TELEGRAM_UPDATE_BOT_TOKEN', 'TELEGRAM_CHAT_ID']:
             all_ok = False
 
     if not all_ok:
         print(f"\n⚠️  Ba'zi muhim o'zgaruvchilar o'rnatilmagan!")
-        print(f"   .env faylini to'ldiring va qayta urinib ko'ring")
+        print(f"   .env faylini to'ldiring:")
+        print(f"   - TELEGRAM_AUDIO_BOT_TOKEN (audio yuklash uchun)")
+        print(f"   - TELEGRAM_UPDATE_BOT_TOKEN (webhook/update uchun)")
+        print(f"   - TELEGRAM_CHAT_ID (guruh ID)")
 
     return all_ok
 
@@ -267,10 +307,13 @@ async def run_all_tests():
     # 2. Audio botni test qilish
     audio_ok = await test_audio_bot()
 
-    # 3. Update parser botni test qilish
+    # 3. Update botni test qilish
+    update_ok = await test_update_bot()
+
+    # 4. Update parser funksiyalarini test qilish
     parser_ok = await test_update_parser()
 
-    # 4. Webhook endpointni test qilish
+    # 5. Webhook endpointni test qilish
     webhook_ok = await test_webhook_endpoint()
 
     # Natijalar
@@ -281,7 +324,8 @@ async def run_all_tests():
     results = [
         ("Muhit sozlamalari", env_ok),
         ("Audio bot", audio_ok),
-        ("Update parser bot", parser_ok),
+        ("Update bot", update_ok),
+        ("Update parser funksiyalari", parser_ok),
         ("Webhook endpoint", webhook_ok if webhook_ok is not None else "Skip"),
     ]
 
@@ -318,12 +362,14 @@ Mavjud testlar:
     all       - Barcha testlarni ishga tushirish (default)
     env       - Muhit sozlamalarini tekshirish
     audio     - Audio botni test qilish
-    parser    - Update parser botni test qilish
+    update    - Update botni (webhook) test qilish
+    parser    - Update parser funksiyalarini test qilish
     webhook   - Webhook endpointni test qilish
 
 Misollar:
     python test_bots.py              # Barcha testlar
     python test_bots.py audio        # Faqat audio bot
+    python test_bots.py update       # Faqat update bot
     python test_bots.py env          # Muhit tekshiruvi
     """)
 
@@ -343,6 +389,9 @@ async def main():
     elif test_name == "audio":
         await check_environment()
         await test_audio_bot()
+    elif test_name == "update":
+        await check_environment()
+        await test_update_bot()
     elif test_name == "parser":
         await test_update_parser()
     elif test_name == "webhook":

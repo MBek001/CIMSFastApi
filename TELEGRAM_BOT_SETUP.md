@@ -1,9 +1,11 @@
 # 🤖 Telegram Botlar Sozlash Qo'llanmasi
 
-Bu loyihada **2 ta Telegram bot** mavjud:
+Bu loyihada **2 ta ALOHIDA Telegram bot** mavjud:
 
-1. **Audio Bot** - Audio fayllarni Telegram guruhga yuboradi va saqlaydi
-2. **Update Parser Bot** - Kunlik yangilanishlarni parse qilib, bazaga saqlaydi
+1. **Audio Bot** (`TELEGRAM_AUDIO_BOT_TOKEN`) - Audio fayllarni Telegram guruhga yuboradi va saqlaydi
+2. **Update Bot** (`TELEGRAM_UPDATE_BOT_TOKEN`) - Webhook orqali kunlik yangilanishlarni qabul qiladi va bazaga saqlaydi
+
+⚠️ **MUHIM:** Ikkala bot ham TURLI botlar - har biri uchun @BotFather dan ALOHIDA token olish kerak!
 
 ## 📋 Bo'limlar
 
@@ -37,24 +39,38 @@ python run.py
 
 ## 🤖 Telegram Bot Yaratish
 
-### 1-qadam: BotFather bilan bot yarating
+### 1-qadam: AUDIO BOT yaratish
 
 1. Telegramda [@BotFather](https://t.me/BotFather) ni oching
 2. `/newbot` komandasi yuboring
 3. Bot uchun ism kiriting (masalan: "CIMS Audio Bot")
 4. Username kiriting (masalan: "cims_audio_bot")
-5. **Bot token**ni saqlang (masalan: `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`)
+5. **Bot token**ni saqlang - bu `TELEGRAM_AUDIO_BOT_TOKEN` bo'ladi
 
-### 2-qadam: Botga ruxsatlar bering
+   Masalan: `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`
 
-BotFather da quyidagi komandalarni ishga tushiring:
+### 2-qadam: UPDATE BOT yaratish
+
+1. Yana [@BotFather](https://t.me/BotFather) ga boring
+2. Yana `/newbot` komandasi yuboring
+3. Boshqa ism kiriting (masalan: "CIMS Update Bot")
+4. Boshqa username kiriting (masalan: "cims_update_bot")
+5. **Ikkinchi bot token**ni saqlang - bu `TELEGRAM_UPDATE_BOT_TOKEN` bo'ladi
+
+   Masalan: `0987654321:ZYXwvuTSRqponMLKjihGFEdcba`
+
+### 3-qadam: Update botga ruxsatlar bering
+
+BotFather da UPDATE bot uchun:
 
 ```
 /mybots
-[Botingizni tanlang]
+[Update botingizni tanlang]
 Bot Settings
 Group Privacy - DISABLE (Guruh xabarlarini o'qish uchun)
 ```
+
+**Eslatma:** Audio bot uchun bu sozlama shart emas (u faqat xabar yuboradi)
 
 ### 3-qadam: Chat ID ni oling
 
@@ -90,15 +106,21 @@ Group Privacy - DISABLE (Guruh xabarlarini o'qish uchun)
 `.env` faylini oching va quyidagi qismlarni to'ldiring:
 
 ```bash
-# Telegram Bot Sozlamalari
-TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz  # BotFather dan olingan
-TELEGRAM_CHAT_ID=-1001234567890                            # Guruh/Kanal ID
-WEBHOOK_URL=https://your-domain.com                        # Server domeningiz
+# Telegram Bot Sozlamalari - 2 TA ALOHIDA BOT!
+
+# 1. AUDIO BOT - Audio fayllarni yuklash uchun
+TELEGRAM_AUDIO_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_CHAT_ID=-1001234567890  # Audio yuborilayotgan guruh/kanal ID
+
+# 2. UPDATE BOT - Webhook va yangilanishlarni qabul qilish uchun
+TELEGRAM_UPDATE_BOT_TOKEN=0987654321:ZYXwvuTSRqponMLKjihGFEdcba
+WEBHOOK_URL=https://your-domain.com  # Server domeningiz (HTTPS!)
 ```
 
 ### Muhim eslatmalar:
 
-- `TELEGRAM_BOT_TOKEN` - BotFather dan olgan tokeningiz
+- `TELEGRAM_AUDIO_BOT_TOKEN` - Audio bot uchun token (1-bot)
+- `TELEGRAM_UPDATE_BOT_TOKEN` - Update bot uchun token (2-bot)
 - `TELEGRAM_CHAT_ID` - Audio yuborilayotgan guruh/kanal ID (manfiy raqam)
 - `WEBHOOK_URL` - Server domeni (HTTPS bo'lishi shart!)
 
@@ -106,7 +128,9 @@ WEBHOOK_URL=https://your-domain.com                        # Server domeningiz
 
 ## 🔗 Webhook O'rnatish
 
-Telegram botga webhook o'rnatish uchun:
+⚠️ **Muhim:** Webhook faqat UPDATE bot uchun o'rnatiladi (audio bot webhook ishlatmaydi)
+
+Telegram UPDATE botga webhook o'rnatish uchun:
 
 ```bash
 # Webhook o'rnatish
@@ -175,9 +199,11 @@ python test_bots.py webhook
 
 ## 📱 Botlardan Foydalanish
 
-### 1. Audio Bot
+### 1. Audio Bot (`TELEGRAM_AUDIO_BOT_TOKEN`)
 
 **Maqsad:** Audio fayllarni Telegram ga yuklaydi va file_id qaytaradi
+
+**Fayl:** `utils/telegram_helper.py`
 
 **Kod misoli:**
 ```python
@@ -198,9 +224,13 @@ audio_url = await get_audio_url_from_telegram(file_id)
 - 📦 Connection pool: 8 ta parallel ulanish
 - 🔄 Avtomatik format aniqlash
 
-### 2. Update Parser Bot
+### 2. Update Bot (`TELEGRAM_UPDATE_BOT_TOKEN`)
 
-**Maqsad:** Telegram guruhdan kunlik yangilanishlarni parse qiladi
+**Maqsad:** Webhook orqali Telegram guruhdan kunlik yangilanishlarni qabul qiladi
+
+**Fayllar:**
+- `routers/update_tracking.py` - Webhook endpoint
+- `utils/update_parser.py` - Xabarlarni parse qilish
 
 **Xabar formati:**
 ```
@@ -238,14 +268,20 @@ POST /update-tracking/telegram-webhook
 
 ## 🔧 Muammolarni Hal Qilish
 
-### ❌ "TELEGRAM_BOT_TOKEN topilmadi"
+### ❌ "TELEGRAM_AUDIO_BOT_TOKEN topilmadi" yoki "TELEGRAM_UPDATE_BOT_TOKEN topilmadi"
 
-**Sabab:** .env faylida token yo'q
+**Sabab:** .env faylida tokenlar yo'q yoki noto'g'ri nomlanган
 
 **Yechim:**
 1. `.env` faylini oching
-2. `TELEGRAM_BOT_TOKEN=` qatoriga tokenni qo'shing
+2. Ikkala tokenni ham qo'shing:
+   ```bash
+   TELEGRAM_AUDIO_BOT_TOKEN=your_audio_bot_token
+   TELEGRAM_UPDATE_BOT_TOKEN=your_update_bot_token
+   ```
 3. Saqlang va qayta ishga tushiring
+
+**Eslatma:** Eski `TELEGRAM_BOT_TOKEN` endi ishlamaydi - 2 ta alohida token kerak!
 
 ### ❌ "Chat not found"
 
