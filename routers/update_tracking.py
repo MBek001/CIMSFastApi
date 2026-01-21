@@ -333,7 +333,8 @@ async def handle_admin_command(
 ) -> Optional[Dict]:
     """
     /admin command handler
-    Format: /admin password
+    Format: /admin password [MM.YYYY]
+    Example: /admin admin123 01.2026
     """
     text = message.text.strip()
 
@@ -342,13 +343,14 @@ async def handle_admin_command(
         return None
 
     # Parse command
-    parts = text.split(maxsplit=1)
+    parts = text.split()
 
     if len(parts) == 1:
         # No password provided
         await send_telegram_message(
             chat_id=message.chat.id,
-            text="❌ Parol kiritilmadi!\n\nFoydalanish: /admin <parol>"
+            text="❌ Parol kiritilmadi!\n\n*Foydalanish:*\n`/admin <parol> [MM.YYYY]`\n\n*Misollar:*\n`/admin admin123` - hozirgi oy\n`/admin admin123 01.2026` - yanvar 2026",
+            parse_mode='Markdown'
         )
         return {"status": "error", "reason": "No password"}
 
@@ -362,16 +364,56 @@ async def handle_admin_command(
         )
         return {"status": "error", "reason": "Wrong password"}
 
+    # Parse month/year if provided
+    month = None
+    year = None
+
+    if len(parts) >= 3:
+        date_str = parts[2].strip()
+        try:
+            # Parse MM.YYYY format
+            month_str, year_str = date_str.split('.')
+            month = int(month_str)
+            year = int(year_str)
+
+            if month < 1 or month > 12:
+                raise ValueError("Invalid month")
+
+        except Exception:
+            await send_telegram_message(
+                chat_id=message.chat.id,
+                text=f"❌ Noto'g'ri sana formati: {date_str}\n\n*To'g'ri format:* MM.YYYY\n*Misol:* 01.2026"
+            )
+            return {"status": "error", "reason": "Invalid date format"}
+
     # Generate statistics
     try:
-        stats_message = await generate_admin_statistics(session)
+        await send_telegram_message(
+            chat_id=message.chat.id,
+            text="⏳ Statistika tayyorlanmoqda... Biroz kuting..."
+        )
 
-        # Send statistics to chat
+        stats_message, excel_bytes = await generate_admin_statistics(session, month, year)
+
+        # Send statistics message
         await send_telegram_message(
             chat_id=message.chat.id,
             text=stats_message,
             parse_mode='Markdown'
         )
+
+        # Send Excel file
+        if excel_bytes:
+            month_name = f"{month:02d}" if month else datetime.now().strftime("%m")
+            year_name = str(year) if year else datetime.now().strftime("%Y")
+            filename = f"admin_stats_{month_name}_{year_name}.xlsx"
+
+            await send_telegram_file(
+                chat_id=message.chat.id,
+                file_bytes=excel_bytes,
+                filename=filename,
+                caption=f"📊 Excel hisobot - {month_name}.{year_name}"
+            )
 
         return {"status": "success", "reason": "Admin stats sent"}
 
@@ -400,6 +442,32 @@ async def send_telegram_message(
         )
     except Exception as e:
         print(f"Error sending telegram message: {e}")
+
+
+async def send_telegram_file(
+    chat_id: int,
+    file_bytes: bytes,
+    filename: str,
+    caption: Optional[str] = None
+):
+    """
+    Send file to Telegram chat
+    """
+    try:
+        from io import BytesIO
+
+        bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
+        file_obj = BytesIO(file_bytes)
+        file_obj.name = filename
+
+        await bot.send_document(
+            chat_id=chat_id,
+            document=file_obj,
+            filename=filename,
+            caption=caption
+        )
+    except Exception as e:
+        print(f"Error sending telegram file: {e}")
 
 
 @router.post("/telegram-webhook", summary="Telegram bot webhook")
