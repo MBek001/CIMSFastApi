@@ -8,6 +8,7 @@ from sqlalchemy import select, func, and_, or_, desc, insert, update as sql_upda
 from datetime import datetime, date, timedelta
 from typing import Optional, Dict, List
 from pydantic import BaseModel
+from telegram import Bot
 
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
@@ -21,6 +22,8 @@ from utils.update_parser import (
     find_user_by_telegram_username,
     validate_update_content
 )
+from utils.admin_stats import generate_admin_statistics
+from config import UPDATE_ADMIN_PASSWORD, TELEGRAM_UPDATE_BOT_TOKEN
 
 
 router = APIRouter(prefix="/update-tracking", tags=["Update Tracking"])
@@ -324,6 +327,81 @@ async def get_user_update_stats(
 # ENDPOINTS
 # ========================================
 
+async def handle_admin_command(
+    message: TelegramMessage,
+    session: AsyncSession
+) -> Optional[Dict]:
+    """
+    /admin command handler
+    Format: /admin password
+    """
+    text = message.text.strip()
+
+    # Check if it's /admin command
+    if not text.startswith('/admin'):
+        return None
+
+    # Parse command
+    parts = text.split(maxsplit=1)
+
+    if len(parts) == 1:
+        # No password provided
+        await send_telegram_message(
+            chat_id=message.chat.id,
+            text="❌ Parol kiritilmadi!\n\nFoydalanish: /admin <parol>"
+        )
+        return {"status": "error", "reason": "No password"}
+
+    provided_password = parts[1].strip()
+
+    # Check password
+    if provided_password != UPDATE_ADMIN_PASSWORD:
+        await send_telegram_message(
+            chat_id=message.chat.id,
+            text="❌ Noto'g'ri parol!"
+        )
+        return {"status": "error", "reason": "Wrong password"}
+
+    # Generate statistics
+    try:
+        stats_message = await generate_admin_statistics(session)
+
+        # Send statistics to chat
+        await send_telegram_message(
+            chat_id=message.chat.id,
+            text=stats_message,
+            parse_mode='Markdown'
+        )
+
+        return {"status": "success", "reason": "Admin stats sent"}
+
+    except Exception as e:
+        await send_telegram_message(
+            chat_id=message.chat.id,
+            text=f"❌ Xato yuz berdi: {str(e)}"
+        )
+        return {"status": "error", "reason": str(e)}
+
+
+async def send_telegram_message(
+    chat_id: int,
+    text: str,
+    parse_mode: Optional[str] = None
+):
+    """
+    Send message to Telegram chat
+    """
+    try:
+        bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode
+        )
+    except Exception as e:
+        print(f"Error sending telegram message: {e}")
+
+
 @router.post("/telegram-webhook", summary="Telegram bot webhook")
 async def telegram_webhook(
     payload: TelegramWebhookPayload,
@@ -332,6 +410,12 @@ async def telegram_webhook(
     """
     Webhook endpoint for Telegram bot to send update messages
     Receives standard Telegram webhook format and processes messages
+
+    Commands:
+    - /admin <password>: Get admin statistics
+
+    Regular messages:
+    - Update messages in format: "Update for <date>\\n#username\\n- task1\\n- task2"
     """
     # Get the message (could be regular message or edited message)
     message = payload.message or payload.edited_message
@@ -339,7 +423,17 @@ async def telegram_webhook(
     if not message or not message.text:
         return {"status": "ignored", "reason": "No text message"}
 
-    # Parse the message
+    # Check if it's a command
+    if message.text.startswith('/'):
+        # Handle admin command
+        if message.text.startswith('/admin'):
+            result = await handle_admin_command(message, session)
+            return result if result else {"status": "ignored"}
+
+        # Other commands can be added here
+        return {"status": "ignored", "reason": "Unknown command"}
+
+    # Parse the message as update
     parsed = parse_update_message(message.text)
 
     if not parsed:

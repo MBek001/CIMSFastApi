@@ -52,5 +52,8 @@ TELEGRAM_CHAT_ID = TELEGRAM_AUDIO_CHAT_ID  # Default: audio chat ID
 
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # Webhook URL
 
+# Update Bot Admin - Statistika uchun parol
+UPDATE_ADMIN_PASSWORD = os.environ.get('UPDATE_ADMIN_PASSWORD', 'admin123')  # Default parol
+
 
 FREECURRENCYAPI_KEY = os.environ.get('FREECURRENCYAPI_KEY')
