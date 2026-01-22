@@ -8,7 +8,8 @@ from sqlalchemy import select, func, and_, or_, desc, insert, update as sql_upda
 from datetime import datetime, date, timedelta
 from typing import Optional, Dict, List
 from pydantic import BaseModel
-from telegram import Bot
+from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+import calendar as cal_module
 
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
@@ -332,27 +333,31 @@ async def handle_admin_command(
     session: AsyncSession
 ) -> Optional[Dict]:
     """
-    /admin command handler
-    Format: /admin password [MM.YYYY]
-    Example: /admin admin123 01.2026
+    /admin command handler - Interactive bot
+    1. /admin → parol so'raydi
+    2. Parol to'g'ri → oy tanlov keyboard
+    3. Oy tanlandi → statistika + Excel
     """
     text = message.text.strip()
 
     # Check if it's /admin command
     if not text.startswith('/admin'):
+        # Check if it's month selection (from keyboard)
+        if await is_month_selection(text):
+            return await handle_month_selection(text, message, session)
         return None
 
     # Parse command
-    parts = text.split()
+    parts = text.split(maxsplit=1)
 
     if len(parts) == 1:
-        # No password provided
+        # No password provided - ask for password
         await send_telegram_message(
             chat_id=message.chat.id,
-            text="❌ Parol kiritilmadi!\n\n*Foydalanish:*\n`/admin <parol> [MM.YYYY]`\n\n*Misollar:*\n`/admin admin123` - hozirgi oy\n`/admin admin123 01.2026` - yanvar 2026",
+            text="🔐 *ADMIN PANEL*\n\nParolni kiriting:\n`/admin <parol>`\n\n*Misol:* `/admin admin123`",
             parse_mode='Markdown'
         )
-        return {"status": "error", "reason": "No password"}
+        return {"status": "waiting", "reason": "Password requested"}
 
     provided_password = parts[1].strip()
 
@@ -360,37 +365,84 @@ async def handle_admin_command(
     if provided_password != UPDATE_ADMIN_PASSWORD:
         await send_telegram_message(
             chat_id=message.chat.id,
-            text="❌ Noto'g'ri parol!"
+            text="❌ Noto'g'ri parol!\n\nQaytadan urinib ko'ring: `/admin <parol>`",
+            parse_mode='Markdown'
         )
         return {"status": "error", "reason": "Wrong password"}
 
-    # Parse month/year if provided
-    month = None
-    year = None
+    # Password correct - show admin dashboard with month selection
+    await show_admin_dashboard(message.chat.id)
 
-    if len(parts) >= 3:
-        date_str = parts[2].strip()
-        try:
-            # Parse MM.YYYY format
-            month_str, year_str = date_str.split('.')
-            month = int(month_str)
-            year = int(year_str)
+    return {"status": "success", "reason": "Admin dashboard shown"}
 
-            if month < 1 or month > 12:
-                raise ValueError("Invalid month")
 
-        except Exception:
+async def is_month_selection(text: str) -> bool:
+    """Check if message is month selection from keyboard"""
+    # Check for cancel button
+    if "Bekor qilish" in text or text.strip() == "❌ Bekor qilish":
+        return False
+
+    month_names_uz = [
+        "Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun",
+        "Iyul", "Avgust", "Sentabr", "Oktabr", "Noyabr", "Dekabr"
+    ]
+
+    for month_name in month_names_uz:
+        if month_name in text and any(char.isdigit() for char in text):
+            return True
+    return False
+
+
+async def handle_month_selection(
+    text: str,
+    message: TelegramMessage,
+    session: AsyncSession
+) -> Dict:
+    """Handle month selection from keyboard"""
+    try:
+        # Check for cancel button
+        if "Bekor qilish" in text or text.strip() == "❌ Bekor qilish":
             await send_telegram_message(
                 chat_id=message.chat.id,
-                text=f"❌ Noto'g'ri sana formati: {date_str}\n\n*To'g'ri format:* MM.YYYY\n*Misol:* 01.2026"
+                text="❌ Bekor qilindi.",
+                reply_markup=ReplyKeyboardRemove()
             )
-            return {"status": "error", "reason": "Invalid date format"}
+            return {"status": "cancelled", "reason": "User cancelled"}
 
-    # Generate statistics
-    try:
+        # Clean text - remove emoji and "(Joriy)" suffix
+        clean_text = text.replace("📅", "").replace("(Joriy)", "").strip()
+
+        # Parse month from text like "Yanvar 2026"
+        month_names_uz = {
+            "Yanvar": 1, "Fevral": 2, "Mart": 3, "Aprel": 4,
+            "May": 5, "Iyun": 6, "Iyul": 7, "Avgust": 8,
+            "Sentabr": 9, "Oktabr": 10, "Noyabr": 11, "Dekabr": 12
+        }
+
+        month = None
+        year = None
+
+        for month_name, month_num in month_names_uz.items():
+            if month_name in clean_text:
+                month = month_num
+                # Extract year from text
+                year_match = [int(s) for s in clean_text.split() if s.isdigit()]
+                if year_match:
+                    year = year_match[0]
+                break
+
+        if not month or not year:
+            return {"status": "error", "reason": "Invalid month format"}
+
+        # Display month name in Uzbek
+        month_name_display = list(month_names_uz.keys())[month - 1]
+
+        # Generate statistics
         await send_telegram_message(
             chat_id=message.chat.id,
-            text="⏳ Statistika tayyorlanmoqda... Biroz kuting..."
+            text=f"⏳ *{month_name_display} {year}* uchun statistika tayyorlanmoqda...\n\nBiroz kuting...",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardRemove()  # Remove keyboard
         )
 
         stats_message, excel_bytes = await generate_admin_statistics(session, month, year)
@@ -404,18 +456,18 @@ async def handle_admin_command(
 
         # Send Excel file
         if excel_bytes:
-            month_name = f"{month:02d}" if month else datetime.now().strftime("%m")
-            year_name = str(year) if year else datetime.now().strftime("%Y")
-            filename = f"admin_stats_{month_name}_{year_name}.xlsx"
-
+            filename = f"admin_stats_{month:02d}_{year}.xlsx"
             await send_telegram_file(
                 chat_id=message.chat.id,
                 file_bytes=excel_bytes,
                 filename=filename,
-                caption=f"📊 Excel hisobot - {month_name}.{year_name}"
+                caption=f"📊 Excel hisobot - {month:02d}.{year}"
             )
 
-        return {"status": "success", "reason": "Admin stats sent"}
+        # Show dashboard again for new selection
+        await show_admin_dashboard(message.chat.id)
+
+        return {"status": "success", "reason": "Stats sent for selected month"}
 
     except Exception as e:
         await send_telegram_message(
@@ -425,10 +477,62 @@ async def handle_admin_command(
         return {"status": "error", "reason": str(e)}
 
 
+async def show_admin_dashboard(chat_id: int):
+    """Show admin dashboard with month selection keyboard"""
+    today = date.today()
+
+    # Get last 12 months
+    month_buttons = []
+
+    month_names_uz = {
+        1: "Yanvar", 2: "Fevral", 3: "Mart", 4: "Aprel",
+        5: "May", 6: "Iyun", 7: "Iyul", 8: "Avgust",
+        9: "Sentabr", 10: "Oktabr", 11: "Noyabr", 12: "Dekabr"
+    }
+
+    # Add current month at top
+    current_month_text = f"📅 {month_names_uz[today.month]} {today.year} (Joriy)"
+    month_buttons.append([KeyboardButton(current_month_text)])
+
+    # Generate last 12 months using proper month arithmetic
+    current_year = today.year
+    current_month = today.month
+
+    for i in range(1, 13):
+        # Calculate previous month
+        month = current_month - i
+        year = current_year
+
+        # Handle year rollover
+        while month <= 0:
+            month += 12
+            year -= 1
+
+        month_text = f"{month_names_uz[month]} {year}"
+        month_buttons.append([KeyboardButton(month_text)])
+
+    # Add cancel button
+    month_buttons.append([KeyboardButton("❌ Bekor qilish")])
+
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=month_buttons,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+    await send_telegram_message(
+        chat_id=chat_id,
+        text="📊 *ADMIN DASHBOARD*\n\n✅ Parol to'g'ri!\n\nStatistika ko'rish uchun oyni tanlang:",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+
+
 async def send_telegram_message(
     chat_id: int,
     text: str,
-    parse_mode: Optional[str] = None
+    parse_mode: Optional[str] = None,
+    reply_markup=None
 ):
     """
     Send message to Telegram chat
@@ -438,7 +542,8 @@ async def send_telegram_message(
         await bot.send_message(
             chat_id=chat_id,
             text=text,
-            parse_mode=parse_mode
+            parse_mode=parse_mode,
+            reply_markup=reply_markup
         )
     except Exception as e:
         print(f"Error sending telegram message: {e}")
