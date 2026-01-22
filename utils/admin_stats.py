@@ -125,7 +125,7 @@ async def generate_admin_statistics(
 
         # User info
         full_name = f"{u.name} {u.surname}"
-        telegram_username = u.telegram_id or "N/A"
+        telegram_username = f"#{u.telegram_id}" if u.telegram_id else "#N/A"  # # bilan
 
         # AI Summary yaratish
         ai_summary = generate_ai_summary(
@@ -280,7 +280,7 @@ def format_admin_report(stats_list: List[Dict], report_date: date, working_days:
     # Har bir user uchun statistika
     for i, stat in enumerate(stats_list, 1):
         user_block = f"""
-*{i}. {stat['name']}* (@{stat['username']})
+*{i}. {stat['name']}* ({stat['username']})
 
 📈 *Update foizi:* {stat['percentage']}% ({stat['update_days']}/{stat['total_days']} kun)
 
