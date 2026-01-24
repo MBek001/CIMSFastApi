@@ -23,11 +23,38 @@ from utils.update_parser import (
     find_user_by_telegram_username,
     validate_update_content
 )
-from utils.admin_stats import generate_admin_statistics
+from utils.admin_stats import generate_admin_statistics, generate_user_daily_report
 from config import UPDATE_ADMIN_PASSWORD, TELEGRAM_UPDATE_BOT_TOKEN
 
 
 router = APIRouter(prefix="/update-tracking", tags=["Update Tracking"])
+
+
+# ========================================
+# USER STATE MANAGEMENT (In-memory)
+# ========================================
+
+# State storage: {chat_id: {"state": "waiting_password"|"admin_menu"|"selecting_month"|"selecting_user", "data": {...}}}
+user_states: Dict[int, Dict] = {}
+
+
+def set_user_state(chat_id: int, state: str, data: Optional[Dict] = None):
+    """Set user state for multi-step flows"""
+    user_states[chat_id] = {
+        "state": state,
+        "data": data or {}
+    }
+
+
+def get_user_state(chat_id: int) -> Optional[Dict]:
+    """Get user state"""
+    return user_states.get(chat_id)
+
+
+def clear_user_state(chat_id: int):
+    """Clear user state"""
+    if chat_id in user_states:
+        del user_states[chat_id]
 
 
 # ========================================
@@ -333,47 +360,187 @@ async def handle_admin_command(
     session: AsyncSession
 ) -> Optional[Dict]:
     """
-    /admin command handler - Interactive bot
+    /admin command handler - Interactive bot with multi-step flow
     1. /admin → parol so'raydi
-    2. Parol to'g'ri → oy tanlov keyboard
-    3. Oy tanlandi → statistika + Excel
+    2. Parol kiritiladi → admin menu (Statistika, Userlar)
+    3. Menu tanlanadi → keyingi qadamlar
+    """
+    # Ask for password
+    set_user_state(message.chat.id, "waiting_password")
+
+    await send_telegram_message(
+        chat_id=message.chat.id,
+        text="🔐 *ADMIN PANEL*\n\nIltimos, parolni kiriting:",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    return {"status": "waiting", "reason": "Password requested"}
+
+
+async def handle_user_state(
+    message: TelegramMessage,
+    session: AsyncSession,
+    user_state: Dict
+) -> Optional[Dict]:
+    """
+    Handle user actions based on current state
     """
     text = message.text.strip()
+    state = user_state["state"]
+    data = user_state.get("data", {})
 
-    # Check if it's /admin command
-    if not text.startswith('/admin'):
-        # Check if it's month selection (from keyboard)
-        if await is_month_selection(text):
-            return await handle_month_selection(text, message, session)
-        return None
-
-    # Parse command
-    parts = text.split(maxsplit=1)
-
-    if len(parts) == 1:
-        # No password provided - ask for password
+    # Cancel/Exit handling
+    if text in ["❌ Bekor qilish", "❌ Chiqish"]:
+        clear_user_state(message.chat.id)
         await send_telegram_message(
             chat_id=message.chat.id,
-            text="🔐 *ADMIN PANEL*\n\nParolni kiriting:\n`/admin <parol>`\n\n*Misol:* `/admin admin123`",
-            parse_mode='Markdown'
+            text="❌ Bekor qilindi.",
+            reply_markup=ReplyKeyboardRemove()
         )
-        return {"status": "waiting", "reason": "Password requested"}
+        return {"status": "cancelled"}
 
-    provided_password = parts[1].strip()
+    # Back button handling
+    if text == "🔙 Orqaga":
+        # Go back to previous state
+        if state == "selecting_month":
+            if data.get("context") == "user_report":
+                # Go back to user list
+                await show_user_list(message.chat.id, session)
+            else:
+                # Go back to admin menu
+                await show_admin_menu(message.chat.id)
+        elif state == "selecting_user":
+            await show_admin_menu(message.chat.id)
+        elif state == "selecting_format":
+            await show_month_selection(message.chat.id, data.get("context", "statistics"))
+        return {"status": "back"}
 
-    # Check password
-    if provided_password != UPDATE_ADMIN_PASSWORD:
+    # State-specific handling
+    if state == "waiting_password":
+        return await handle_password_input(message, text)
+
+    elif state == "admin_menu":
+        return await handle_admin_menu_selection(message, session, text)
+
+    elif state == "selecting_month":
+        return await handle_month_selection_new(message, session, text, data)
+
+    elif state == "selecting_user":
+        return await handle_user_selection(message, session, text)
+
+    elif state == "selecting_format":
+        return await handle_format_selection(message, session, text, data)
+
+    return None
+
+
+async def handle_password_input(message: TelegramMessage, password: str) -> Dict:
+    """Handle password input"""
+    if password != UPDATE_ADMIN_PASSWORD:
         await send_telegram_message(
             chat_id=message.chat.id,
-            text="❌ Noto'g'ri parol!\n\nQaytadan urinib ko'ring: `/admin <parol>`",
+            text="❌ Noto'g'ri parol!\n\nIltimos, qaytadan kiriting:",
             parse_mode='Markdown'
         )
         return {"status": "error", "reason": "Wrong password"}
 
-    # Password correct - show admin dashboard with month selection
-    await show_admin_dashboard(message.chat.id)
+    # Password correct - show admin menu
+    await show_admin_menu(message.chat.id)
+    return {"status": "success", "reason": "Password accepted"}
 
-    return {"status": "success", "reason": "Admin dashboard shown"}
+
+async def handle_admin_menu_selection(
+    message: TelegramMessage,
+    session: AsyncSession,
+    text: str
+) -> Dict:
+    """Handle admin menu button selection"""
+    if text == "📊 Statistika":
+        # Show month selection for statistics
+        await show_month_selection(message.chat.id, context="statistics")
+        return {"status": "navigating", "target": "statistics"}
+
+    elif text == "👥 Userlar":
+        # Show user list
+        await show_user_list(message.chat.id, session)
+        return {"status": "navigating", "target": "users"}
+
+    return {"status": "ignored"}
+
+
+async def show_user_list(chat_id: int, session: AsyncSession):
+    """Show list of users for selection"""
+    # Get all active users
+    result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.telegram_id)
+        .where(user.c.is_active == True)
+        .order_by(user.c.name)
+    )
+    users = result.fetchall()
+
+    if not users:
+        await send_telegram_message(
+            chat_id=chat_id,
+            text="❌ Faol foydalanuvchilar topilmadi.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        clear_user_state(chat_id)
+        return
+
+    # Create keyboard with user buttons
+    user_buttons = []
+    for u in users:
+        full_name = f"{u.name} {u.surname}"
+        user_buttons.append([KeyboardButton(full_name)])
+
+    # Add back and cancel buttons
+    user_buttons.append([KeyboardButton("🔙 Orqaga"), KeyboardButton("❌ Bekor qilish")])
+
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=user_buttons,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+    set_user_state(chat_id, "selecting_user", {"users": [{"id": u.id, "name": f"{u.name} {u.surname}"} for u in users]})
+
+    await send_telegram_message(
+        chat_id=chat_id,
+        text="👤 *Foydalanuvchini tanlang:*",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+
+
+async def handle_user_selection(
+    message: TelegramMessage,
+    session: AsyncSession,
+    text: str
+) -> Dict:
+    """Handle user selection from list"""
+    user_state = get_user_state(message.chat.id)
+    users_list = user_state.get("data", {}).get("users", [])
+
+    # Find selected user
+    selected_user = None
+    for u in users_list:
+        if u["name"] == text:
+            selected_user = u
+            break
+
+    if not selected_user:
+        return {"status": "ignored"}
+
+    # Show month selection for this user
+    set_user_state(message.chat.id, "selecting_month", {
+        "context": "user_report",
+        "user_id": selected_user["id"],
+        "user_name": selected_user["name"]
+    })
+
+    await show_month_selection(message.chat.id, context="user_report")
+    return {"status": "user_selected", "user_id": selected_user["id"]}
 
 
 async def is_month_selection(text: str) -> bool:
@@ -393,95 +560,201 @@ async def is_month_selection(text: str) -> bool:
     return False
 
 
-async def handle_month_selection(
-    text: str,
+async def handle_month_selection_new(
     message: TelegramMessage,
-    session: AsyncSession
+    session: AsyncSession,
+    text: str,
+    data: Dict
 ) -> Dict:
-    """Handle month selection from keyboard"""
-    try:
-        # Check for cancel button
-        if "Bekor qilish" in text or text.strip() == "❌ Bekor qilish":
-            await send_telegram_message(
-                chat_id=message.chat.id,
-                text="❌ Bekor qilindi.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return {"status": "cancelled", "reason": "User cancelled"}
-
-        # Clean text - remove emoji and "(Joriy)" suffix
-        clean_text = text.replace("📅", "").replace("(Joriy)", "").strip()
-
-        # Parse month from text like "Yanvar 2026"
-        month_names_uz = {
-            "Yanvar": 1, "Fevral": 2, "Mart": 3, "Aprel": 4,
-            "May": 5, "Iyun": 6, "Iyul": 7, "Avgust": 8,
-            "Sentabr": 9, "Oktabr": 10, "Noyabr": 11, "Dekabr": 12
-        }
-
-        month = None
-        year = None
-
-        for month_name, month_num in month_names_uz.items():
-            if month_name in clean_text:
-                month = month_num
-                # Extract year from text
-                year_match = [int(s) for s in clean_text.split() if s.isdigit()]
-                if year_match:
-                    year = year_match[0]
-                break
-
-        if not month or not year:
-            return {"status": "error", "reason": "Invalid month format"}
-
-        # Display month name in Uzbek
-        month_name_display = list(month_names_uz.keys())[month - 1]
-
-        # Generate statistics
+    """Handle month selection - new version with state management"""
+    # Check for cancel button
+    if "Bekor qilish" in text:
+        clear_user_state(message.chat.id)
         await send_telegram_message(
             chat_id=message.chat.id,
-            text=f"⏳ *{month_name_display} {year}* uchun statistika tayyorlanmoqda...\n\nBiroz kuting...",
+            text="❌ Bekor qilindi.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return {"status": "cancelled"}
+
+    # Parse month
+    if not await is_month_selection(text):
+        return {"status": "ignored"}
+
+    # Clean text
+    clean_text = text.replace("📅", "").replace("(Joriy)", "").strip()
+
+    month_names_uz = {
+        "Yanvar": 1, "Fevral": 2, "Mart": 3, "Aprel": 4,
+        "May": 5, "Iyun": 6, "Iyul": 7, "Avgust": 8,
+        "Sentabr": 9, "Oktabr": 10, "Noyabr": 11, "Dekabr": 12
+    }
+
+    month = None
+    year = None
+
+    for month_name, month_num in month_names_uz.items():
+        if month_name in clean_text:
+            month = month_num
+            year_match = [int(s) for s in clean_text.split() if s.isdigit()]
+            if year_match:
+                year = year_match[0]
+            break
+
+    if not month or not year:
+        return {"status": "error", "reason": "Invalid month format"}
+
+    context = data.get("context", "statistics")
+
+    if context == "statistics":
+        # Show format selection (text or excel)
+        await show_format_selection(message.chat.id, month, year)
+        return {"status": "month_selected", "month": month, "year": year}
+
+    elif context == "user_report":
+        # Generate user report directly (only excel)
+        user_id = data.get("user_id")
+        user_name = data.get("user_name")
+
+        await send_telegram_message(
+            chat_id=message.chat.id,
+            text=f"⏳ *{user_name}* uchun hisobot tayyorlanmoqda...\n\nBiroz kuting...",
             parse_mode='Markdown',
-            reply_markup=ReplyKeyboardRemove()  # Remove keyboard
+            reply_markup=ReplyKeyboardRemove()
         )
 
-        stats_message, excel_bytes = await generate_admin_statistics(session, month, year)
+        # Generate user daily report
+        excel_bytes = await generate_user_daily_report(session, user_id, month, year)
 
-        # Send statistics message
+        if excel_bytes:
+            month_name_display = list(month_names_uz.keys())[month - 1]
+            filename = f"user_report_{user_id}_{month:02d}_{year}.xlsx"
+            await send_telegram_file(
+                chat_id=message.chat.id,
+                file_bytes=excel_bytes,
+                filename=filename,
+                caption=f"📊 {user_name} - {month_name_display} {year} hisoboti"
+            )
+
+        # Show admin menu again
+        await show_admin_menu(message.chat.id)
+        return {"status": "report_sent"}
+
+    return {"status": "ignored"}
+
+
+async def show_format_selection(chat_id: int, month: int, year: int):
+    """Show format selection (text or excel)"""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton("📝 Text"), KeyboardButton("📊 Excel")],
+            [KeyboardButton("📦 Ikkalasi ham")],
+            [KeyboardButton("🔙 Orqaga"), KeyboardButton("❌ Bekor qilish")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+    set_user_state(chat_id, "selecting_format", {
+        "month": month,
+        "year": year,
+        "context": "statistics"
+    })
+
+    await send_telegram_message(
+        chat_id=chat_id,
+        text="📤 *Format tanlang:*\n\nStatistikani qanday ko'rinishda olishni xohlaysiz?",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+
+
+async def handle_format_selection(
+    message: TelegramMessage,
+    session: AsyncSession,
+    text: str,
+    data: Dict
+) -> Dict:
+    """Handle format selection"""
+    month = data.get("month")
+    year = data.get("year")
+
+    if not month or not year:
+        return {"status": "error", "reason": "Missing month/year"}
+
+    month_names_uz = {
+        1: "Yanvar", 2: "Fevral", 3: "Mart", 4: "Aprel",
+        5: "May", 6: "Iyun", 7: "Iyul", 8: "Avgust",
+        9: "Sentabr", 10: "Oktabr", 11: "Noyabr", 12: "Dekabr"
+    }
+    month_name_display = month_names_uz[month]
+
+    send_text = text in ["📝 Text", "📦 Ikkalasi ham"]
+    send_excel = text in ["📊 Excel", "📦 Ikkalasi ham"]
+
+    if not send_text and not send_excel:
+        return {"status": "ignored"}
+
+    await send_telegram_message(
+        chat_id=message.chat.id,
+        text=f"⏳ *{month_name_display} {year}* uchun statistika tayyorlanmoqda...\n\nBiroz kuting...",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    # Generate statistics
+    stats_message, excel_bytes = await generate_admin_statistics(session, month, year)
+
+    # Send based on selection
+    if send_text:
         await send_telegram_message(
             chat_id=message.chat.id,
             text=stats_message,
             parse_mode='Markdown'
         )
 
-        # Send Excel file
-        if excel_bytes:
-            filename = f"admin_stats_{month:02d}_{year}.xlsx"
-            await send_telegram_file(
-                chat_id=message.chat.id,
-                file_bytes=excel_bytes,
-                filename=filename,
-                caption=f"📊 Excel hisobot - {month:02d}.{year}"
-            )
-
-        # Show dashboard again for new selection
-        await show_admin_dashboard(message.chat.id)
-
-        return {"status": "success", "reason": "Stats sent for selected month"}
-
-    except Exception as e:
-        await send_telegram_message(
+    if send_excel and excel_bytes:
+        filename = f"admin_stats_{month:02d}_{year}.xlsx"
+        await send_telegram_file(
             chat_id=message.chat.id,
-            text=f"❌ Xato yuz berdi: {str(e)}"
+            file_bytes=excel_bytes,
+            filename=filename,
+            caption=f"📊 Excel hisobot - {month:02d}.{year}"
         )
-        return {"status": "error", "reason": str(e)}
+
+    # Show admin menu again
+    await show_admin_menu(message.chat.id)
+
+    return {"status": "stats_sent"}
 
 
-async def show_admin_dashboard(chat_id: int):
-    """Show admin dashboard with month selection keyboard"""
+async def show_admin_menu(chat_id: int):
+    """Show admin main menu with Statistika and Userlar options"""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton("📊 Statistika"), KeyboardButton("👥 Userlar")],
+            [KeyboardButton("❌ Chiqish")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+    set_user_state(chat_id, "admin_menu")
+
+    await send_telegram_message(
+        chat_id=chat_id,
+        text="✅ *ADMIN PANEL*\n\nXush kelibsiz! Quyidagilardan birini tanlang:",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+
+
+async def show_month_selection(chat_id: int, context: str = "statistics"):
+    """
+    Show month selection keyboard
+    context: 'statistics' or 'user_report'
+    """
     today = date.today()
-
-    # Get last 12 months
     month_buttons = []
 
     month_names_uz = {
@@ -511,8 +784,8 @@ async def show_admin_dashboard(chat_id: int):
         month_text = f"{month_names_uz[month]} {year}"
         month_buttons.append([KeyboardButton(month_text)])
 
-    # Add cancel button
-    month_buttons.append([KeyboardButton("❌ Bekor qilish")])
+    # Add back and cancel buttons
+    month_buttons.append([KeyboardButton("🔙 Orqaga"), KeyboardButton("❌ Bekor qilish")])
 
     keyboard = ReplyKeyboardMarkup(
         keyboard=month_buttons,
@@ -520,9 +793,15 @@ async def show_admin_dashboard(chat_id: int):
         one_time_keyboard=False
     )
 
+    set_user_state(chat_id, "selecting_month", {"context": context})
+
+    text = "📅 *Oyni tanlang:*"
+    if context == "user_report":
+        text = "📅 *Qaysi oy uchun hisobot kerak?*"
+
     await send_telegram_message(
         chat_id=chat_id,
-        text="📊 *ADMIN DASHBOARD*\n\n✅ Parol to'g'ri!\n\nStatistika ko'rish uchun oyni tanlang:",
+        text=text,
         parse_mode='Markdown',
         reply_markup=keyboard
     )
@@ -605,6 +884,14 @@ async def telegram_webhook(
 
         # Other commands can be added here
         return {"status": "ignored", "reason": "Unknown command"}
+
+    # Check user state for multi-step flows
+    user_state = get_user_state(message.chat.id)
+
+    if user_state:
+        result = await handle_user_state(message, session, user_state)
+        if result:
+            return result
 
     # Parse the message as update
     parsed = parse_update_message(message.text)

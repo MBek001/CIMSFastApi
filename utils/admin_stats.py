@@ -500,3 +500,213 @@ def generate_excel_report(
     excel_buffer.seek(0)
 
     return excel_buffer.read()
+
+
+async def generate_user_daily_report(
+    session: AsyncSession,
+    user_id: int,
+    month: int,
+    year: int
+) -> Optional[bytes]:
+    """
+    Generate daily attendance report for a specific user
+    Shows which days the user submitted updates
+
+    Args:
+        session: Database session
+        user_id: User ID
+        month: Month (1-12)
+        year: Year
+
+    Returns:
+        bytes: Excel file bytes with daily attendance calendar
+    """
+    # Get user info
+    user_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.telegram_id)
+        .where(user.c.id == user_id)
+    )
+    user_data = user_result.fetchone()
+
+    if not user_data:
+        return None
+
+    full_name = f"{user_data.name} {user_data.surname}"
+    telegram_username = f"#{user_data.telegram_id}" if user_data.telegram_id else "#N/A"
+
+    # Get working days
+    working_days, sundays = get_working_days_in_month(year, month)
+
+    # Get all days in month
+    num_days = calendar.monthrange(year, month)[1]
+    first_day = date(year, month, 1)
+    last_day = date(year, month, num_days)
+
+    # Get user's updates for this month
+    updates_result = await session.execute(
+        select(daily_update_log.c.update_date, daily_update_log.c.update_content, daily_update_log.c.is_valid)
+        .where(
+            and_(
+                daily_update_log.c.user_id == user_id,
+                daily_update_log.c.update_date >= first_day,
+                daily_update_log.c.update_date <= last_day
+            )
+        )
+        .order_by(daily_update_log.c.update_date)
+    )
+    updates = {row.update_date: {"content": row.update_content, "valid": row.is_valid} for row in updates_result.fetchall()}
+
+    # Create Excel workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{month:02d}.{year}"
+
+    # Styles
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=12)
+    sunday_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    present_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    absent_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    cell_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+
+    # Title
+    ws.merge_cells('A1:F1')
+    title_cell = ws['A1']
+    title_cell.value = f"📊 {full_name} ({telegram_username}) - Kunlik hisoboti"
+    title_cell.font = Font(bold=True, size=14)
+    title_cell.alignment = cell_alignment
+    title_cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    title_cell.font = Font(bold=True, color="FFFFFF", size=14)
+
+    # Info row
+    month_names_uz = {
+        1: "Yanvar", 2: "Fevral", 3: "Mart", 4: "Aprel",
+        5: "May", 6: "Iyun", 7: "Iyul", 8: "Avgust",
+        9: "Sentabr", 10: "Oktabr", 11: "Noyabr", 12: "Dekabr"
+    }
+    month_name = month_names_uz[month]
+
+    ws.merge_cells('A2:F2')
+    info_cell = ws['A2']
+    info_cell.value = f"📅 {month_name} {year} | Ish kunlari: {working_days} | Yakshanba: {len(sundays)}"
+    info_cell.alignment = cell_alignment
+
+    # Column headers
+    headers = ['Kun', 'Sana', 'Hafta kuni', 'Status', 'Update', 'Izoh']
+    ws.append(headers)
+
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=3, column=col_num)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = cell_alignment
+        cell.border = border
+
+    # Day names in Uzbek
+    weekday_names = {
+        0: "Dushanba",
+        1: "Seshanba",
+        2: "Chorshanba",
+        3: "Payshanba",
+        4: "Juma",
+        5: "Shanba",
+        6: "Yakshanba"
+    }
+
+    # Add daily data
+    update_count = 0
+    for day in range(1, num_days + 1):
+        current_date = date(year, month, day)
+        weekday = current_date.weekday()
+        weekday_name = weekday_names[weekday]
+
+        # Check if user submitted update
+        has_update = current_date in updates
+
+        if weekday == 6:  # Sunday
+            status = "🏖️ Dam olish"
+            update_text = "-"
+            comment = "Yakshanba"
+            fill_color = sunday_fill
+        elif has_update:
+            status = "✅ Topshirgan"
+            update_data = updates[current_date]
+            # Truncate update content for display
+            update_text = update_data["content"][:50] + "..." if len(update_data["content"]) > 50 else update_data["content"]
+            comment = "Valid" if update_data["valid"] else "Invalid"
+            fill_color = present_fill
+            update_count += 1
+        else:
+            status = "❌ Topshirmagan"
+            update_text = "-"
+            comment = "Yo'q"
+            fill_color = absent_fill
+
+        row_data = [
+            day,
+            current_date.strftime("%d.%m.%Y"),
+            weekday_name,
+            status,
+            update_text,
+            comment
+        ]
+
+        ws.append(row_data)
+
+        # Apply styles
+        row_num = day + 3
+        for col_num in range(1, len(row_data) + 1):
+            cell = ws.cell(row=row_num, column=col_num)
+            cell.alignment = cell_alignment
+            cell.border = border
+
+            # Apply color based on status
+            if col_num >= 4:  # Status and onwards
+                cell.fill = fill_color
+
+    # Set column widths
+    ws.column_dimensions['A'].width = 6
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 15
+    ws.column_dimensions['D'].width = 18
+    ws.column_dimensions['E'].width = 40
+    ws.column_dimensions['F'].width = 12
+
+    # Summary section
+    summary_row = num_days + 5
+    ws.merge_cells(f'A{summary_row}:F{summary_row}')
+    summary_cell = ws[f'A{summary_row}']
+    summary_cell.value = "📊 XULOSA"
+    summary_cell.font = Font(bold=True, size=12)
+    summary_cell.alignment = cell_alignment
+    summary_cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    summary_cell.font = Font(bold=True, color="FFFFFF", size=12)
+
+    # Calculate percentage
+    percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
+
+    summary_row += 1
+    ws[f'A{summary_row}'] = "Jami ish kunlari:"
+    ws[f'B{summary_row}'] = working_days
+    ws[f'C{summary_row}'] = "Update bergan:"
+    ws[f'D{summary_row}'] = update_count
+
+    summary_row += 1
+    ws[f'A{summary_row}'] = "Yakshanba kunlari:"
+    ws[f'B{summary_row}'] = len(sundays)
+    ws[f'C{summary_row}'] = "Foiz:"
+    ws[f'D{summary_row}'] = f"{percentage}%"
+    ws[f'D{summary_row}'].font = Font(bold=True, size=14)
+
+    # Convert to bytes
+    excel_buffer = io.BytesIO()
+    wb.save(excel_buffer)
+    excel_buffer.seek(0)
+
+    return excel_buffer.read()
