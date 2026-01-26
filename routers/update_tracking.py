@@ -6,10 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, desc, insert, update as sql_update
 from datetime import datetime, date, timedelta
+import calendar
 from typing import Optional, Dict, List
 from pydantic import BaseModel
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-import calendar as cal_module
 
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
@@ -986,6 +986,389 @@ async def get_my_stats(
     """Get update statistics for current user"""
     stats = await get_user_update_stats(session, current_user.id)
     return stats
+
+
+@router.get("/my-profile", summary="Get my complete profile with statistics")
+async def get_my_profile(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Get complete user profile with all statistics
+    Returns: User info, overall stats, recent updates, monthly trends
+    """
+    # Get user info
+    user_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.telegram_id, user.c.role)
+        .where(user.c.id == current_user.id)
+    )
+    user_data = user_result.fetchone()
+
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Get overall stats
+    stats = await get_user_update_stats(session, current_user.id)
+
+    # Get total updates count
+    total_result = await session.execute(
+        select(func.count()).select_from(daily_update_log)
+        .where(
+            and_(
+                daily_update_log.c.user_id == current_user.id,
+                daily_update_log.c.is_valid == True
+            )
+        )
+    )
+    total_updates = total_result.scalar() or 0
+
+    # Get recent 5 updates
+    recent_result = await session.execute(
+        select(
+            daily_update_log.c.update_date,
+            daily_update_log.c.update_content,
+            daily_update_log.c.is_valid
+        )
+        .where(daily_update_log.c.user_id == current_user.id)
+        .order_by(desc(daily_update_log.c.update_date))
+        .limit(5)
+    )
+    recent_updates = [
+        {
+            "date": str(row.update_date),
+            "content": row.update_content[:100] + "..." if len(row.update_content) > 100 else row.update_content,
+            "is_valid": row.is_valid
+        }
+        for row in recent_result.fetchall()
+    ]
+
+    # Get current month stats
+    today = date.today()
+    month_start = date(today.year, today.month, 1)
+
+    current_month_result = await session.execute(
+        select(func.count()).select_from(daily_update_log)
+        .where(
+            and_(
+                daily_update_log.c.user_id == current_user.id,
+                daily_update_log.c.update_date >= month_start,
+                daily_update_log.c.is_valid == True
+            )
+        )
+    )
+    current_month_updates = current_month_result.scalar() or 0
+
+    return {
+        "user": {
+            "id": user_data.id,
+            "name": f"{user_data.name} {user_data.surname}",
+            "telegram_id": user_data.telegram_id,
+            "role": user_data.role
+        },
+        "statistics": {
+            "total_updates": total_updates,
+            "this_week": stats.updates_this_week,
+            "this_month": current_month_updates,
+            "percentage_this_week": stats.percentage_this_week,
+            "percentage_this_month": stats.percentage_this_month,
+            "percentage_last_3_months": stats.percentage_last_3_months
+        },
+        "recent_updates": recent_updates
+    }
+
+
+@router.get("/my-monthly-report", summary="Get my monthly report with AI summary")
+async def get_my_monthly_report(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Get monthly report for current user with AI summary
+
+    Query params:
+    - month: Month (1-12), default is current month
+    - year: Year (e.g., 2025), default is current year
+
+    Returns: Detailed monthly statistics with AI analysis
+    """
+    from utils.admin_stats import get_working_days_in_month, generate_ai_summary
+
+    # Default to current month/year
+    today = date.today()
+    if month is None:
+        month = today.month
+    if year is None:
+        year = today.year
+
+    # Validate month/year
+    if not (1 <= month <= 12):
+        raise HTTPException(status_code=400, detail="Invalid month. Must be between 1 and 12")
+    if not (2020 <= year <= 2030):
+        raise HTTPException(status_code=400, detail="Invalid year")
+
+    # Get working days
+    working_days, sundays = get_working_days_in_month(year, month)
+
+    # Get month range
+    first_day = date(year, month, 1)
+    num_days = calendar.monthrange(year, month)[1]
+    last_day = date(year, month, num_days)
+
+    # Get user's updates for this month
+    updates_result = await session.execute(
+        select(
+            daily_update_log.c.update_date,
+            daily_update_log.c.update_content,
+            daily_update_log.c.is_valid
+        )
+        .where(
+            and_(
+                daily_update_log.c.user_id == current_user.id,
+                daily_update_log.c.update_date >= first_day,
+                daily_update_log.c.update_date <= last_day
+            )
+        )
+        .order_by(daily_update_log.c.update_date)
+    )
+    all_updates = updates_result.fetchall()
+
+    # Filter out Sunday updates
+    valid_updates = [upd for upd in all_updates if upd.update_date.weekday() != 6]
+
+    # Calculate stats
+    update_days = len(valid_updates)
+    update_percentage = round((update_days / working_days) * 100, 1) if working_days > 0 else 0
+
+    # Get last update
+    last_update_date = all_updates[-1].update_date if all_updates else None
+    last_update_content = all_updates[-1].update_content if all_updates else None
+    days_since_last = (today - last_update_date).days if last_update_date else None
+
+    # Get user info
+    user_result = await session.execute(
+        select(user.c.name, user.c.surname)
+        .where(user.c.id == current_user.id)
+    )
+    user_data = user_result.fetchone()
+    full_name = f"{user_data.name} {user_data.surname}"
+
+    # Generate AI summary
+    ai_summary = generate_ai_summary(
+        full_name=full_name,
+        update_days=update_days,
+        total_days=working_days,
+        update_percentage=update_percentage,
+        last_update_content=last_update_content,
+        days_since_last=days_since_last
+    )
+
+    # Month name in Uzbek
+    month_names_uz = {
+        1: "Yanvar", 2: "Fevral", 3: "Mart", 4: "Aprel",
+        5: "May", 6: "Iyun", 7: "Iyul", 8: "Avgust",
+        9: "Sentabr", 10: "Oktabr", 11: "Noyabr", 12: "Dekabr"
+    }
+
+    return {
+        "month": month,
+        "year": year,
+        "month_name": month_names_uz[month],
+        "working_days": working_days,
+        "sundays_count": len(sundays),
+        "total_days": num_days,
+        "statistics": {
+            "update_days": update_days,
+            "missing_days": working_days - update_days,
+            "percentage": update_percentage,
+            "total_updates": len(all_updates)
+        },
+        "ai_summary": ai_summary,
+        "last_update": {
+            "date": str(last_update_date) if last_update_date else None,
+            "content": last_update_content[:200] + "..." if last_update_content and len(last_update_content) > 200 else last_update_content,
+            "days_ago": days_since_last
+        }
+    }
+
+
+@router.get("/my-daily-calendar", summary="Get my daily calendar for a month")
+async def get_my_daily_calendar(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Get daily calendar showing which days user submitted updates
+
+    Query params:
+    - month: Month (1-12), default is current month
+    - year: Year (e.g., 2025), default is current year
+
+    Returns: Calendar with daily status (submitted/missing/sunday)
+    """
+    from utils.admin_stats import get_working_days_in_month
+
+    # Default to current month/year
+    today = date.today()
+    if month is None:
+        month = today.month
+    if year is None:
+        year = today.year
+
+    # Validate
+    if not (1 <= month <= 12):
+        raise HTTPException(status_code=400, detail="Invalid month")
+    if not (2020 <= year <= 2030):
+        raise HTTPException(status_code=400, detail="Invalid year")
+
+    # Get working days
+    working_days, sundays = get_working_days_in_month(year, month)
+
+    # Get month range
+    first_day = date(year, month, 1)
+    num_days = calendar.monthrange(year, month)[1]
+    last_day = date(year, month, num_days)
+
+    # Get user's updates
+    updates_result = await session.execute(
+        select(
+            daily_update_log.c.update_date,
+            daily_update_log.c.update_content,
+            daily_update_log.c.is_valid
+        )
+        .where(
+            and_(
+                daily_update_log.c.user_id == current_user.id,
+                daily_update_log.c.update_date >= first_day,
+                daily_update_log.c.update_date <= last_day
+            )
+        )
+    )
+    updates = {row.update_date: {"content": row.update_content, "valid": row.is_valid}
+               for row in updates_result.fetchall()}
+
+    # Build calendar
+    weekday_names = {
+        0: "Dushanba", 1: "Seshanba", 2: "Chorshanba",
+        3: "Payshanba", 4: "Juma", 5: "Shanba", 6: "Yakshanba"
+    }
+
+    calendar_days = []
+    update_count = 0
+
+    for day in range(1, num_days + 1):
+        current_date = date(year, month, day)
+        weekday = current_date.weekday()
+
+        day_info = {
+            "day": day,
+            "date": str(current_date),
+            "weekday": weekday_names[weekday],
+            "is_sunday": weekday == 6,
+            "has_update": current_date in updates
+        }
+
+        if current_date in updates:
+            update_data = updates[current_date]
+            day_info["update_content"] = update_data["content"]
+            day_info["is_valid"] = update_data["valid"]
+            if weekday != 6:  # Not Sunday
+                update_count += 1
+        else:
+            day_info["update_content"] = None
+            day_info["is_valid"] = None
+
+        calendar_days.append(day_info)
+
+    percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
+
+    return {
+        "month": month,
+        "year": year,
+        "working_days": working_days,
+        "sundays_count": len(sundays),
+        "total_days": num_days,
+        "update_days": update_count,
+        "missing_days": working_days - update_count,
+        "percentage": percentage,
+        "calendar": calendar_days
+    }
+
+
+@router.get("/my-trends", summary="Get my performance trends")
+async def get_my_trends(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Get performance trends for last 6 months
+    Shows monthly statistics to track progress over time
+    """
+    from utils.admin_stats import get_working_days_in_month
+
+    today = date.today()
+    trends = []
+
+    # Get last 6 months
+    for i in range(6):
+        # Calculate month
+        target_month = today.month - i
+        target_year = today.year
+
+        while target_month <= 0:
+            target_month += 12
+            target_year -= 1
+
+        # Get working days
+        working_days, _ = get_working_days_in_month(target_year, target_month)
+
+        # Get month range
+        first_day = date(target_year, target_month, 1)
+        num_days = calendar.monthrange(target_year, target_month)[1]
+        last_day = date(target_year, target_month, num_days)
+
+        # Count updates
+        updates_result = await session.execute(
+            select(func.count()).select_from(daily_update_log)
+            .where(
+                and_(
+                    daily_update_log.c.user_id == current_user.id,
+                    daily_update_log.c.update_date >= first_day,
+                    daily_update_log.c.update_date <= last_day,
+                    # Exclude Sundays by checking weekday
+                    func.extract('dow', daily_update_log.c.update_date) != 0  # 0 = Sunday in PostgreSQL
+                )
+            )
+        )
+        update_count = updates_result.scalar() or 0
+
+        percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
+
+        month_names_uz = {
+            1: "Yanvar", 2: "Fevral", 3: "Mart", 4: "Aprel",
+            5: "May", 6: "Iyun", 7: "Iyul", 8: "Avgust",
+            9: "Sentabr", 10: "Oktabr", 11: "Noyabr", 12: "Dekabr"
+        }
+
+        trends.append({
+            "month": target_month,
+            "year": target_year,
+            "month_name": month_names_uz[target_month],
+            "working_days": working_days,
+            "update_days": update_count,
+            "percentage": percentage
+        })
+
+    # Reverse to show oldest to newest
+    trends.reverse()
+
+    return {
+        "trends": trends,
+        "average_percentage": round(sum(t["percentage"] for t in trends) / len(trends), 1) if trends else 0
+    }
 
 
 @router.get("/recent", summary="Get recent updates")
