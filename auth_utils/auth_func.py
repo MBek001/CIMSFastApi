@@ -24,10 +24,18 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def get_password_hash(password: str) -> str:
-    # 72 baytdan uzun bo‘lsa, kesamiz
-    if len(password.encode('utf-8')) > 72:
-        password = password[:72]
-    return pwd_context.hash(password)
+    # UTF-8 baytlarga o'tkazamiz
+    pwd_bytes = password.encode("utf-8")
+
+    # Agar 72 baytdan uzun bo‘lsa, bytes bo‘yicha kesamiz
+    if len(pwd_bytes) > 72:
+        pwd_bytes = pwd_bytes[:72]
+
+    # Qayta stringga aylantiramiz (xatolik chiqmasligi uchun)
+    safe_password = pwd_bytes.decode("utf-8", errors="ignore")
+
+    return pwd_context.hash(safe_password)
+
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

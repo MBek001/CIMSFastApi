@@ -86,7 +86,9 @@ async def generate_admin_statistics(
         return ("❌ Faol foydalanuvchilar topilmadi.", None)
 
     # Statistika yaratish
+
     stats_list = []
+
 
     for u in users:
         # User uchun bu oydagi yangilanishlar
@@ -111,8 +113,24 @@ async def generate_admin_statistics(
 
         # Statistika
         total_days = working_days  # Faqat ish kunlari
-        update_days = len(valid_updates)
+        valid_update_dates = {upd.update_date for upd in updates if upd.update_date.weekday() != 6 and upd.is_valid}
+        update_days = len(valid_update_dates)
         update_percentage = round((update_days / total_days) * 100, 1) if total_days > 0 else 0
+
+        update_dates_set = {upd.update_date for upd in updates if upd.is_valid}
+
+        num_days = calendar.monthrange(year, month)[1]
+        daily_status = {}
+
+        for day in range(1, num_days + 1):
+            d = date(year, month, day)
+
+            if d.weekday() == 6:  # Yakshanba
+                daily_status[day] = "💤"
+            elif d in update_dates_set:  # Update bor
+                daily_status[day] = "✅"
+            else:  # Update yo'q
+                daily_status[day] = "❌"
 
         # Oxirgi update
         last_update_date = updates[0].update_date if updates else None
@@ -146,7 +164,10 @@ async def generate_admin_statistics(
             'last_update': last_update_date,
             'days_since_last': days_since_last,
             'ai_summary': ai_summary,
-            'user_id': u.id
+            'user_id': u.id,
+            'daily_status': daily_status,
+            'num_days': num_days
+
         })
 
     # Formatlangan xabar yaratish
@@ -335,166 +356,291 @@ Kam faol xodimlar bilan individual suhbat o'tkazish tavsiya etiladi.
 
 
 def generate_excel_report(
-    stats_list: List[Dict],
-    year: int,
-    month: int,
-    working_days: int,
-    sundays_count: int
+        stats_list: List[Dict],
+        year: int,
+        month: int,
+        working_days: int,
+        sundays_count: int
 ) -> bytes:
     """
-    Excel hisobotini yaratadi
+    Har kunlik update bilan chiroyli Excel hisobotini yaratadi
 
     Returns:
         bytes: Excel file (xlsx) bytes
     """
-    # Workbook yaratish
     wb = Workbook()
     ws = wb.active
     ws.title = f"{month:02d}.{year}"
 
-    # Styles
+    # ========== STYLES ==========
+    main_header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
     header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-    header_font = Font(bold=True, color="FFFFFF", size=12)
-    cell_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
+    info_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    sunday_fill = PatternFill(start_color="FFE699", end_color="FFE699", fill_type="solid")
+    present_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    absent_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+    main_header_font = Font(bold=True, color="FFFFFF", size=14)
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    bold_font = Font(bold=True, size=10)
+    small_font = Font(size=9)
+
+    center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+
+    thin_border = Border(
+        left=Side(style='thin', color="000000"),
+        right=Side(style='thin', color="000000"),
+        top=Side(style='thin', color="000000"),
+        bottom=Side(style='thin', color="000000")
     )
 
-    # Header qo'shish
-    ws.merge_cells('A1:H1')
+    # ========== 1. ASOSIY HEADER ==========
+    num_days = calendar.monthrange(year, month)[1]
+    last_col = get_column_letter(num_days + 6)  # 6 = boshlanish ustunlari
+
+    ws.merge_cells(f'A1:{last_col}1')
     title_cell = ws['A1']
     title_cell.value = f"📊 ADMIN STATISTIKA HISOBOTI - {month:02d}.{year}"
-    title_cell.font = Font(bold=True, size=14)
-    title_cell.alignment = cell_alignment
-    title_cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    title_cell.font = Font(bold=True, color="FFFFFF", size=14)
+    title_cell.font = main_header_font
+    title_cell.alignment = center_align
+    title_cell.fill = main_header_fill
+    ws.row_dimensions[1].height = 25
 
-    # Info qo'shish
-    ws.merge_cells('A2:H2')
+    # ========== 2. INFO QATOR ==========
+    ws.merge_cells(f'A2:{last_col}2')
     info_cell = ws['A2']
     info_cell.value = f"📆 Ish kunlari: {working_days} kun | Yakshanba: {sundays_count} kun | Xodimlar: {len(stats_list)}"
-    info_cell.alignment = cell_alignment
+    info_cell.alignment = center_align
+    info_cell.fill = info_fill
+    info_cell.font = Font(size=10)
+    ws.row_dimensions[2].height = 20
 
-    # Ustun nomlari
-    headers = ['№', 'Ism Familiya', 'Username', 'Update Kunlari', 'Ish Kunlari', 'Foiz (%)', 'Baho', 'Tavsiya']
-    ws.append(headers)
+    ws.row_dimensions[3].height = 5
+
+    # ========== 3. JADVAL HEADER ==========
+    header_row = 4
+
+    # Asosiy ustunlar
+    ws.cell(row=header_row, column=1).value = "№"
+    ws.cell(row=header_row, column=2).value = "Ism Familiya"
+    ws.cell(row=header_row, column=3).value = "Username"
+
+    # Har bir kun uchun ustun
+    for day in range(1, num_days + 1):
+        col_num = 3 + day
+        ws.cell(row=header_row, column=col_num).value = day
+        ws.column_dimensions[get_column_letter(col_num)].width = 3.5
+
+    # Oxirgi ustunlar
+    summary_col_start = num_days + 4
+    ws.cell(row=header_row, column=summary_col_start).value = "Update Kunlari"
+    ws.cell(row=header_row, column=summary_col_start + 1).value = "Ish Kunlari"
+    ws.cell(row=header_row, column=summary_col_start + 2).value = "Foiz (%)"
 
     # Header stilini qo'llash
-    for col_num, header in enumerate(headers, 1):
-        cell = ws.cell(row=3, column=col_num)
+    for col_num in range(1, summary_col_start + 3):
+        cell = ws.cell(row=header_row, column=col_num)
         cell.font = header_font
         cell.fill = header_fill
-        cell.alignment = cell_alignment
-        cell.border = border
+        cell.alignment = center_align
+        cell.border = thin_border
 
-    # Ma'lumotlarni qo'shish
+    ws.row_dimensions[header_row].height = 25
+
+    # ========== 4. MA'LUMOTLAR ==========
     for idx, stat in enumerate(stats_list, 1):
-        # Baho aniqlash
+        row_num = header_row + idx
+
+        # №, Ism, Username
+        ws.cell(row=row_num, column=1).value = idx
+        ws.cell(row=row_num, column=2).value = stat['name']
+        ws.cell(row=row_num, column=3).value = stat.get('username', 'N/A')
+
+        # Har bir kun uchun status
+        daily_status = stat.get('daily_status', {})
+        for day in range(1, num_days + 1):
+            col_num = 3 + day
+            cell = ws.cell(row=row_num, column=col_num)
+
+            status = daily_status.get(day, "❌")
+
+            # Status va rang
+            if status == "✅":
+                cell.value = "✓"
+                cell.fill = present_fill
+                cell.font = Font(bold=True, color="006100", size=11)
+            elif status == "💤":
+                cell.value = "💤"
+                cell.fill = sunday_fill
+                cell.font = small_font
+            else:
+                cell.value = "✗"
+                cell.fill = absent_fill
+                cell.font = Font(bold=True, color="9C0006", size=11)
+
+            cell.alignment = center_align
+            cell.border = thin_border
+
+        # Summary ustunlar
+        ws.cell(row=row_num, column=summary_col_start).value = stat['update_days']
+        ws.cell(row=row_num, column=summary_col_start + 1).value = stat['total_days']
+        ws.cell(row=row_num, column=summary_col_start + 2).value = f"{stat['percentage']}%"
+
+        # Foiz bo'yicha rang
         percentage = stat['percentage']
         if percentage >= 90:
-            grade = "A'LO 🌟"
-            recommendation = "Davom eting!"
+            percent_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
         elif percentage >= 75:
-            grade = "YAXSHI ✅"
-            recommendation = "Yaxshi ish!"
+            percent_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
         elif percentage >= 50:
-            grade = "O'RTACHA ⚠️"
-            recommendation = "Yaxshilash kerak"
-        elif percentage >= 25:
-            grade = "PAST ❌"
-            recommendation = "E'tibor bering!"
+            percent_fill = PatternFill(start_color="FFD9B3", end_color="FFD9B3", fill_type="solid")
         else:
-            grade = "JUDA PAST 🚨"
-            recommendation = "Zudlik bilan choralar!"
+            percent_fill = PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid")
 
-        row_data = [
-            idx,
-            stat['name'],
-            stat['username'],
-            stat['update_days'],
-            stat['total_days'],
-            stat['percentage'],
-            grade,
-            recommendation
-        ]
+        # Summary ustunlarga stil berish
+        for offset in range(3):
+            cell = ws.cell(row=row_num, column=summary_col_start + offset)
+            cell.alignment = center_align
+            cell.border = thin_border
+            cell.font = bold_font
 
-        ws.append(row_data)
+            if offset == 2:  # Foiz ustuni
+                cell.fill = percent_fill
+                if percentage < 25:
+                    cell.font = Font(bold=True, color="FFFFFF", size=11)
 
-        # Cell stilini qo'llash
-        row_num = idx + 3
-        for col_num in range(1, len(row_data) + 1):
-            cell = ws.cell(row=row_num, column=col_num)
-            cell.alignment = cell_alignment
-            cell.border = border
+        ws.row_dimensions[row_num].height = 20
 
-            # Foiz bo'yicha rang berish
-            if col_num == 6:  # Foiz ustuni
-                if percentage >= 90:
-                    cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-                elif percentage >= 75:
-                    cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-                elif percentage >= 50:
-                    cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-                else:
-                    cell.fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-                    cell.font = Font(color="FFFFFF", bold=True)
+    # ========== 5. USTUN KENGLIKLARI ==========
+    ws.column_dimensions['A'].width = 5
+    ws.column_dimensions['B'].width = 30
+    ws.column_dimensions['C'].width = 10
+    ws.column_dimensions['D'].width = 25
+    ws.column_dimensions['E'].width = 10
+    ws.column_dimensions['F'].width = 12
+    ws.column_dimensions['G'].width = 18
+    ws.column_dimensions['H'].width = 8
+    ws.column_dimensions[get_column_letter(summary_col_start)].width = 15
+    ws.column_dimensions[get_column_letter(summary_col_start + 1)].width = 12
+    ws.column_dimensions[get_column_letter(summary_col_start + 2)].width = 12
 
-    # Ustun kengliklarini sozlash
-    column_widths = [5, 25, 15, 15, 12, 10, 15, 20]
-    for col_num, width in enumerate(column_widths, 1):
-        ws.column_dimensions[get_column_letter(col_num)].width = width
+    # ========== 6. UMUMIY STATISTIKA ==========
+    summary_start_row = header_row + len(stats_list) + 2
 
-    # Umumiy statistika qo'shish
-    summary_row = len(stats_list) + 5
-    ws.merge_cells(f'A{summary_row}:H{summary_row}')
-    summary_cell = ws[f'A{summary_row}']
-    summary_cell.value = "🎯 UMUMIY XULOSA"
-    summary_cell.font = Font(bold=True, size=12)
-    summary_cell.alignment = cell_alignment
-    summary_cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    summary_cell.font = Font(bold=True, color="FFFFFF", size=12)
+    ws.merge_cells(f'A{summary_start_row}:{last_col}{summary_start_row}')
+    summary_header = ws[f'A{summary_start_row}']
+    summary_header.value = "🎯 UMUMIY XULOSA"
+    summary_header.font = main_header_font
+    summary_header.alignment = center_align
+    summary_header.fill = main_header_fill
+    ws.row_dimensions[summary_start_row].height = 30
 
-    # O'rtacha foiz
-    avg_percentage = sum(s['percentage'] for s in stats_list) / len(stats_list)
+    # Statistika
+    summary_start_row += 1
+    avg_percentage = sum(s['percentage'] for s in stats_list) / len(stats_list) if stats_list else 0
     total_updates = sum(s['update_days'] for s in stats_list)
 
-    summary_row += 1
-    ws[f'A{summary_row}'] = "O'rtacha foiz:"
-    ws[f'B{summary_row}'] = f"{round(avg_percentage, 1)}%"
-    ws[f'C{summary_row}'] = "Jami updatelar:"
-    ws[f'D{summary_row}'] = total_updates
+    ws.merge_cells(f'A{summary_start_row}:B{summary_start_row}')
+    ws[f'A{summary_start_row}'] = "O'rtacha foiz:"
+    ws.merge_cells(f'C{summary_start_row}:D{summary_start_row}')
+    ws[f'C{summary_start_row}'] = f"{round(avg_percentage, 1)}%"
+    ws.merge_cells(f'E{summary_start_row}:F{summary_start_row}')
+    ws[f'E{summary_start_row}'] = "Jami updatelar:"
+    ws.merge_cells(f'G{summary_start_row}:H{summary_start_row}')
+    ws[f'G{summary_start_row}'] = total_updates
 
-    # TOP 3
-    summary_row += 2
-    ws.merge_cells(f'A{summary_row}:D{summary_row}')
-    ws[f'A{summary_row}'] = "🌟 TOP 3 FAOL XODIMLAR"
-    ws[f'A{summary_row}'].font = Font(bold=True)
+    for col in ['A', 'C', 'E', 'G']:
+        cell = ws[f'{col}{summary_start_row}']
+        cell.font = bold_font
+        cell.alignment = center_align
+        cell.fill = info_fill
+        cell.border = thin_border
+
+    ws.row_dimensions[summary_start_row].height = 28
+
+    # ========== 7. TOP 3 ==========
+    summary_start_row += 2
+    ws.merge_cells(f'A{summary_start_row}:H{summary_start_row}')
+    top3_header = ws[f'A{summary_start_row}']
+    top3_header.value = "🌟 TOP 3 FAOL XODIMLAR"
+    top3_header.font = Font(bold=True, size=12)
+    top3_header.alignment = center_align
+    top3_header.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    ws.row_dimensions[summary_start_row].height = 28
 
     top_3 = sorted(stats_list, key=lambda x: x['percentage'], reverse=True)[:3]
     for i, stat in enumerate(top_3, 1):
-        summary_row += 1
+        summary_start_row += 1
         emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉"
-        ws[f'A{summary_row}'] = f"{emoji} {i}"
-        ws[f'B{summary_row}'] = stat['name']
-        ws[f'C{summary_row}'] = f"{stat['percentage']}%"
 
-    # BOTTOM 3
-    summary_row += 2
-    ws.merge_cells(f'A{summary_row}:D{summary_row}')
-    ws[f'A{summary_row}'] = "⚠️ ENG KAM FAOL 3 XODIM"
-    ws[f'A{summary_row}'].font = Font(bold=True)
+        ws[f'A{summary_start_row}'] = f"{emoji} {i}"
+        ws.merge_cells(f'B{summary_start_row}:C{summary_start_row}')
+        ws[f'B{summary_start_row}'] = stat['name']
+        ws.merge_cells(f'D{summary_start_row}:E{summary_start_row}')
+        ws[f'D{summary_start_row}'] = stat['username']
+        ws[f'F{summary_start_row}'] = f"{stat['update_days']} kun"
+        ws.merge_cells(f'G{summary_start_row}:H{summary_start_row}')
+        ws[f'G{summary_start_row}'] = f"{stat['percentage']}%"
+
+        for col in ['A', 'B', 'D', 'F', 'G']:
+            cell = ws[f'{col}{summary_start_row}']
+            cell.alignment = center_align if col in ['A', 'F', 'G'] else left_align
+            cell.border = thin_border
+            if col in ['G']:  # Foiz ustuni
+                cell.font = Font(bold=True, size=13, color="006100")
+            else:
+                cell.font = Font(size=11)
+
+        ws.row_dimensions[summary_start_row].height = 40
+
+    # ========== 8. BOTTOM 3 ==========
+    summary_start_row += 2
+    ws.merge_cells(f'A{summary_start_row}:H{summary_start_row}')
+    bottom3_header = ws[f'A{summary_start_row}']
+    bottom3_header.value = "⚠️ ENG KAM FAOL 3 XODIM"
+    bottom3_header.font = Font(bold=True, size=12)
+    bottom3_header.alignment = center_align
+    bottom3_header.fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    ws.row_dimensions[summary_start_row].height = 28
 
     bottom_3 = sorted(stats_list, key=lambda x: x['percentage'])[:3]
     for i, stat in enumerate(bottom_3, 1):
-        summary_row += 1
-        ws[f'A{summary_row}'] = i
-        ws[f'B{summary_row}'] = stat['name']
-        ws[f'C{summary_row}'] = f"{stat['percentage']}%"
+        summary_start_row += 1
 
-    # Excel file ni bytes ga aylantirish
+        ws[f'A{summary_start_row}'] = i
+        ws.merge_cells(f'B{summary_start_row}:C{summary_start_row}')
+        ws[f'B{summary_start_row}'] = stat['name']
+        ws.merge_cells(f'D{summary_start_row}:E{summary_start_row}')
+        ws[f'D{summary_start_row}'] = stat['username']
+        ws[f'F{summary_start_row}'] = f"{stat['update_days']} kun"
+        ws.merge_cells(f'G{summary_start_row}:H{summary_start_row}')
+        ws[f'G{summary_start_row}'] = f"{stat['percentage']}%"
+
+        for col in ['A', 'B', 'D', 'F', 'G']:
+            cell = ws[f'{col}{summary_start_row}']
+            cell.alignment = center_align if col in ['A', 'F', 'G'] else left_align
+            cell.border = thin_border
+            if col == 'G':  # Foiz ustuni
+                cell.font = Font(bold=True, size=13, color="9C0006")
+            else:
+                cell.font = Font(size=12)
+
+        ws.row_dimensions[summary_start_row].height = 26
+
+    # ========== 9. LEGEND (Izoh) ==========
+    legend_row = summary_start_row + 2
+    ws.merge_cells(f'A{legend_row}:H{legend_row}')
+    legend_cell = ws[f'A{legend_row}']
+    legend_cell.value = "📝 IZOH: ✓ = Update bor | ✗ = Update yo'q | 💤 = Yakshanba (dam olish)"
+    legend_cell.font = Font(italic=True, size=11)
+    legend_cell.alignment = center_align
+    legend_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+    legend_cell.border = thin_border
+    ws.row_dimensions[legend_row].height = 28
+
+    # ========== 10. SAQLASH ==========
     excel_buffer = io.BytesIO()
     wb.save(excel_buffer)
     excel_buffer.seek(0)

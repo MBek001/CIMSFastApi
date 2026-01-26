@@ -16,82 +16,70 @@ from sqlalchemy import select
 from models.user_models import user
 
 
-def parse_update_message(message_text: str) -> Optional[Dict]:
-    """
-    Parse Telegram update message and extract username, date, and content
-
-    Args:
-        message_text: The full text of the telegram message
-
-    Returns:
-        Dict with keys: telegram_username, update_date, update_content
-        Returns None if message format is invalid
-    """
+def parse_update_message(message_text: str):
     if not message_text or len(message_text.strip()) < 10:
         return None
 
     lines = message_text.strip().split('\n')
 
-    # Find username (starts with #)
+    # 1. Username
     telegram_username = None
     username_line_idx = None
 
     for idx, line in enumerate(lines):
         line = line.strip()
         if line.startswith('#') and len(line) > 1:
-            # Extract username (remove # and any trailing whitespace)
             telegram_username = line[1:].strip().lower()
             username_line_idx = idx
             break
 
-    if not telegram_username or username_line_idx is None:
+    if not telegram_username:
         return None
 
-    # Try to extract date from first few lines
+    # 2. Date
     update_date = None
-    date_patterns = [
-        r'update\s+for\s+(\w+\s+\d+)',  # "Update for December 16"
-        r'update\s+for\s+(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})',  # "Update for 16/12/2025"
-        r'(\w+\s+\d+)',  # "December 16"
-        r'(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})',  # "16/12/2025"
-    ]
+    search_text = '\n'.join(lines[:5])
 
-    search_text = '\n'.join(lines[:5])  # Search in first 5 lines
+    date_patterns = [
+        r'update\s+for\s+(\w+\s+\d+)',
+        r'(\w+\s+\d+)',
+    ]
 
     for pattern in date_patterns:
         match = re.search(pattern, search_text, re.IGNORECASE)
         if match:
-            date_str = match.group(1)
-            update_date = parse_date_string(date_str)
-            if update_date:
-                break
+            update_date = parse_date_string(match.group(1))
+            break
 
-    # If no date found, use today's date
     if not update_date:
         update_date = date.today()
 
-    # Extract update content (everything after username line)
+    # 3. Content (hamma narsani username dan keyin olamiz)
     content_lines = []
-    for idx in range(username_line_idx + 1, len(lines)):
-        line = lines[idx].strip()
-        # Skip empty lines and date lines
-        if line and not re.match(r'^(update\s+for|december|january|february|march|april|may|june|july|august|september|october|november|\d{1,2}[./\-])', line, re.IGNORECASE):
-            content_lines.append(line)
+
+    for line in lines[username_line_idx + 1:]:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Normalize bullets:
+        # 1. task -> - task
+        if re.match(r'^\d+\.\s+', line):
+            line = "- " + re.sub(r'^\d+\.\s+', '', line)
+
+        content_lines.append(line)
 
     if not content_lines:
         return None
 
-    update_content = '\n'.join(content_lines)
-
-    # Validate minimum content length (at least 20 characters)
-    if len(update_content) < 20:
-        return None
+    update_content = "\n".join(content_lines)
 
     return {
-        'telegram_username': telegram_username,
-        'update_date': update_date,
-        'update_content': update_content
+        "telegram_username": telegram_username,
+        "update_date": update_date,
+        "update_content": update_content
     }
+
 
 
 def parse_date_string(date_str: str) -> Optional[date]:
@@ -211,34 +199,24 @@ async def find_user_by_telegram_username(
 
 
 def validate_update_content(content: str, min_length: int = 20) -> bool:
-    """
-    Validate update content
-
-    Args:
-        content: Update content text
-        min_length: Minimum required length
-
-    Returns:
-        True if valid, False otherwise
-    """
     if not content or len(content.strip()) < min_length:
         return False
 
-    # Check if content has at least some meaningful text (not just symbols)
-    alphanumeric_count = sum(c.isalnum() for c in content)
-    if alphanumeric_count < min_length * 0.7:  # At least 70% alphanumeric
+    lines = [l.strip() for l in content.split('\n') if l.strip()]
+
+    # Kamida 2 ta meaningful line bo‘lsin
+    if len(lines) < 2:
         return False
 
-    return True
+    # Har bir line kamida 3 ta so‘zdan iborat bo‘lsin
+    meaningful = [l for l in lines if len(l.split()) >= 3]
+
+    return len(meaningful) >= 2
+
 
 
 def extract_update_stats(content: str) -> Dict[str, int]:
-    """
-    Extract basic statistics from update content
 
-    Returns:
-        Dict with stats like line_count, bullet_count, etc.
-    """
     lines = [line.strip() for line in content.split('\n') if line.strip()]
 
     # Count bullet points (lines starting with -, •, *, number.)

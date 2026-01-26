@@ -8,9 +8,9 @@ from config import TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID
 # Timeout sozlamalarini oshirish
 request = HTTPXRequest(
     connection_pool_size=8,
-    connect_timeout=60.0,      # Ulanish timeout: 60 soniya
-    read_timeout=180.0,         # O'qish timeout: 180 soniya (3 daqiqa)
-    write_timeout=180.0,        # Yozish timeout: 180 soniya (3 daqiqa)
+    connect_timeout=60.0,
+    read_timeout=180.0,
+    write_timeout=180.0,
     pool_timeout=60.0
 )
 
@@ -58,7 +58,7 @@ async def upload_audio_to_telegram(audio_file: UploadFile) -> str:
             )
             return message.audio.file_id
 
-        # Noma'lum formatlar uchun send_document
+
         else:
             message = await bot.send_document(
                 chat_id=TELEGRAM_AUDIO_CHAT_ID,
@@ -86,7 +86,6 @@ async def upload_audio_to_telegram(audio_file: UploadFile) -> str:
             detail=f"Audio yuklashda xatolik: {str(e)}"
         )
     finally:
-        # Faylni qayta o'qish uchun reset
         await audio_file.seek(0)
 
 
@@ -96,7 +95,7 @@ async def get_audio_url_from_telegram(file_id: str) -> str:
     """
     try:
         file = await bot.get_file(file_id, read_timeout=60)
-        audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file.file_path}"
+        audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_AUDIO_BOT_TOKEN}/{file.file_path}"
         return audio_url
     except TelegramError as e:
         raise HTTPException(
