@@ -334,6 +334,7 @@ async def get_international_leads(
             "type": c.type.value if c.type else "local",
             "assistant_name": c.assistant_name,
             "notes": c.notes,
+            "aisummary": c.aisummary,
             "conversation_language": c.conversation_language.value if c.conversation_language else "uz",
             "created_at": c.created_at.isoformat()
         }

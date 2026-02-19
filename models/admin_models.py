@@ -16,6 +16,7 @@ class CustomerStatus(enum.Enum):
     rejected = "rejected"
     need_to_call = "need_to_call"
 
+
 class FinanceType(enum.Enum):
     incomer = "incomer"
     outcomer = "outcomer"
@@ -90,6 +91,7 @@ customer = Table(
     Column("type", Enum(CustomerType), nullable=True, default=None),  # NEW: Customer type (local/international)
     Column("assistant_name", String(255), nullable=True),
     Column("notes", Text, nullable=True),
+    Column("aisummary", Text, nullable=True),
     Column("audio_file_id", String(500), nullable=True),  # Telegram file ID
     Column("audio_url", String(1000), nullable=True),     # (agar kerak bo'lsa)
     Column("conversation_language", Enum(ConversationLanguage), nullable=True, default=ConversationLanguage.UZ),

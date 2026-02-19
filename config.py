@@ -57,3 +57,8 @@ UPDATE_ADMIN_PASSWORD = os.environ.get('UPDATE_ADMIN_PASSWORD', 'admin123')  # D
 
 
 FREECURRENCYAPI_KEY = os.environ.get('FREECURRENCYAPI_KEY')
+
+# AI Summary (optional)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")

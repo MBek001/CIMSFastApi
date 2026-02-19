@@ -86,6 +86,7 @@ class CustomerResponse(BaseModel):
     status: str
     assistant_name: Optional[str]
     notes: Optional[str]
+    aisummary: Optional[str] = None
     audio_file_id: Optional[str]
     audio_url: Optional[str] = None  # ✅ Yangi maydon qo‘shildi
     conversation_language: Optional[str]
@@ -191,6 +192,7 @@ class CustomerAPIResponse(BaseModel):
     status: str
     assistant_name: Optional[str]
     notes: Optional[str]
+    aisummary: Optional[str] = None
     audio_file_id: Optional[str]
     conversation_language: Optional[str]
     created_at: str

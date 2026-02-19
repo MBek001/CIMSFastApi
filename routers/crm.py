@@ -25,6 +25,7 @@ from  auth_utils.auth_func import get_current_user
 from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
 from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram, validate_audio_file
+from utils.ai_summary import generate_customer_ai_summary
 
 router = APIRouter(prefix="/crm", tags=['Sales CRM'])
 
@@ -73,6 +74,7 @@ async def get_latest_customers(
             status=c.status.value,
             assistant_name=c.assistant_name,
             notes=c.notes,
+            aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
             audio_url=audio_url,                        # 🟢 to‘g‘ri joyda
@@ -116,6 +118,7 @@ async def get_customer_detail(
             status=c.status.value if hasattr(c.status, "value") else c.status,
             assistant_name=c.assistant_name,
             notes=c.notes,
+            aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             audio_url=audio_url,
             conversation_language=c.conversation_language,
@@ -158,6 +161,7 @@ async def get_latest_customers(
             status=c.status.value,
             assistant_name=c.assistant_name,
             notes=c.notes,
+            aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
             created_at=c.created_at.isoformat()
@@ -245,6 +249,7 @@ async def crm_dashboard(
             "status": c.status.value,
             "assistant_name": c.assistant_name,
             "notes": c.notes,
+            "aisummary": c.aisummary,
             "audio_file_id": c.audio_file_id,
             "audio_url": audio_url,
             "conversation_language": c.conversation_language,
@@ -489,6 +494,8 @@ async def create_customer(
         elif customer_type.lower() == "local":
             parsed_type = CustomerType.local
 
+    ai_summary = await generate_customer_ai_summary(notes)
+
     # Mijozni yaratish
     customer_dict = {
         "full_name": encrypted_full_name,
@@ -500,6 +507,7 @@ async def create_customer(
         "type": parsed_type,  # NEW: Customer type (local/international)
         "assistant_name": assistant_name,
         "notes": notes,
+        "aisummary": ai_summary,
         "audio_file_id": audio_file_id,
         "conversation_language": conversation_language.value.upper(),
         "created_at": datetime.now()
@@ -584,6 +592,7 @@ async def update_customer(
         update_data["assistant_name"] = assistant_name
     if notes is not None:
         update_data["notes"] = notes
+        update_data["aisummary"] = await generate_customer_ai_summary(notes)
     if conversation_language is not None:
         update_data["conversation_language"] = conversation_language.value.upper()
 
@@ -664,8 +673,9 @@ async def patch_customer(
         update_data["username"] = username
     if assistant_name:
         update_data["assistant_name"] = assistant_name
-    if notes:
+    if notes is not None:
         update_data["notes"] = notes
+        update_data["aisummary"] = await generate_customer_ai_summary(notes)
     if conversation_language:
         update_data["conversation_language"] = conversation_language.value.upper()
 
@@ -889,7 +899,8 @@ async def create_customer_api(
         request: Request,
         session: AsyncSession = Depends(get_async_session)
 ):
-    
+    ai_summary = await generate_customer_ai_summary(customer_data.notes)
+
     customer_dict = {
         "full_name": encrypt_text(customer_data.full_name),
         "platform": customer_data.platform,
@@ -898,6 +909,7 @@ async def create_customer_api(
         "status": customer_data.status,
         "assistant_name": customer_data.assistant_name,
         "notes": customer_data.notes,
+        "aisummary": ai_summary,
         "created_at": datetime.now()
     }
 
@@ -946,6 +958,7 @@ async def filter_customers_by_status(
                 status=c.status_name or c.status.value,  # Use status_name if available
                 assistant_name=c.assistant_name,
                 notes=c.notes,
+                aisummary=c.aisummary,
                 audio_file_id=c.audio_file_id,
                 conversation_language=c.conversation_language,
                 created_at=c.created_at.isoformat()
@@ -988,6 +1001,7 @@ async def filter_customers_by_platform(
             status=c.status.value,
             assistant_name=c.assistant_name,
             notes=c.notes,
+            aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
             created_at=c.created_at.isoformat()
@@ -1044,6 +1058,7 @@ async def filter_customers_by_date(
             status=c.status.value,
             assistant_name=c.assistant_name,
             notes=c.notes,
+            aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
             created_at=c.created_at.isoformat()
