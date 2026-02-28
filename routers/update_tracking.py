@@ -629,11 +629,6 @@ async def telegram_webhook(
     # 4. Parse update
     parsed = parse_update_message(text)
     if not parsed:
-        await set_message_reaction_safe(
-            chat_id=message.chat.id,
-            message_id=message.message_id,
-            emoji="❌"
-        )
         await bot.send_message(
             chat_id=message.chat.id,
             text="❌ Update parserdan o'tmadi.\n\n"
@@ -656,11 +651,6 @@ async def telegram_webhook(
     # Validate content
     is_valid = validate_update_content(parsed['update_content'])
     if not is_valid:
-        await set_message_reaction_safe(
-            chat_id=message.chat.id,
-            message_id=message.message_id,
-            emoji="❌"
-        )
         await bot.send_message(
             chat_id=message.chat.id,
             text="❌ Update parserdan o'tmadi.\n\n"
@@ -709,8 +699,9 @@ async def telegram_webhook(
 
     await session.commit()
 
-    # Yangi update uchun ✅, edited update uchun ☑️
-    success_reaction = "☑️" if is_edited else "✅"
+    # Telegram reaction whitelistdagi emojilarni ishlatamiz
+    # (✅/☑️/❌ ko'p chatlarda Reaction_invalid beradi)
+    success_reaction = "✍️" if is_edited else "👍"
     await set_message_reaction_safe(
         chat_id=message.chat.id,
         message_id=message.message_id,
