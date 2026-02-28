@@ -1,4 +1,4 @@
-"""
+﻿"""
 Update Tracking Router
 Automatic daily update tracking from Telegram channel
 """
@@ -9,7 +9,7 @@ from datetime import datetime, date, timedelta
 import calendar
 from typing import Optional, Dict, List
 from pydantic import BaseModel
-from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, ReactionTypeEmoji
 
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
@@ -23,7 +23,6 @@ from utils.update_parser import (
     find_user_by_telegram_username,
     validate_update_content
 )
-from telegram import Bot
 from dotenv import load_dotenv
 from utils.admin_stats import generate_admin_statistics
 from config import UPDATE_ADMIN_PASSWORD, TELEGRAM_UPDATE_BOT_TOKEN
@@ -338,9 +337,9 @@ async def handle_admin_command(
 ) -> Optional[Dict]:
     """
     /admin command handler - Interactive bot
-    1. /admin → parol so'raydi
-    2. Parol to'g'ri → oy tanlov keyboard
-    3. Oy tanlandi → statistika + Excel
+    1. /admin в†’ parol so'raydi
+    2. Parol to'g'ri в†’ oy tanlov keyboard
+    3. Oy tanlandi в†’ statistika + Excel
     """
     text = message.text.strip()
 
@@ -357,9 +356,9 @@ async def handle_admin_command(
     if len(parts) == 1:
         await send_telegram_message(
             chat_id=message.chat.id,
-            text="🔐 *ADMIN PANEL*\n\nParolni kiriting:\n`/admin <parol>`\n\n*Misol:* `/admin admin123`",
+            text="рџ”ђ *ADMIN PANEL*\n\nParolni kiriting:\n`/admin <parol>`\n\n*Misol:* `/admin admin123`",
             parse_mode='Markdown',
-            reply_markup=ReplyKeyboardRemove()  # <-- SHU QATORNI QO‘SHING
+            reply_markup=ReplyKeyboardRemove()  # <-- SHU QATORNI QOвЂSHING
         )
         return {"status": "waiting", "reason": "Password requested"}
 
@@ -369,7 +368,7 @@ async def handle_admin_command(
     if provided_password != UPDATE_ADMIN_PASSWORD:
         await send_telegram_message(
             chat_id=message.chat.id,
-            text="❌ Noto'g'ri parol!\n\nQaytadan urinib ko'ring: `/admin <parol>`",
+            text="вќЊ Noto'g'ri parol!\n\nQaytadan urinib ko'ring: `/admin <parol>`",
             parse_mode='Markdown'
         )
         return {"status": "error", "reason": "Wrong password"}
@@ -395,16 +394,16 @@ async def handle_month_selection(
     """Handle month selection from keyboard"""
     try:
         # Check for cancel button
-        if "Bekor qilish" in text or text.strip() == "❌ Bekor qilish":
+        if "Bekor qilish" in text or text.strip() == "вќЊ Bekor qilish":
             await send_telegram_message(
                 chat_id=message.chat.id,
-                text="❌ Bekor qilindi.",
+                text="вќЊ Bekor qilindi.",
                 reply_markup=ReplyKeyboardRemove()
             )
             return {"status": "cancelled", "reason": "User cancelled"}
 
         # Clean text - remove emoji and "(Joriy)" suffix
-        clean_text = text.replace("📅", "").replace("(Joriy)", "").strip()
+        clean_text = text.replace("рџ“…", "").replace("(Joriy)", "").strip()
 
         # Parse month from text like "Yanvar 2026"
         month_names_uz = {
@@ -434,7 +433,7 @@ async def handle_month_selection(
         # Generate statistics
         await send_telegram_message(
             chat_id=message.chat.id,
-            text=f"⏳ *{month_name_display} {year}* uchun statistika tayyorlanmoqda...\n\nBiroz kuting...",
+            text=f"вЏі *{month_name_display} {year}* uchun statistika tayyorlanmoqda...\n\nBiroz kuting...",
             parse_mode='Markdown',
             reply_markup=ReplyKeyboardRemove()  # Remove keyboard
         )
@@ -455,7 +454,7 @@ async def handle_month_selection(
                 chat_id=message.chat.id,
                 file_bytes=excel_bytes,
                 filename=filename,
-                caption=f"📊 Excel hisobot - {month:02d}.{year}"
+                caption=f"рџ“Љ Excel hisobot - {month:02d}.{year}"
             )
 
         # Show dashboard again for new selection
@@ -466,7 +465,7 @@ async def handle_month_selection(
     except Exception as e:
         await send_telegram_message(
             chat_id=message.chat.id,
-            text=f"❌ Xato yuz berdi: {str(e)}"
+            text=f"вќЊ Xato yuz berdi: {str(e)}"
         )
         return {"status": "error", "reason": str(e)}
 
@@ -485,7 +484,7 @@ async def show_admin_dashboard(chat_id: int):
     }
 
     # Add current month at top
-    current_month_text = f"📅 {month_names_uz[today.month]} {today.year} (Joriy)"
+    current_month_text = f"рџ“… {month_names_uz[today.month]} {today.year} (Joriy)"
     month_buttons.append([KeyboardButton(current_month_text)])
 
     # Generate last 12 months using proper month arithmetic
@@ -506,7 +505,7 @@ async def show_admin_dashboard(chat_id: int):
         month_buttons.append([KeyboardButton(month_text)])
 
     # Add cancel button
-    month_buttons.append([KeyboardButton("❌ Bekor qilish")])
+    month_buttons.append([KeyboardButton("вќЊ Bekor qilish")])
 
     keyboard = ReplyKeyboardMarkup(
         keyboard=month_buttons,
@@ -516,7 +515,7 @@ async def show_admin_dashboard(chat_id: int):
 
     await send_telegram_message(
         chat_id=chat_id,
-        text="📊 *ADMIN DASHBOARD*\n\n✅ Parol to'g'ri!\n\nStatistika ko'rish uchun oyni tanlang:",
+        text="рџ“Љ *ADMIN DASHBOARD*\n\nвњ… Parol to'g'ri!\n\nStatistika ko'rish uchun oyni tanlang:",
         parse_mode='Markdown',
         reply_markup=keyboard
     )
@@ -567,17 +566,35 @@ async def send_telegram_file(
         print(f"Error sending telegram file: {e}")
 
 
+def get_update_template_text() -> str:
+    """Template shown when update message does not pass parser/validation."""
+    return (
+        "Update for December 16\n"
+        "#username\n"
+        "- Birinchi task kamida 3 ta so'z bilan\n"
+        "- Ikkinchi task kamida 3 ta so'z bilan"
+    )
+
+
+async def set_message_reaction_safe(chat_id: int, message_id: int, emoji: str):
+    """Set reaction on a Telegram message and suppress reaction errors."""
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            reaction=[ReactionTypeEmoji(emoji=emoji)]
+        )
+    except Exception as e:
+        print(f"Error setting message reaction: {e}")
+
+
 @router.post("/telegram-webhook", summary="Telegram bot webhook")
 async def telegram_webhook(
     payload: TelegramWebhookPayload,
     session: AsyncSession = Depends(get_async_session)
 ):
-
-
-
     """
-    Webhook endpoint for Telegram bot to send update messages
-    Receives standard Telegram webhook format and processes messages
+    Webhook endpoint for Telegram bot to process update messages.
 
     Commands:
     - /admin <password>: Get admin statistics
@@ -585,51 +602,51 @@ async def telegram_webhook(
     Regular messages:
     - Update messages in format: "Update for <date>\\n#username\\n- task1\\n- task2"
     """
-    # Get the message (could be regular message or edited message)
     message = payload.message or payload.edited_message
+    is_edited = payload.edited_message is not None
 
     if not message or not message.text:
         return {"status": "ignored", "reason": "No text message"}
 
     text = message.text.strip()
-
     print("Keldi:", text)
 
-    # 1. Avval commandlar
+    # 1. Commands
     if text.startswith('/'):
         if text.startswith('/admin'):
             result = await handle_admin_command(message, session)
             return result if result else {"status": "ignored"}
-
         return {"status": "ignored", "reason": "Unknown command"}
 
-    # 2. Keyin oy tanlash
+    # 2. Month selection (admin keyboard)
     if await is_month_selection(text):
         return await handle_month_selection(text, message, session)
 
-        # 3. Endi oddiy update parse
-    parsed = parse_update_message(text)
+    # 3. '#' bo'lmagan xabarlarga javob bermaymiz
+    if '#' not in text:
+        return {"status": "ignored", "reason": "No hashtag in message"}
 
+    # 4. Parse update
+    parsed = parse_update_message(text)
     if not parsed:
+        await set_message_reaction_safe(
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            emoji="❌"
+        )
         await bot.send_message(
             chat_id=message.chat.id,
-            text="❌ Update parserdan o‘tmadi.\n\n"
-                 "To‘g‘ri format:\n"
-                 "#username\n"
-                 "- Kamida 2 ta task\n"
-                 "- Har biri kamida 3 so‘z"
+            text="❌ Update parserdan o'tmadi.\n\n"
+                 "Shu shablonda yuboring:\n"
+                 f"{get_update_template_text()}"
         )
         return {"status": "error", "reason": "parser_failed"}
-
-
-
 
     # Find user by telegram username
     user_id = await find_user_by_telegram_username(
         session,
         parsed['telegram_username']
     )
-
     if not user_id:
         return {
             "status": "ignored",
@@ -638,11 +655,18 @@ async def telegram_webhook(
 
     # Validate content
     is_valid = validate_update_content(parsed['update_content'])
-
     if not is_valid:
+        await set_message_reaction_safe(
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            emoji="❌"
+        )
         await bot.send_message(
             chat_id=message.chat.id,
-            text="❌ Update talabga mos emas.\nKamida 2 ta task va har biri 3 ta so‘z."
+            text="❌ Update parserdan o'tmadi.\n\n"
+                 "Talab: kamida 2 ta task, har biri kamida 3 ta so'z.\n\n"
+                 "Shu shablonda yuboring:\n"
+                 f"{get_update_template_text()}"
         )
         return {"status": "error", "reason": "validation_failed"}
 
@@ -659,7 +683,6 @@ async def telegram_webhook(
     existing_update = existing.fetchone()
 
     if existing_update:
-        # Update existing record
         await session.execute(
             sql_update(daily_update_log)
             .where(daily_update_log.c.id == existing_update.id)
@@ -671,7 +694,6 @@ async def telegram_webhook(
             )
         )
     else:
-        # Insert new record
         await session.execute(
             insert(daily_update_log).values(
                 user_id=user_id,
@@ -686,21 +708,21 @@ async def telegram_webhook(
         )
 
     await session.commit()
-    if existing_update:
-        await bot.send_message(
-            chat_id=message.chat.id,
-            text="♻️ Update yangilandi (eski update ustiga yozildi)."
-        )
-    else:
-        await bot.send_message(
-            chat_id=message.chat.id,
-            text="✅ Update qabul qilindi."
-        )
+
+    # Yangi update uchun ✅, edited update uchun ☑️
+    success_reaction = "☑️" if is_edited else "✅"
+    await set_message_reaction_safe(
+        chat_id=message.chat.id,
+        message_id=message.message_id,
+        emoji=success_reaction
+    )
+
     return {
         "status": "success",
         "user_id": user_id,
         "update_date": str(parsed['update_date']),
-        "is_valid": is_valid
+        "is_valid": is_valid,
+        "is_edited": is_edited
     }
 
 
@@ -1301,3 +1323,4 @@ async def get_company_stats(
         avg_percentage_this_month=round(avg_perc_month, 1),
         avg_percentage_last_3_months=round(avg_perc_3_months, 1)
     )
+
