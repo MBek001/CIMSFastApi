@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query,Form,UploadFile,File
-from sqlalchemy import select, insert, update, delete, func, desc, or_
+﻿from fastapi import APIRouter, Depends, HTTPException, status, Query,Form,UploadFile,File
+from sqlalchemy import select, insert, update, delete, func, desc, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime
+from datetime import datetime, timezone, date
 from typing import List, Optional
 from sqlalchemy.sql.expression import cast
 from sqlalchemy.sql.sqltypes import String
@@ -14,13 +14,15 @@ from models.user_models import user_page_permission, PageName
 from schemes.crm_schemes import (
 CustomerResponse,
     CustomerListResponse, CustomerStatsResponse, SuccessResponse,
-    CreateResponse, CustomerDeleteRequest,ConversationLanguageEnum
+    CreateResponse, CustomerDeleteRequest, ConversationLanguageEnum,
+    CustomerPeriodReportResponse, CRMPeriodStatusStats, CRMPeriodicStatusSummaryResponse
 )
-from datetime import datetime, timedelta
+from datetime import timedelta
 from sqlalchemy import func
 from fastapi.responses import StreamingResponse
 import requests
 from io import BytesIO
+from zoneinfo import ZoneInfo
 from  auth_utils.auth_func import get_current_user
 from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
@@ -28,6 +30,96 @@ from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_t
 from utils.ai_summary import generate_customer_ai_summary
 
 router = APIRouter(prefix="/crm", tags=['Sales CRM'])
+
+UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
+
+
+def _to_utc_naive_from_uz(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UZBEKISTAN_TZ)
+    else:
+        value = value.astimezone(UZBEKISTAN_TZ)
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _from_utc_naive_to_uz_iso(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.astimezone(UZBEKISTAN_TZ).isoformat()
+
+
+def _date_range_uz_to_utc_naive(start_date: date, end_date: date) -> tuple[datetime, datetime]:
+    start_uz = datetime(start_date.year, start_date.month, start_date.day, tzinfo=UZBEKISTAN_TZ)
+    end_next_uz = datetime(
+        end_date.year,
+        end_date.month,
+        end_date.day,
+        tzinfo=UZBEKISTAN_TZ
+    ) + timedelta(days=1)
+    return (
+        start_uz.astimezone(timezone.utc).replace(tzinfo=None),
+        end_next_uz.astimezone(timezone.utc).replace(tzinfo=None)
+    )
+
+
+def _build_status_percentages(status_stats: dict[str, int], total: int) -> dict[str, float]:
+    percentages: dict[str, float] = {}
+    if total > 0:
+        for key, count in status_stats.items():
+            percentages[key] = round((count / total) * 100, 1)
+    else:
+        for key in status_stats.keys():
+            percentages[key] = 0.0
+    return percentages
+
+
+async def _get_status_stats_for_date_range(
+    session: AsyncSession,
+    start_date: date,
+    end_date: date
+) -> CRMPeriodStatusStats:
+    start_utc_naive, end_utc_naive = _date_range_uz_to_utc_naive(start_date, end_date)
+
+    stats_result = await session.execute(
+        select(
+            func.count(customer.c.id).label("total_customers"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.need_to_call).label("need_to_call"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.contacted).label("contacted"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.project_started).label("project_started"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.continuing).label("continuing"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.finished).label("finished"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.rejected).label("rejected")
+        ).where(
+            and_(
+                customer.c.created_at >= start_utc_naive,
+                customer.c.created_at < end_utc_naive
+            )
+        )
+    )
+    row = stats_result.fetchone()
+
+    status_stats = {
+        "need_to_call": row.need_to_call,
+        "contacted": row.contacted,
+        "project_started": row.project_started,
+        "continuing": row.continuing,
+        "finished": row.finished,
+        "rejected": row.rejected
+    }
+    total = row.total_customers
+    percentages = _build_status_percentages(status_stats, total)
+
+    return CRMPeriodStatusStats(
+        total_customers=total,
+        status_stats=status_stats,
+        status_percentages=percentages
+    )
 
 
 
@@ -41,13 +133,13 @@ def require_crm_access(current_user=Depends(get_current_active_user)):
 
 
 
-@router.get("/customers/latest", response_model=List[CustomerResponse], summary="Eng so‘nggi mijozlarni olish")
+@router.get("/customers/latest", response_model=List[CustomerResponse], summary="Eng soРІР‚Вnggi mijozlarni olish")
 async def get_latest_customers(
     limit: int = Query(50, ge=1, le=500, description="Qaytariladigan mijozlar soni (default: 50)"),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_user),
 ):
-    """Eng so‘nggi qo‘shilgan mijozlarni (deshifrlanib) qaytaradi"""
+    """Eng soРІР‚Вnggi qoРІР‚Вshilgan mijozlarni (deshifrlanib) qaytaradi"""
     result = await session.execute(
         select(customer)
         .order_by(desc(customer.c.created_at))
@@ -62,22 +154,23 @@ async def get_latest_customers(
     for c in customers:
         audio_url = None
         if c.audio_file_id:
-            # 🔗 Har bir mijoz uchun audio yo‘lini generatsiya qilish
+            # СЂСџвЂќвЂ” Har bir mijoz uchun audio yoРІР‚Вlini generatsiya qilish
             audio_url = f"https://api.project.cims.cognilabs.org/crm/customers/audio/{c.audio_file_id}"
 
         response_list.append(CustomerResponse(
             id=c.id,
-            full_name=decrypt_text(c.full_name),        # 🟢 deshifrlanadi
+            full_name=decrypt_text(c.full_name),        # СЂСџСџСћ deshifrlanadi
             platform=c.platform,
             username=c.username,
-            phone_number=decrypt_text(c.phone_number),  # 🟢 deshifrlanadi
+            phone_number=decrypt_text(c.phone_number),  # СЂСџСџСћ deshifrlanadi
             status=c.status.value,
             assistant_name=c.assistant_name,
             notes=c.notes,
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
-            audio_url=audio_url,                        # 🟢 to‘g‘ri joyda
+            audio_url=audio_url,                        # СЂСџСџСћ toРІР‚ВgРІР‚Вri joyda
+            recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
             created_at=c.created_at.isoformat()
         ))
 
@@ -93,22 +186,22 @@ async def get_customer_detail(
 ):
     """
     Bitta mijozning batafsil ma'lumotlarini olish.
-    Agar mijoz topilmasa yoki boshqa metod chaqirilsa — hech qachon 405 chiqmaydi.
+    Agar mijoz topilmasa yoki boshqa metod chaqirilsa РІР‚вЂќ hech qachon 405 chiqmaydi.
     """
     try:
         result = await session.execute(select(customer).where(customer.c.id == customer_id))
         c = result.fetchone()
 
-        # 🧩 Agar mijoz topilmasa
+        # СЂСџВ§В© Agar mijoz topilmasa
         if not c:
             raise HTTPException(status_code=404, detail="Mijoz topilmadi")
 
-        # 🎧 Audio URL (agar mavjud bo‘lsa)
+        # СЂСџР‹В§ Audio URL (agar mavjud boРІР‚Вlsa)
         audio_url = None
         if c.audio_file_id:
             audio_url = f"https://api.project.cims.cognilabs.org/crm/customers/audio/{c.audio_file_id}"
 
-        # 🧠 Deshifrlangan ma’lumotlar
+        # СЂСџВ§В  Deshifrlangan maРІР‚в„ўlumotlar
         return CustomerResponse(
             id=c.id,
             full_name=decrypt_text(c.full_name),
@@ -122,26 +215,27 @@ async def get_customer_detail(
             audio_file_id=c.audio_file_id,
             audio_url=audio_url,
             conversation_language=c.conversation_language,
+            recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
             created_at=c.created_at.isoformat()
         )
 
     except HTTPException as e:
-        # Bu "mijoz topilmadi" yoki ruxsat yo‘q holatlari uchun
+        # Bu "mijoz topilmadi" yoki ruxsat yoРІР‚Вq holatlari uchun
         raise e
     except Exception as e:
-        # ❗ Har qanday kutilmagan xatoliklar uchun
+        # РІСњвЂ” Har qanday kutilmagan xatoliklar uchun
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Server xatosi: {str(e)}"
         )
 
-@router.get("/customers/bazakorinish", response_model=List[CustomerResponse], summary="Eng so‘nggi mijozlarni olish")
+@router.get("/customers/bazakorinish", response_model=List[CustomerResponse], summary="Eng soРІР‚Вnggi mijozlarni olish")
 async def get_latest_customers(
     limit: int = Query(50, ge=1, le=500, description="Qaytariladigan mijozlar soni (default: 50)"),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_user),
 ):
-    """Eng so‘nggi qo‘shilgan mijozlarni (deshifrlanib) qaytaradi"""
+    """Eng soРІР‚Вnggi qoРІР‚Вshilgan mijozlarni (deshifrlanib) qaytaradi"""
     result = await session.execute(
         select(customer)
         .order_by(desc(customer.c.created_at))
@@ -154,16 +248,17 @@ async def get_latest_customers(
     return [
         CustomerResponse(
             id=c.id,
-            full_name=c.full_name,        # 🟢 deshifrlanadi
+            full_name=c.full_name,        # СЂСџСџСћ deshifrlanadi
             platform=c.platform,
             username=c.username,
-            phone_number=c.phone_number,  # 🟢 deshifrlanadi
+            phone_number=c.phone_number,  # СЂСџСџСћ deshifrlanadi
             status=c.status.value,
             assistant_name=c.assistant_name,
             notes=c.notes,
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
+            recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
             created_at=c.created_at.isoformat()
         )
         for c in customers
@@ -197,17 +292,21 @@ async def crm_dashboard(
             detail="CRM sahifasiga kirish huquqingiz yo'q"
         )
 
-    # 🔹 Database-dan barcha customerlarni olish (encrypt holda)
+    # СЂСџвЂќв„– Database-dan barcha customerlarni olish (encrypt holda)
     base_query = select(customer).order_by(desc(customer.c.created_at))
     
+    # Default holatda rejected customerlar chiqmasin.
+    # Faqat status_filter orqali rejected tanlanganda ko'rsatiladi.
+    if not status_filter:
+        base_query = base_query.where(customer.c.status != CustomerStatus.rejected)
     # Agar faqat status filter bo'lsa, uni database-da qo'llaymiz (optimizatsiya)
-    if status_filter and not show_all and not (search and search.strip()):
+    elif not show_all and not (search and search.strip()):
         base_query = base_query.where(customer.c.status == status_filter)
     
     customers_result = await session.execute(base_query)
     customers_data = customers_result.fetchall()
 
-    # 🔓 Deshifrlab va filter qilish (Python-da)
+    # СЂСџвЂќвЂњ Deshifrlab va filter qilish (Python-da)
     filtered_customers = []
     search_term = search.strip().lower() if search and search.strip() else None
 
@@ -216,7 +315,7 @@ async def crm_dashboard(
         decrypted_name = decrypt_text(c.full_name)
         decrypted_phone = decrypt_text(c.phone_number)
         
-        # 🔍 Qidiruv logikasi (deshifrlangan ma'lumotlar bo'yicha)
+        # СЂСџвЂќРЊ Qidiruv logikasi (deshifrlangan ma'lumotlar bo'yicha)
         if search_term:
             # Barcha maydonlarni tekshirish
             if not any([
@@ -229,10 +328,13 @@ async def crm_dashboard(
             ]):
                 continue  # Bu customer mos kelmasa, keyingisiga o'tamiz
         
+        # Default holatda rejected customerlarni chiqarib yubormaymiz
+        if not status_filter and c.status == CustomerStatus.rejected:
+            continue
+
         # Status filter (agar qidiruv bilan birga bo'lsa)
-        if status_filter and not show_all and search_term:
-            if c.status != status_filter:
-                continue
+        if status_filter and not show_all and search_term and c.status != status_filter:
+            continue
         
         # Audio URL yaratish
         audio_url = None
@@ -253,10 +355,11 @@ async def crm_dashboard(
             "audio_file_id": c.audio_file_id,
             "audio_url": audio_url,
             "conversation_language": c.conversation_language,
+            "recall_time": _from_utc_naive_to_uz_iso(c.recall_time),
             "created_at": c.created_at.isoformat()
         })
 
-    # 🔹 Statistikalarni hisoblash (o'zgarmaydi)
+    # СЂСџвЂќв„– Statistikalarni hisoblash (o'zgarmaydi)
     status_stats_result = await session.execute(
         select(
             func.count(customer.c.id).label('total_customers'),
@@ -325,7 +428,7 @@ async def crm_dashboard(
     period_stats = period_stats_result.fetchone()
 
     return CustomerListResponse(
-        customers=filtered_customers,  # 🟢 Deshifrlangan va filterlangan ro'yxat
+        customers=filtered_customers,  # СЂСџСџСћ Deshifrlangan va filterlangan ro'yxat
         status_stats={
             "total_customers": stats.total_customers,
             "need_to_call": stats.need_to_call,
@@ -351,24 +454,24 @@ async def crm_dashboard(
     )
 
 
-@router.get("/stats/period", summary="CRM davr bo‘yicha mijozlar statistikasi")
+@router.get("/stats/period", summary="CRM davr boРІР‚Вyicha mijozlar statistikasi")
 async def get_periodic_customer_stats(
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
 
 
-    # 🧩 Foydalanuvchi huquqini tekshirish
+    # СЂСџВ§В© Foydalanuvchi huquqini tekshirish
     permissions_result = await session.execute(
         select(func.count()).select_from(customer)
     )
     if not permissions_result:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="CRM sahifasiga kirish huquqingiz yo‘q"
+            detail="CRM sahifasiga kirish huquqingiz yoРІР‚Вq"
         )
 
-    # 🕒 Sana oraliqlarini aniqlash
+    # СЂСџвЂўвЂ™ Sana oraliqlarini aniqlash
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day)
     week_start = now - timedelta(days=now.weekday())
@@ -377,7 +480,7 @@ async def get_periodic_customer_stats(
     six_months_ago = now - timedelta(days=180)
     one_year_ago = now - timedelta(days=365)
 
-    # 🧮 Hisoblash
+    # СЂСџВ§В® Hisoblash
     query = select(
         func.count(customer.c.id).filter(customer.c.created_at >= today_start).label("today"),
         func.count(customer.c.id).filter(customer.c.created_at >= week_start).label("this_week"),
@@ -390,7 +493,7 @@ async def get_periodic_customer_stats(
     result = await session.execute(query)
     stats = result.fetchone()
 
-    # 🔙 Javob
+    # СЂСџвЂќв„ў Javob
     return {
         "period_stats": {
             "today": stats.today,
@@ -417,6 +520,11 @@ async def create_customer(
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
+        recall_time: Optional[datetime] = Form(
+            None,
+            description="Recall vaqti (Asia/Tashkent), masalan: 2026-03-03T09:53:00+05:00",
+            example="2026-03-03T09:53:00+05:00"
+        ),
         customer_type: Optional[str] = Form(None),  # NEW: Customer type (local/international)
         conversation_language: Optional[ConversationLanguageEnum] = Form(ConversationLanguageEnum.UZ),
         audio: Optional[UploadFile] = File(None),
@@ -509,6 +617,7 @@ async def create_customer(
         "notes": notes,
         "aisummary": ai_summary,
         "audio_file_id": audio_file_id,
+        "recall_time": _to_utc_naive_from_uz(recall_time),
         "conversation_language": conversation_language.value.upper(),
         "created_at": datetime.now()
     }
@@ -541,6 +650,12 @@ async def update_customer(
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
+        recall_time: Optional[datetime] = Form(
+            None,
+            description="Recall vaqti (Asia/Tashkent), masalan: 2026-03-03T09:53:00+05:00",
+            example="2026-03-03T09:53:00+05:00"
+        ),
+        clear_recall_time: bool = Form(False),
         conversation_language: Optional[ConversationLanguageEnum] = Form(None),
         audio: Optional[UploadFile] = File(None),
         session: AsyncSession = Depends(get_async_session),
@@ -593,6 +708,10 @@ async def update_customer(
     if notes is not None:
         update_data["notes"] = notes
         update_data["aisummary"] = await generate_customer_ai_summary(notes)
+    if clear_recall_time:
+        update_data["recall_time"] = None
+    elif recall_time is not None:
+        update_data["recall_time"] = _to_utc_naive_from_uz(recall_time)
     if conversation_language is not None:
         update_data["conversation_language"] = conversation_language.value.upper()
 
@@ -634,6 +753,12 @@ async def patch_customer(
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
+        recall_time: Optional[datetime] = Form(
+            None,
+            description="Recall vaqti (Asia/Tashkent), masalan: 2026-03-03T09:53:00+05:00",
+            example="2026-03-03T09:53:00+05:00"
+        ),
+        clear_recall_time: bool = Form(False),
         conversation_language: Optional[ConversationLanguageEnum] = Form(None),
         audio: Optional[UploadFile] = File(None),
         session: AsyncSession = Depends(get_async_session),
@@ -676,6 +801,10 @@ async def patch_customer(
     if notes is not None:
         update_data["notes"] = notes
         update_data["aisummary"] = await generate_customer_ai_summary(notes)
+    if clear_recall_time:
+        update_data["recall_time"] = None
+    elif recall_time is not None:
+        update_data["recall_time"] = _to_utc_naive_from_uz(recall_time)
     if conversation_language:
         update_data["conversation_language"] = conversation_language.value.upper()
 
@@ -751,14 +880,14 @@ from utils.telegram_helper import  bot
 @router.get("/customers/audio/{file_id}", summary="Audio faylni yuklab olish")
 async def get_customer_audio(file_id: str):
     """
-    Telegramdagi audio faylni yuklab olish va brauzerda o‘ynatish uchun yuborish
+    Telegramdagi audio faylni yuklab olish va brauzerda oРІР‚Вynatish uchun yuborish
     """
     try:
         # Fayl haqida ma'lumot olish
         file = await bot.get_file(file_id)
         file_stream = BytesIO()
 
-        # Faylni yuklab olish (Telegram serveridan to‘g‘ridan-to‘g‘ri oqim bilan)
+        # Faylni yuklab olish (Telegram serveridan toРІР‚ВgРІР‚Вridan-toРІР‚ВgРІР‚Вri oqim bilan)
         await file.download_to_memory(out=file_stream)
         file_stream.seek(0)
 
@@ -910,6 +1039,7 @@ async def create_customer_api(
         "assistant_name": customer_data.assistant_name,
         "notes": customer_data.notes,
         "aisummary": ai_summary,
+        "recall_time": _to_utc_naive_from_uz(customer_data.recall_time),
         "created_at": datetime.now()
     }
 
@@ -925,12 +1055,12 @@ from auth_utils.auth_func import  get_current_user
 
 
 
-# 1️⃣ STATUS BO'YICHA FILTER (Dynamic - customer_status jadvalidan)
+# 1РїС‘РЏРІС“Р€ STATUS BO'YICHA FILTER (Dynamic - customer_status jadvalidan)
 @router.get("/customers/filter/status", response_model=List[CustomerResponse], summary="Status bo'yicha mijozlarni filterlash")
 async def filter_customers_by_status(
         status_filter: str = Query(..., description="Mijoz statusi bo'yicha filter (dynamic status name)"),
         session: AsyncSession = Depends(get_async_session),
-        current_user=Depends(get_current_user),  # 🔹 faqat token validatsiya
+        current_user=Depends(get_current_user),  # СЂСџвЂќв„– faqat token validatsiya
 ):
     """
     Mijozlarni status bo'yicha filterlaydi (dynamic status)
@@ -961,6 +1091,7 @@ async def filter_customers_by_status(
                 aisummary=c.aisummary,
                 audio_file_id=c.audio_file_id,
                 conversation_language=c.conversation_language,
+                recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
                 created_at=c.created_at.isoformat()
             )
             for c in customers
@@ -970,14 +1101,14 @@ async def filter_customers_by_status(
 
 
 
-# 2️⃣ PLATFORM BO‘YICHA FILTER
-@router.get("/customers/filter/platform", response_model=List[CustomerResponse], summary="Platform bo‘yicha mijozlarni filterlash")
+# 2РїС‘РЏРІС“Р€ PLATFORM BOРІР‚ВYICHA FILTER
+@router.get("/customers/filter/platform", response_model=List[CustomerResponse], summary="Platform boРІР‚Вyicha mijozlarni filterlash")
 async def filter_customers_by_platform(
         platform: str = Query(..., description="Platforma nomi (masalan: Telegram yoki Instagram)"),
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(get_current_user),
 ):
-    """Mijozlarni platform bo‘yicha filterlaydi"""
+    """Mijozlarni platform boРІР‚Вyicha filterlaydi"""
 
     # Platforma nomi bo'yicha filterlash
     result = await session.execute(
@@ -989,7 +1120,7 @@ async def filter_customers_by_platform(
 
     # Mijozlar bo'lmasa 404 xatolikni yuborish
     if not customers:
-        raise HTTPException(status_code=404, detail="Berilgan platforma bo‘yicha mijoz topilmadi")
+        raise HTTPException(status_code=404, detail="Berilgan platforma boРІР‚Вyicha mijoz topilmadi")
 
     return [
         CustomerResponse(
@@ -1004,19 +1135,189 @@ async def filter_customers_by_platform(
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
+            recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
             created_at=c.created_at.isoformat()
         )
         for c in customers
     ]
 
 
-from sqlalchemy import and_
+@router.get(
+    "/customers/stats/summary",
+    response_model=CRMPeriodicStatusSummaryResponse,
+    summary="Bugun/3 kun/1 hafta/1 oy/3 oy bo'yicha status statistikasi"
+)
+async def customers_periodic_status_summary(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access)
+):
+    permissions_result = await session.execute(
+        select(user_page_permission.c.page_name).where(
+            and_(
+                user_page_permission.c.user_id == current_user.id,
+                user_page_permission.c.page_name == PageName.crm
+            )
+        )
+    )
+    if not permissions_result.fetchone() and current_user.company_code != "ceo":
+        raise HTTPException(status_code=403, detail="CRM sahifasiga kirish huquqingiz yo'q")
 
-# 3️⃣ SANA BO‘YICHA FILTER
+    today_uz = datetime.now(UZBEKISTAN_TZ).date()
+
+    today_stats = await _get_status_stats_for_date_range(session, today_uz, today_uz)
+    last_3_days_stats = await _get_status_stats_for_date_range(session, today_uz - timedelta(days=2), today_uz)
+    last_7_days_stats = await _get_status_stats_for_date_range(session, today_uz - timedelta(days=6), today_uz)
+    last_30_days_stats = await _get_status_stats_for_date_range(session, today_uz - timedelta(days=29), today_uz)
+    last_90_days_stats = await _get_status_stats_for_date_range(session, today_uz - timedelta(days=89), today_uz)
+
+    return CRMPeriodicStatusSummaryResponse(
+        generated_at=datetime.now(UZBEKISTAN_TZ).isoformat(),
+        today=today_stats,
+        last_3_days=last_3_days_stats,
+        last_7_days=last_7_days_stats,
+        last_30_days=last_30_days_stats,
+        last_90_days=last_90_days_stats
+    )
+
+
+@router.get(
+    "/customers/report/period",
+    response_model=CustomerPeriodReportResponse,
+    summary="Davr bo'yicha customerlar ro'yxati va status statistikasi"
+)
+async def customers_period_report(
+    period: str = Query(
+        "7d",
+        description="Davr: 3d, 7d, 15d, 30d. Agar from_date/to_date berilsa custom ishlaydi"
+    ),
+    search: Optional[str] = Query(None, description="Qidiruv so'zi"),
+    status_filter: Optional[CustomerStatus] = Query(None, description="Status bo'yicha filter"),
+    from_date: Optional[date] = Query(None, description="Boshlanish sana (YYYY-MM-DD)"),
+    to_date: Optional[date] = Query(None, description="Tugash sana (YYYY-MM-DD)"),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access)
+):
+    permissions_result = await session.execute(
+        select(user_page_permission.c.page_name).where(
+            and_(
+                user_page_permission.c.user_id == current_user.id,
+                user_page_permission.c.page_name == PageName.crm
+            )
+        )
+    )
+    if not permissions_result.fetchone() and current_user.company_code != "ceo":
+        raise HTTPException(status_code=403, detail="CRM sahifasiga kirish huquqingiz yo'q")
+
+    has_from = from_date is not None
+    has_to = to_date is not None
+
+    if has_from != has_to:
+        raise HTTPException(
+            status_code=400,
+            detail="from_date va to_date ikkalasi birga yuborilishi kerak"
+        )
+
+    periods = {
+        "3d": 3,
+        "7d": 7,
+        "15d": 15,
+        "30d": 30
+    }
+
+    selected_period = period
+    if has_from and has_to:
+        if from_date > to_date:
+            raise HTTPException(status_code=400, detail="from_date to_date dan katta bo'lishi mumkin emas")
+        selected_period = "custom"
+    else:
+        if period not in periods:
+            raise HTTPException(
+                status_code=400,
+                detail="period faqat quyidagilardan biri bo'lishi kerak: 3d, 7d, 15d, 30d"
+            )
+        today_uz = datetime.now(UZBEKISTAN_TZ).date()
+        to_date = today_uz
+        from_date = today_uz - timedelta(days=periods[period] - 1)
+
+    start_utc_naive, end_utc_naive = _date_range_uz_to_utc_naive(from_date, to_date)
+
+    base_query = select(customer).where(
+        and_(
+            customer.c.created_at >= start_utc_naive,
+            customer.c.created_at < end_utc_naive
+        )
+    )
+    if status_filter:
+        base_query = base_query.where(customer.c.status == status_filter)
+
+    result = await session.execute(base_query.order_by(desc(customer.c.created_at)))
+    customers = result.fetchall()
+
+    customer_items = []
+    status_dict: dict[str, int] = {}
+    search_term = search.strip().lower() if search and search.strip() else None
+
+    for c in customers:
+        decrypted_name = decrypt_text(c.full_name)
+        decrypted_phone = decrypt_text(c.phone_number)
+        status_key = c.status.value if hasattr(c.status, "value") else str(c.status)
+
+        if search_term:
+            if not any([
+                search_term in decrypted_name.lower(),
+                search_term in decrypted_phone,
+                search_term in (c.platform or "").lower(),
+                search_term in (c.username or "").lower(),
+                search_term in (c.assistant_name or "").lower(),
+                search_term in status_key.lower()
+            ]):
+                continue
+
+        status_dict[status_key] = status_dict.get(status_key, 0) + 1
+
+        customer_items.append(
+            CustomerResponse(
+                id=c.id,
+                full_name=decrypted_name,
+                platform=c.platform,
+                username=c.username,
+                phone_number=decrypted_phone,
+                status=status_key,
+                assistant_name=c.assistant_name,
+                notes=c.notes,
+                aisummary=c.aisummary,
+                audio_file_id=c.audio_file_id,
+                conversation_language=c.conversation_language,
+                recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
+                created_at=c.created_at.isoformat()
+            )
+        )
+
+    status_stats = {s.value: status_dict.get(s.value, 0) for s in CustomerStatus}
+
+    total = len(customer_items)
+    status_percentages: dict[str, float] = {}
+    if total > 0:
+        for key, count in status_dict.items():
+            status_percentages[key] = round((count / total) * 100, 1)
+
+    return CustomerPeriodReportResponse(
+        period=selected_period,
+        from_date=from_date.isoformat(),
+        to_date=to_date.isoformat(),
+        total_customers=total,
+        customers=customer_items,
+        status_stats=status_stats,
+        status_dict=status_dict,
+        status_percentages=status_percentages
+    )
+
+
+# 3РїС‘РЏРІС“Р€ SANA BOРІР‚ВYICHA FILTER
 @router.get(
     "/customers/filter/date",
     response_model=List[CustomerResponse],
-    summary="Sana oralig‘iga ko‘ra mijozlarni filterlash"
+    summary="Sana oraligРІР‚Вiga koРІР‚Вra mijozlarni filterlash"
 )
 async def filter_customers_by_date(
     start_date: datetime = Query(..., description="Boshlanish sanasi (YYYY-MM-DD)"),
@@ -1025,11 +1326,11 @@ async def filter_customers_by_date(
     current_user=Depends(get_current_user),
 ):
     """
-    Sana oralig‘iga yoki bitta sanaga ko‘ra mijozlarni filterlaydi.
-    Agar faqat `start_date` berilsa — o‘sha kunlik yozuvlar chiqadi.
+    Sana oraligРІР‚Вiga yoki bitta sanaga koРІР‚Вra mijozlarni filterlaydi.
+    Agar faqat `start_date` berilsa РІР‚вЂќ oРІР‚Вsha kunlik yozuvlar chiqadi.
     """
   
-    # Agar end_date berilmasa, start_date ni o‘sha kun deb olamiz
+    # Agar end_date berilmasa, start_date ni oРІР‚Вsha kun deb olamiz
     if not end_date:
         end_date = start_date  # end_date bo'sh bo'lsa, uni start_date ga tenglashtiramiz
 
@@ -1046,7 +1347,7 @@ async def filter_customers_by_date(
 
     # Mijozlar topilmasa 404 xatolik yuborish
     if not customers:
-        raise HTTPException(status_code=404, detail="Berilgan sana oralig‘ida mijoz topilmadi")
+        raise HTTPException(status_code=404, detail="Berilgan sana oraligРІР‚Вida mijoz topilmadi")
 
     return [
         CustomerResponse(
@@ -1061,8 +1362,10 @@ async def filter_customers_by_date(
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
+            recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
             created_at=c.created_at.isoformat()
         )
         for c in customers
     ]
+
 

@@ -42,6 +42,7 @@ PASSWORD_RESET_EXPIRE_MINUTES = 30
 # Telegram Bot Tokens - 2 ta alohida bot
 TELEGRAM_AUDIO_BOT_TOKEN = os.environ.get('TELEGRAM_AUDIO_BOT_TOKEN')  # Audio bot tokeni
 TELEGRAM_UPDATE_BOT_TOKEN = os.environ.get('TELEGRAM_UPDATE_BOT_TOKEN')  # Update bot tokeni
+TELEGRAM_RECALL_BOT_TOKEN = os.environ.get('TELEGRAM_RECALL_BOT_TOKEN')  # Recall reminder bot tokeni
 
 # Telegram Chat IDs - har bir bot uchun alohida guruh
 TELEGRAM_AUDIO_CHAT_ID = os.environ.get('TELEGRAM_AUDIO_CHAT_ID')  # Audio yuborilayotgan guruh ID
@@ -54,6 +55,11 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # Webhook URL
 
 # Update Bot Admin - Statistika uchun parol
 UPDATE_ADMIN_PASSWORD = os.environ.get('UPDATE_ADMIN_PASSWORD', 'admin123')  # Default parol
+RECALL_BOT_ADMIN_PASSWORD = os.environ.get('RECALL_BOT_ADMIN_PASSWORD', 'recall123')  # Recall bot admin paroli
+RECALL_DAILY_STATS_HOUR = int(os.environ.get('RECALL_DAILY_STATS_HOUR', 22))  # Daily CRM stats send hour (UZ)
+RECALL_DAILY_STATS_WINDOW_MINUTES = int(
+    os.environ.get('RECALL_DAILY_STATS_WINDOW_MINUTES', 5)
+)  # 22:00-22:04 oralig'ida yuborish oynasi
 
 
 FREECURRENCYAPI_KEY = os.environ.get('FREECURRENCYAPI_KEY')

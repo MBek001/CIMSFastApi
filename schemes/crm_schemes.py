@@ -31,6 +31,11 @@ class CustomerCreateRequest(BaseModel):
     status: CustomerStatus = Field(..., description="Mijoz holati")
     assistant_name: Optional[str] = Field(None, max_length=255, description="Yordamchi ismi")
     notes: Optional[str] = Field(None, description="Qo'shimcha eslatmalar")
+    recall_time: Optional[datetime] = Field(
+        None,
+        description="Qayta bog'lanish vaqti (Asia/Tashkent, UTC+5)",
+        examples=["2026-03-03T09:53:00+05:00"]
+    )
     conversation_language: Optional[ConversationLanguageEnum] = Field(
         default=ConversationLanguageEnum.UZ,
         description="Suhbat tili"
@@ -63,6 +68,11 @@ class CustomerUpdateRequest(BaseModel):
     status: Optional[CustomerStatus] = Field(None, description="Mijoz holati")
     assistant_name: Optional[str] = Field(None, max_length=255, description="Yordamchi ismi")
     notes: Optional[str] = Field(None, description="Qo'shimcha eslatmalar")
+    recall_time: Optional[datetime] = Field(
+        None,
+        description="Qayta bog'lanish vaqti (Asia/Tashkent, UTC+5)",
+        examples=["2026-03-03T09:53:00+05:00"]
+    )
     conversation_language: Optional[ConversationLanguageEnum] = Field(None, description="Suhbat tili")
 
     @validator('phone_number', 'full_name', 'platform', 'username', 'assistant_name')
@@ -89,6 +99,7 @@ class CustomerResponse(BaseModel):
     aisummary: Optional[str] = None
     audio_file_id: Optional[str]
     audio_url: Optional[str] = None  # ✅ Yangi maydon qo‘shildi
+    recall_time: Optional[str] = None
     conversation_language: Optional[str]
     created_at: str
 
@@ -126,6 +137,32 @@ class CustomerListResponse(BaseModel):
     )
 
 
+class CustomerPeriodReportResponse(BaseModel):
+    period: str = Field(..., description="Tanlangan davr: 3d, 7d, 15d, 30d yoki custom")
+    from_date: str = Field(..., description="Boshlanish sana (YYYY-MM-DD)")
+    to_date: str = Field(..., description="Tugash sana (YYYY-MM-DD)")
+    total_customers: int = Field(..., description="Tanlangan davrdagi jami customerlar")
+    customers: List[CustomerResponse] = Field(..., description="Customerlar ro'yxati")
+    status_stats: Dict[str, int] = Field(..., description="Statuslar bo'yicha sonlar")
+    status_dict: Dict[str, int] = Field(..., description="Mavjud statuslarning sonlari")
+    status_percentages: Dict[str, float] = Field(..., description="Statuslar bo'yicha foizlar")
+
+
+class CRMPeriodStatusStats(BaseModel):
+    total_customers: int = Field(..., description="Davr bo'yicha jami customerlar")
+    status_stats: Dict[str, int] = Field(..., description="Statuslar bo'yicha sonlar")
+    status_percentages: Dict[str, float] = Field(..., description="Statuslar bo'yicha foizlar")
+
+
+class CRMPeriodicStatusSummaryResponse(BaseModel):
+    generated_at: str = Field(..., description="Statistika generatsiya qilingan vaqt (ISO)")
+    today: CRMPeriodStatusStats
+    last_3_days: CRMPeriodStatusStats
+    last_7_days: CRMPeriodStatusStats
+    last_30_days: CRMPeriodStatusStats
+    last_90_days: CRMPeriodStatusStats
+
+
 # --- SEARCH AND FILTER MODELS ---
 class CustomerSearchRequest(BaseModel):
     search: Optional[str] = Field(None, description="Qidiruv so'zi")
@@ -143,6 +180,11 @@ class CustomerAPICreateRequest(BaseModel):
     status: CustomerStatus = Field(default=CustomerStatus.need_to_call)
     assistant_name: Optional[str] = Field(None, max_length=255)
     notes: Optional[str] = Field(None)
+    recall_time: Optional[datetime] = Field(
+        None,
+        description="Qayta bog'lanish vaqti (Asia/Tashkent, UTC+5)",
+        examples=["2026-03-03T09:53:00+05:00"]
+    )
     conversation_language: Optional[ConversationLanguageEnum] = Field(
         default=ConversationLanguageEnum.UZ,
         description="Suhbat tili"
@@ -194,6 +236,7 @@ class CustomerAPIResponse(BaseModel):
     notes: Optional[str]
     aisummary: Optional[str] = None
     audio_file_id: Optional[str]
+    recall_time: Optional[str] = None
     conversation_language: Optional[str]
     created_at: str
     message: str = "Mijoz muvaffaqiyatli yaratildi"

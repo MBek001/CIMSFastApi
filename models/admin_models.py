@@ -94,6 +94,7 @@ customer = Table(
     Column("aisummary", Text, nullable=True),
     Column("audio_file_id", String(500), nullable=True),  # Telegram file ID
     Column("audio_url", String(1000), nullable=True),     # (agar kerak bo'lsa)
+    Column("recall_time", DateTime, nullable=True),       # Follow-up eslatma vaqti
     Column("conversation_language", Enum(ConversationLanguage), nullable=True, default=ConversationLanguage.UZ),
     Column("created_at", DateTime, nullable=False)
 )
@@ -250,4 +251,67 @@ missed_update_notification = Table(
     Column("notified_at", DateTime, default=datetime.utcnow),
     Column("notification_sent", Boolean, default=False),
     UniqueConstraint("user_id", "missed_date", name="uq_user_missed_date")
+)
+
+# 16. Recall bot admin chats
+recall_bot_admin = Table(
+    "recall_bot_admin",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("chat_id", String(64), nullable=False, unique=True),
+    Column("telegram_username", String(100), nullable=True),
+    Column("full_name", String(255), nullable=True),
+    Column("is_active", Boolean, default=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 17. Recall bot recipients (notification subscribers)
+recall_bot_recipient = Table(
+    "recall_bot_recipient",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("chat_id", String(64), nullable=False, unique=True),
+    Column("telegram_username", String(100), nullable=True),
+    Column("full_name", String(255), nullable=True),
+    Column("added_by_chat_id", String(64), nullable=True),
+    Column("is_active", Boolean, default=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 18. Recall notifications log (dedupe + delivery status)
+recall_notification_log = Table(
+    "recall_notification_log",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("customer_id", Integer, ForeignKey("customer.id", ondelete="CASCADE"), nullable=False),
+    Column("recipient_chat_id", String(64), nullable=False),
+    Column("reminder_minutes", Integer, nullable=False),  # 30, 15, 1
+    Column("scheduled_for", DateTime, nullable=False),    # customer.recall_time snapshot
+    Column("notification_sent", Boolean, default=False),
+    Column("error_message", String(500), nullable=True),
+    Column("sent_at", DateTime, nullable=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    UniqueConstraint(
+        "customer_id",
+        "recipient_chat_id",
+        "reminder_minutes",
+        "scheduled_for",
+        name="uq_recall_notification_once"
+    )
+)
+
+# 19. CRM daily stats delivery log (for 22:00 digest dedupe)
+crm_daily_stats_delivery_log = Table(
+    "crm_daily_stats_delivery_log",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("report_date", Date, nullable=False),
+    Column("recipient_chat_id", String(64), nullable=False),
+    Column("notification_sent", Boolean, default=False),
+    Column("error_message", String(500), nullable=True),
+    Column("sent_at", DateTime, nullable=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    UniqueConstraint("report_date", "recipient_chat_id", name="uq_crm_daily_stats_delivery")
 )

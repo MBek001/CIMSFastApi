@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Table,UniqueConstraint,
-    Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, ForeignKey, MetaData
+    Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, ForeignKey, MetaData, Index
 )
 import enum
 
@@ -82,6 +82,22 @@ monthly_update = Table(
     Column("next_payment_date", Date, nullable=True),
     Column('note', String(500),nullable=True)
 )
+
+# -- MonthlyPenalty table --
+monthly_penalty = Table(
+    "monthly_penalty",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("year", Integer, nullable=False),
+    Column("month", Integer, nullable=False),                      # 1..12
+    Column("penalty_points", DECIMAL(6, 2), nullable=False),      # 0..100+
+    Column("reason", String(500), nullable=True),
+    Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", DateTime, nullable=False)
+)
+
+Index("idx_monthly_penalty_user_year_month", monthly_penalty.c.user_id, monthly_penalty.c.year, monthly_penalty.c.month)
 
 # -- Message table --
 message = Table(

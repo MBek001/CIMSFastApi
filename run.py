@@ -17,6 +17,7 @@ from routers.updates import router as updates_router
 from routers.update_tracking import router as update_tracking_router
 from routers.management import router as management_router
 from routers.instagram import router as instagram_router
+from routers.recall_bot import router as recall_bot_router
 
 from fastapi.responses import JSONResponse
 
@@ -63,6 +64,7 @@ app.include_router(updates_router)
 app.include_router(update_tracking_router)
 app.include_router(management_router)
 app.include_router(instagram_router)
+app.include_router(recall_bot_router)
 
 
 # --------------------------------------------------
