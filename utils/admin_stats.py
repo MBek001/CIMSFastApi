@@ -15,6 +15,27 @@ import io
 from models.admin_models import daily_update_log
 from models.user_models import user
 
+EXCLUDED_ADMIN_STATS_NAMES = {
+    "muhammad ali",
+    "saidbek",
+    "mirzabek",
+}
+
+
+def _normalize_name(value: Optional[str]) -> str:
+    """Normalize name for case-insensitive matching."""
+    return " ".join((value or "").strip().lower().split())
+
+
+def _is_excluded_from_admin_stats(name: Optional[str], surname: Optional[str]) -> bool:
+    """Check whether employee should be hidden from admin stats reports."""
+    normalized_name = _normalize_name(name)
+    normalized_full_name = _normalize_name(f"{name or ''} {surname or ''}")
+    return (
+        normalized_name in EXCLUDED_ADMIN_STATS_NAMES
+        or normalized_full_name in EXCLUDED_ADMIN_STATS_NAMES
+    )
+
 
 def get_working_days_in_month(year: int, month: int) -> tuple[int, List[date]]:
     """
@@ -80,7 +101,10 @@ async def generate_admin_statistics(
         .where(user.c.is_active == True)
         .order_by(user.c.name)
     )
-    users = result.fetchall()
+    users = [
+        u for u in result.fetchall()
+        if not _is_excluded_from_admin_stats(u.name, u.surname)
+    ]
 
     if not users:
         return ("❌ Faol foydalanuvchilar topilmadi.", None)
