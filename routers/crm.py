@@ -9,7 +9,7 @@ from utils.crypto import decrypt_text
 from fastapi.responses import RedirectResponse
 from telegram.error import TelegramError
 # Import qilinadigan modellar
-from models.admin_models import customer, CustomerStatus, CustomerType
+from models.admin_models import customer, CustomerStatus, CustomerType, customer_status_change_log
 from models.user_models import user_page_permission, PageName
 from schemes.crm_schemes import (
 CustomerResponse,
@@ -77,6 +77,47 @@ def _build_status_percentages(status_stats: dict[str, int], total: int) -> dict[
         for key in status_stats.keys():
             percentages[key] = 0.0
     return percentages
+
+
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _normalize_customer_status(value) -> Optional[CustomerStatus]:
+    if value is None:
+        return None
+    if isinstance(value, CustomerStatus):
+        return value
+    try:
+        return CustomerStatus(value)
+    except Exception:
+        return None
+
+
+async def _log_customer_status_change(
+    session: AsyncSession,
+    customer_id: int,
+    from_status,
+    to_status
+) -> None:
+    normalized_from = _normalize_customer_status(from_status)
+    normalized_to = _normalize_customer_status(to_status)
+    if normalized_to is None:
+        return
+    if normalized_from == normalized_to:
+        return
+    try:
+        await session.execute(
+            insert(customer_status_change_log).values(
+                customer_id=customer_id,
+                from_status=normalized_from,
+                to_status=normalized_to,
+                changed_at=_utc_now_naive()
+            )
+        )
+    except Exception:
+        # If migration is not applied yet, do not block CRM updates.
+        pass
 
 
 async def _get_status_stats_for_date_range(
@@ -689,6 +730,7 @@ async def update_customer(
             status_code=404,
             detail="Mijoz topilmadi"
         )
+    previous_status = existing_customer.status
 
     # --- 3. Yangilanadigan ma'lumotlarni tayyorlash ---
     update_data = {}
@@ -738,6 +780,13 @@ async def update_customer(
     await session.execute(
         update(customer).where(customer.c.id == customer_id).values(**update_data)
     )
+    if customer_status is not None:
+        await _log_customer_status_change(
+            session=session,
+            customer_id=customer_id,
+            from_status=previous_status,
+            to_status=customer_status
+        )
     await session.commit()
 
     return SuccessResponse(message="Mijoz ma'lumotlari muvaffaqiyatli yangilandi")
@@ -783,6 +832,7 @@ async def patch_customer(
     existing = result.fetchone()
     if not existing:
         raise HTTPException(status_code=404, detail="Mijoz topilmadi")
+    previous_status = existing.status
 
     update_data = {}
 
@@ -825,6 +875,13 @@ async def patch_customer(
         raise HTTPException(status_code=400, detail="Hech qanday maydon yuborilmadi")
 
     await session.execute(update(customer).where(customer.c.id == customer_id).values(**update_data))
+    if customer_status is not None:
+        await _log_customer_status_change(
+            session=session,
+            customer_id=customer_id,
+            from_status=previous_status,
+            to_status=customer_status
+        )
     await session.commit()
 
     return SuccessResponse(message="Mijoz ma'lumotlari qisman yangilandi")

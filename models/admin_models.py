@@ -315,3 +315,14 @@ crm_daily_stats_delivery_log = Table(
     Column("created_at", DateTime, default=datetime.utcnow),
     UniqueConstraint("report_date", "recipient_chat_id", name="uq_crm_daily_stats_delivery")
 )
+
+# 20. CRM customer status change log (for period statistics)
+customer_status_change_log = Table(
+    "customer_status_change_log",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("customer_id", Integer, ForeignKey("customer.id", ondelete="CASCADE"), nullable=False),
+    Column("from_status", Enum(CustomerStatus), nullable=True),
+    Column("to_status", Enum(CustomerStatus), nullable=False),
+    Column("changed_at", DateTime, default=datetime.utcnow),
+)

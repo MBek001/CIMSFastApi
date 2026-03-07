@@ -32,7 +32,8 @@ from models.admin_models import (
     recall_bot_admin,
     recall_bot_recipient,
     recall_notification_log,
-    crm_daily_stats_delivery_log
+    crm_daily_stats_delivery_log,
+    customer_status_change_log
 )
 from models.user_models import user_page_permission, PageName
 from utils.crypto import decrypt_text
@@ -53,7 +54,6 @@ _scheduler_task: Optional[asyncio.Task] = None
 
 BTN_USERS = "📋 Users"
 BTN_RUN = "🚀 Run Reminders"
-BTN_RUN_STATS = "📊 Send Daily Stats"
 BTN_ADD = "➕ Add User"
 BTN_REMOVE = "➖ Remove User"
 BTN_HELP = "❓ Help"
@@ -70,6 +70,14 @@ STATS_PERIOD_COMMANDS = {
     "/stats_7d": ("last_7_days", "🔵 Oxirgi 1 hafta"),
     "/stats_30d": ("last_30_days", "🟣 Oxirgi 1 oy"),
 }
+STATUS_KEYS = (
+    "need_to_call",
+    "contacted",
+    "project_started",
+    "continuing",
+    "finished",
+    "rejected",
+)
 
 
 class TelegramUser(BaseModel):
@@ -153,6 +161,55 @@ def _build_status_percentages(status_stats: dict[str, int], total: int) -> dict[
     return percentages
 
 
+def _empty_status_counts() -> dict[str, int]:
+    return {key: 0 for key in STATUS_KEYS}
+
+
+async def _get_new_leads_count_for_range(
+    session: AsyncSession,
+    start_date: date,
+    end_date: date
+) -> int:
+    start_utc_naive, end_utc_naive = _date_range_uz_to_utc_naive(start_date, end_date)
+    result = await session.execute(
+        select(func.count(customer.c.id)).where(
+            and_(
+                customer.c.created_at >= start_utc_naive,
+                customer.c.created_at < end_utc_naive
+            )
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def _get_status_changes_for_range(
+    session: AsyncSession,
+    start_date: date,
+    end_date: date
+) -> dict[str, int]:
+    status_changes = _empty_status_counts()
+    start_utc_naive, end_utc_naive = _date_range_uz_to_utc_naive(start_date, end_date)
+    try:
+        result = await session.execute(
+            select(
+                customer_status_change_log.c.to_status,
+                func.count(customer_status_change_log.c.id).label("count")
+            ).where(
+                and_(
+                    customer_status_change_log.c.changed_at >= start_utc_naive,
+                    customer_status_change_log.c.changed_at < end_utc_naive
+                )
+            ).group_by(customer_status_change_log.c.to_status)
+        )
+        for row in result.fetchall():
+            status_key = row.to_status.value if hasattr(row.to_status, "value") else str(row.to_status)
+            if status_key in status_changes:
+                status_changes[status_key] = int(row.count or 0)
+    except Exception:
+        return status_changes
+    return status_changes
+
+
 async def _get_crm_status_stats_for_range(
     session: AsyncSession,
     start_date: date,
@@ -186,6 +243,35 @@ async def _get_crm_status_stats_for_range(
     }
 
 
+    total = row.total_customers
+    return {
+        "total_customers": total,
+        "status_stats": status_stats,
+        "status_percentages": _build_status_percentages(status_stats, total)
+    }
+
+
+async def _get_crm_status_stats_snapshot(session: AsyncSession) -> dict:
+    result = await session.execute(
+        select(
+            func.count(customer.c.id).label("total_customers"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.need_to_call).label("need_to_call"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.contacted).label("contacted"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.project_started).label("project_started"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.continuing).label("continuing"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.finished).label("finished"),
+            func.count(customer.c.id).filter(customer.c.status == CustomerStatus.rejected).label("rejected")
+        )
+    )
+    row = result.fetchone()
+    status_stats = {
+        "need_to_call": row.need_to_call,
+        "contacted": row.contacted,
+        "project_started": row.project_started,
+        "continuing": row.continuing,
+        "finished": row.finished,
+        "rejected": row.rejected
+    }
     total = row.total_customers
     return {
         "total_customers": total,
@@ -273,22 +359,46 @@ async def _build_ai_notes_summary_block(
 async def _collect_daily_crm_stats_payload(
     session: AsyncSession,
     report_date: date,
-    include_ai_summary: bool = True
+    include_ai_summary: bool = True,
+    use_snapshot_statuses: bool = False
 ) -> dict:
-    today = await _get_crm_status_stats_for_range(session, report_date, report_date)
-    last_3_days = await _get_crm_status_stats_for_range(session, report_date - timedelta(days=2), report_date)
-    last_7_days = await _get_crm_status_stats_for_range(session, report_date - timedelta(days=6), report_date)
-    last_30_days = await _get_crm_status_stats_for_range(session, report_date - timedelta(days=29), report_date)
-    last_90_days = await _get_crm_status_stats_for_range(session, report_date - timedelta(days=89), report_date)
+    period_ranges = {
+        "today": (report_date, report_date),
+        "last_3_days": (report_date - timedelta(days=2), report_date),
+        "last_7_days": (report_date - timedelta(days=6), report_date),
+        "last_30_days": (report_date - timedelta(days=29), report_date),
+        "last_90_days": (report_date - timedelta(days=89), report_date),
+    }
+
+    period_payloads: dict[str, dict] = {}
+    if use_snapshot_statuses:
+        snapshot = await _get_crm_status_stats_snapshot(session)
+        for period_key, (start_date, end_date) in period_ranges.items():
+            period_data = {
+                "total_customers": snapshot["total_customers"],
+                "status_stats": dict(snapshot["status_stats"]),
+                "status_percentages": dict(snapshot["status_percentages"]),
+            }
+            period_data["new_leads_count"] = await _get_new_leads_count_for_range(session, start_date, end_date)
+            period_data["status_changes"] = await _get_status_changes_for_range(session, start_date, end_date)
+            period_payloads[period_key] = period_data
+    else:
+        for period_key, (start_date, end_date) in period_ranges.items():
+            period_data = await _get_crm_status_stats_for_range(session, start_date, end_date)
+            period_data["new_leads_count"] = await _get_new_leads_count_for_range(session, start_date, end_date)
+            period_data["status_changes"] = await _get_status_changes_for_range(session, start_date, end_date)
+            period_payloads[period_key] = period_data
+
     ai_notes_summary = None
     if include_ai_summary:
         ai_notes_summary = await _build_ai_notes_summary_block(session, report_date)
+
     return {
-        "today": today,
-        "last_3_days": last_3_days,
-        "last_7_days": last_7_days,
-        "last_30_days": last_30_days,
-        "last_90_days": last_90_days,
+        "today": period_payloads["today"],
+        "last_3_days": period_payloads["last_3_days"],
+        "last_7_days": period_payloads["last_7_days"],
+        "last_30_days": period_payloads["last_30_days"],
+        "last_90_days": period_payloads["last_90_days"],
         "ai_notes_summary": ai_notes_summary
     }
 
@@ -327,10 +437,24 @@ def _build_period_stats_text_from_payload(
             f"📅 Sana: {report_date.isoformat()} (UZ)\n\n"
             "⚠️ Tanlangan davr uchun ma'lumot topilmadi."
         )
+    status_changes = period_payload.get("status_changes") or _empty_status_counts()
+    new_leads_count = int(period_payload.get("new_leads_count") or 0)
+    status_changes_text = (
+        f"need_to_call: {status_changes['need_to_call']}\n"
+        f"contacted: {status_changes['contacted']}\n"
+        f"project_started: {status_changes['project_started']}\n"
+        f"continuing: {status_changes['continuing']}\n"
+        f"finished: {status_changes['finished']}\n"
+        f"rejected: {status_changes['rejected']}"
+    )
+
     return (
         "📊 CRM Statistika\n"
         f"📅 Sana: {report_date.isoformat()} (UZ)\n\n"
-        f"{_format_period_block(period_title, period_payload)}"
+        f"{_format_period_block(f'{period_title} (joriy statuslar)', period_payload)}\n\n"
+        f"🆕 Kelgan leadlar: {new_leads_count}\n\n"
+        "🔄 Status o'zgarganlar (davr ichida):\n"
+        f"{status_changes_text}"
     )
 
 
@@ -486,7 +610,7 @@ async def _build_daily_crm_stats_text(session: AsyncSession, report_date: date) 
 def _admin_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(BTN_USERS)],
-        [KeyboardButton(BTN_STATS_MENU), KeyboardButton(BTN_RUN_STATS)],
+        [KeyboardButton(BTN_STATS_MENU)],
         [KeyboardButton(BTN_ADD), KeyboardButton(BTN_REMOVE)],
         [KeyboardButton(BTN_HELP)]
     ]
@@ -528,7 +652,6 @@ def _admin_help_text() -> str:
         "📌 /panel - admin panelni ochish\n"
         "📈 /stats_menu - individual statistika menyusi\n"
         "📋 /list_users - xabar oluvchilar ro'yxati\n"
-        "📊 /run_stats - 3 kunlik statistikani hammaga qo'lda yuborish\n"
         "➕ /add_user <chat_id> [username] - yangi user qo'shish\n"
         "➖ /remove_user <chat_id> - userni o'chirish\n"
         "🚀 /run - hozirning o'zida reminderlarni tekshirish\n"
@@ -561,7 +684,6 @@ def _button_to_command(text: str) -> str:
     mapping = {
         BTN_USERS: "/list_users",
         BTN_RUN: "/run",
-        BTN_RUN_STATS: "/run_stats",
         BTN_ADD: "/add_user",
         BTN_REMOVE: "/remove_user",
         BTN_HELP: "/help",
@@ -574,7 +696,6 @@ def _button_to_command(text: str) -> str:
         BTN_MY_ID: "/myid",
         "Users": "/list_users",
         "Run Reminders": "/run",
-        "Send Daily Stats": "/run_stats",
         "Add User": "/add_user",
         "Remove User": "/remove_user",
         "Help": "/help",
@@ -1016,7 +1137,6 @@ async def _scheduler_loop() -> None:
             if bot:
                 async with async_session_maker() as session:
                     await process_due_recall_notifications(session)
-                    await process_daily_crm_stats_digest(session)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1197,7 +1317,12 @@ async def _handle_command(
         report_date = now_uz.date()
 
         if command == "/stats_excel":
-            payload = await _collect_daily_crm_stats_payload(session, report_date, include_ai_summary=True)
+            payload = await _collect_daily_crm_stats_payload(
+                session,
+                report_date,
+                include_ai_summary=True,
+                use_snapshot_statuses=True
+            )
             excel_bytes = _build_daily_crm_stats_excel(report_date, payload)
             filename = f"crm_stats_full_{report_date.isoformat()}.xlsx"
             await _send_document(
@@ -1209,7 +1334,12 @@ async def _handle_command(
             return {"status": "success", "command": command}
 
         period_key, period_title = STATS_PERIOD_COMMANDS[command]
-        payload = await _collect_daily_crm_stats_payload(session, report_date, include_ai_summary=False)
+        payload = await _collect_daily_crm_stats_payload(
+            session,
+            report_date,
+            include_ai_summary=False,
+            use_snapshot_statuses=True
+        )
         text = _build_period_stats_text_from_payload(report_date, payload, period_key, period_title)
         await _send_message(chat_id=chat_id, text=text, reply_markup=_stats_keyboard())
         return {"status": "success", "command": command}
@@ -1320,20 +1450,14 @@ async def _handle_command(
         return {"status": "success", "command": command, "stats": stats}
 
     if command == "/run_stats":
-        stats = await process_daily_crm_stats_digest(session, force=True)
         await _send_message(
             chat_id=chat_id,
             text=(
-                "📊 3 kunlik statistika yuborish natijasi\n\n"
-                f"👥 recipients: {stats.get('recipients_count', 0)}\n"
-                f"✅ sent: {stats.get('sent', 0)}\n"
-                f"⚠️ failed: {stats.get('failed', 0)}\n"
-                f"🛡 skipped(already sent): {stats.get('skipped_already_sent', 0)}\n"
-                f"⏱ skipped(interval): {stats.get('skipped_interval', 0)}\n"
-                f"🕐 skipped(time window): {stats.get('skipped_time_window', 0)}"
+                "⛔ 3 kunlik statistikani hammaga yuborish o'chirilgan.\n"
+                "Kerak bo'lsa /stats_menu orqali individual statistika oling."
             )
         )
-        return {"status": "success", "command": command, "stats": stats}
+        return {"status": "disabled", "command": command}
 
     await _send_message(chat_id=chat_id, text=_admin_help_text(), reply_markup=_admin_keyboard())
     return {"status": "ignored", "reason": "unknown_command"}
