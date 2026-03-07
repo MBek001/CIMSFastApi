@@ -323,6 +323,6 @@ customer_status_change_log = Table(
     Column("id", Integer, primary_key=True),
     Column("customer_id", Integer, ForeignKey("customer.id", ondelete="CASCADE"), nullable=False),
     Column("from_status", Enum(CustomerStatus), nullable=True),
-    Column("to_status", Enum(CustomerStatus), nullable=False),
+    Column("to_status", Enum(CustomerStatus), nullable=True),
     Column("changed_at", DateTime, default=datetime.utcnow),
 )
