@@ -22,7 +22,8 @@ from config import (
     TELEGRAM_RECALL_BOT_TOKEN,
     RECALL_BOT_ADMIN_PASSWORD,
     RECALL_DAILY_STATS_HOUR,
-    RECALL_DAILY_STATS_WINDOW_MINUTES
+    RECALL_DAILY_STATS_WINDOW_MINUTES,
+    RECALL_DAILY_STATS_INTERVAL_DAYS
 )
 from database import get_async_session, async_session_maker
 from models.admin_models import (
@@ -56,6 +57,19 @@ BTN_RUN_STATS = "📊 Send Daily Stats"
 BTN_ADD = "➕ Add User"
 BTN_REMOVE = "➖ Remove User"
 BTN_HELP = "❓ Help"
+BTN_STATS_MENU = "📈 Statistika"
+BTN_STATS_3_DAYS = "🟡 3 kunlik"
+BTN_STATS_1_WEEK = "🔵 1 haftalik"
+BTN_STATS_1_MONTH = "🟣 1 oylik"
+BTN_STATS_EXCEL = "📎 Excel fayl"
+BTN_STATS_BACK = "⬅️ Orqaga"
+BTN_MY_ID = "🆔 My ID"
+
+STATS_PERIOD_COMMANDS = {
+    "/stats_3d": ("last_3_days", "🟡 Oxirgi 3 kun"),
+    "/stats_7d": ("last_7_days", "🔵 Oxirgi 1 hafta"),
+    "/stats_30d": ("last_30_days", "🟣 Oxirgi 1 oy"),
+}
 
 
 class TelegramUser(BaseModel):
@@ -256,13 +270,19 @@ async def _build_ai_notes_summary_block(
     return f"AI xulosa ({source_label}):\n{ai_summary}"
 
 
-async def _collect_daily_crm_stats_payload(session: AsyncSession, report_date: date) -> dict:
+async def _collect_daily_crm_stats_payload(
+    session: AsyncSession,
+    report_date: date,
+    include_ai_summary: bool = True
+) -> dict:
     today = await _get_crm_status_stats_for_range(session, report_date, report_date)
     last_3_days = await _get_crm_status_stats_for_range(session, report_date - timedelta(days=2), report_date)
     last_7_days = await _get_crm_status_stats_for_range(session, report_date - timedelta(days=6), report_date)
     last_30_days = await _get_crm_status_stats_for_range(session, report_date - timedelta(days=29), report_date)
     last_90_days = await _get_crm_status_stats_for_range(session, report_date - timedelta(days=89), report_date)
-    ai_notes_summary = await _build_ai_notes_summary_block(session, report_date)
+    ai_notes_summary = None
+    if include_ai_summary:
+        ai_notes_summary = await _build_ai_notes_summary_block(session, report_date)
     return {
         "today": today,
         "last_3_days": last_3_days,
@@ -292,6 +312,26 @@ def _build_daily_crm_stats_text_from_payload(report_date: date, payload: dict) -
     if ai_notes_summary:
         text += f"\n\n{ai_notes_summary}"
     return text
+
+
+def _build_period_stats_text_from_payload(
+    report_date: date,
+    payload: dict,
+    period_key: str,
+    period_title: str
+) -> str:
+    period_payload = payload.get(period_key)
+    if not period_payload:
+        return (
+            "📊 CRM Statistika\n"
+            f"📅 Sana: {report_date.isoformat()} (UZ)\n\n"
+            "⚠️ Tanlangan davr uchun ma'lumot topilmadi."
+        )
+    return (
+        "📊 CRM Statistika\n"
+        f"📅 Sana: {report_date.isoformat()} (UZ)\n\n"
+        f"{_format_period_block(period_title, period_payload)}"
+    )
 
 
 def _build_daily_crm_stats_excel(report_date: date, payload: dict) -> bytes:
@@ -446,9 +486,34 @@ async def _build_daily_crm_stats_text(session: AsyncSession, report_date: date) 
 def _admin_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(BTN_USERS)],
-        [KeyboardButton(BTN_RUN_STATS)],
+        [KeyboardButton(BTN_STATS_MENU), KeyboardButton(BTN_RUN_STATS)],
         [KeyboardButton(BTN_ADD), KeyboardButton(BTN_REMOVE)],
         [KeyboardButton(BTN_HELP)]
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
+def _user_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(BTN_STATS_MENU)],
+        [KeyboardButton(BTN_HELP), KeyboardButton(BTN_MY_ID)]
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
+def _stats_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(BTN_STATS_3_DAYS), KeyboardButton(BTN_STATS_1_WEEK)],
+        [KeyboardButton(BTN_STATS_1_MONTH), KeyboardButton(BTN_STATS_EXCEL)],
+        [KeyboardButton(BTN_STATS_BACK)]
     ]
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
@@ -461,12 +526,34 @@ def _admin_help_text() -> str:
     return (
         "🎛 Recall Bot Admin Panel\n\n"
         "📌 /panel - admin panelni ochish\n"
+        "📈 /stats_menu - individual statistika menyusi\n"
         "📋 /list_users - xabar oluvchilar ro'yxati\n"
-        "📊 /run_stats - kundalik CRM statsni qo'lda yuborish\n"
+        "📊 /run_stats - 3 kunlik statistikani hammaga qo'lda yuborish\n"
         "➕ /add_user <chat_id> [username] - yangi user qo'shish\n"
         "➖ /remove_user <chat_id> - userni o'chirish\n"
         "🚀 /run - hozirning o'zida reminderlarni tekshirish\n"
         "🆔 /myid - o'zingizning chat_id ni ko'rish"
+    )
+
+
+def _basic_help_text(chat_id: str) -> str:
+    return (
+        "🤖 Recall Botga xush kelibsiz.\n"
+        f"🆔 Sizning chat_id: {chat_id}\n\n"
+        "📈 Statistika olish uchun: /stats_menu\n"
+        "🔐 Admin panel uchun: /admin <parol>\n"
+        "🆔 Chat ID olish uchun: /myid"
+    )
+
+
+def _stats_menu_text() -> str:
+    return (
+        "📈 Statistika menyusi\n\n"
+        "Kerakli tugmani bosing:\n"
+        f"- {BTN_STATS_3_DAYS}\n"
+        f"- {BTN_STATS_1_WEEK}\n"
+        f"- {BTN_STATS_1_MONTH}\n"
+        f"- {BTN_STATS_EXCEL}"
     )
 
 
@@ -478,12 +565,26 @@ def _button_to_command(text: str) -> str:
         BTN_ADD: "/add_user",
         BTN_REMOVE: "/remove_user",
         BTN_HELP: "/help",
+        BTN_STATS_MENU: "/stats_menu",
+        BTN_STATS_3_DAYS: "/stats_3d",
+        BTN_STATS_1_WEEK: "/stats_7d",
+        BTN_STATS_1_MONTH: "/stats_30d",
+        BTN_STATS_EXCEL: "/stats_excel",
+        BTN_STATS_BACK: "/stats_back",
+        BTN_MY_ID: "/myid",
         "Users": "/list_users",
         "Run Reminders": "/run",
         "Send Daily Stats": "/run_stats",
         "Add User": "/add_user",
         "Remove User": "/remove_user",
         "Help": "/help",
+        "Statistika": "/stats_menu",
+        "3 kunlik": "/stats_3d",
+        "1 haftalik": "/stats_7d",
+        "1 oylik": "/stats_30d",
+        "Excel fayl": "/stats_excel",
+        "Orqaga": "/stats_back",
+        "My ID": "/myid",
     }
     return mapping.get(text, text)
 
@@ -520,6 +621,18 @@ async def _is_admin(session: AsyncSession, chat_id: str) -> bool:
             and_(
                 recall_bot_admin.c.chat_id == chat_id,
                 recall_bot_admin.c.is_active == True
+            )
+        )
+    )
+    return result.fetchone() is not None
+
+
+async def _is_recipient(session: AsyncSession, chat_id: str) -> bool:
+    result = await session.execute(
+        select(recall_bot_recipient.c.id).where(
+            and_(
+                recall_bot_recipient.c.chat_id == chat_id,
+                recall_bot_recipient.c.is_active == True
             )
         )
     )
@@ -766,7 +879,8 @@ async def process_daily_crm_stats_digest(
         "sent": 0,
         "failed": 0,
         "skipped_already_sent": 0,
-        "skipped_time_window": 0
+        "skipped_time_window": 0,
+        "skipped_interval": 0
     }
 
     if not bot:
@@ -782,6 +896,27 @@ async def process_daily_crm_stats_digest(
     if not force and not in_window:
         stats["skipped_time_window"] = 1
         return stats
+
+    if not force:
+        has_today_logs_result = await session.execute(
+            select(func.count())
+            .select_from(crm_daily_stats_delivery_log)
+            .where(crm_daily_stats_delivery_log.c.report_date == report_date)
+        )
+        has_today_logs = bool(has_today_logs_result.scalar() or 0)
+        if not has_today_logs:
+            last_sent_date_result = await session.execute(
+                select(func.max(crm_daily_stats_delivery_log.c.report_date)).where(
+                    crm_daily_stats_delivery_log.c.notification_sent == True
+                )
+            )
+            last_sent_date = last_sent_date_result.scalar()
+            if (
+                last_sent_date and
+                (report_date - last_sent_date).days < RECALL_DAILY_STATS_INTERVAL_DAYS
+            ):
+                stats["skipped_interval"] = 1
+                return stats
 
     recipients_result = await session.execute(
         select(
@@ -803,10 +938,17 @@ async def process_daily_crm_stats_digest(
     )
     existing_map = {row.recipient_chat_id: row for row in existing_result.fetchall()}
 
-    digest_payload = await _collect_daily_crm_stats_payload(session, report_date)
-    digest_text = _build_daily_crm_stats_text_from_payload(report_date, digest_payload)
-    digest_excel = _build_daily_crm_stats_excel(report_date, digest_payload)
-    digest_excel_filename = f"crm_stats_{report_date.isoformat()}.xlsx"
+    digest_payload = await _collect_daily_crm_stats_payload(
+        session,
+        report_date,
+        include_ai_summary=False
+    )
+    digest_text = _build_period_stats_text_from_payload(
+        report_date,
+        digest_payload,
+        "last_3_days",
+        "🟡 Oxirgi 3 kun"
+    )
 
     for recipient in recipients:
         existing = existing_map.get(recipient.chat_id)
@@ -816,12 +958,6 @@ async def process_daily_crm_stats_digest(
 
         try:
             await _send_message(recipient.chat_id, digest_text)
-            await _send_document(
-                recipient.chat_id,
-                digest_excel,
-                digest_excel_filename,
-                caption="📎 CRM statistikasi (Excel)"
-            )
 
             if existing:
                 await session.execute(
@@ -968,14 +1104,13 @@ async def _handle_command(
     command = parts[0].lower()
 
     if command == "/start":
+        is_admin = await _is_admin(session, chat_id)
+        reply_markup = _admin_keyboard() if is_admin else _user_keyboard()
+        welcome_text = _admin_help_text() if is_admin else _basic_help_text(chat_id)
         await _send_message(
             chat_id=chat_id,
-            text=(
-                "🤖 Recall Botga xush kelibsiz.\n"
-                f"🆔 Sizning chat_id: {chat_id}\n\n"
-                "🔐 Admin panel uchun: /admin <parol>\n"
-                "🆔 Chat ID olish uchun: /myid"
-            )
+            text=welcome_text,
+            reply_markup=reply_markup
         )
         return {"status": "success", "command": command}
 
@@ -990,17 +1125,15 @@ async def _handle_command(
         else:
             await _send_message(
                 chat_id=chat_id,
-                text=(
-                    "🤖 Recall Botga xush kelibsiz.\n"
-                    f"🆔 Sizning chat_id: {chat_id}\n\n"
-                    "🔐 Admin panel uchun: /admin <parol>\n"
-                    "🆔 Chat ID olish uchun: /myid"
-                )
+                text=_basic_help_text(chat_id),
+                reply_markup=_user_keyboard()
             )
         return {"status": "success", "command": command}
 
     if command == "/myid":
-        await _send_message(chat_id=chat_id, text=f"🆔 Sizning chat_id: {chat_id}")
+        is_admin = await _is_admin(session, chat_id)
+        reply_markup = _admin_keyboard() if is_admin else _user_keyboard()
+        await _send_message(chat_id=chat_id, text=f"🆔 Sizning chat_id: {chat_id}", reply_markup=reply_markup)
         return {"status": "success", "command": command}
 
     if command == "/admin":
@@ -1027,9 +1160,64 @@ async def _handle_command(
         )
         return {"status": "success", "command": command}
 
+    stats_commands = {"/stats_menu", "/stats_back", "/stats_excel", *STATS_PERIOD_COMMANDS.keys()}
+    if command in stats_commands:
+        is_admin = await _is_admin(session, chat_id)
+        is_recipient = await _is_recipient(session, chat_id)
+        if not (is_admin or is_recipient):
+            await _send_message(
+                chat_id=chat_id,
+                text=(
+                    "⛔ Statistika ko'rish uchun ruxsat yo'q.\n"
+                    "Admin sizni avval /add_user orqali recipientga qo'shishi kerak."
+                ),
+                reply_markup=_user_keyboard()
+            )
+            return {"status": "error", "reason": "not_allowed_stats"}
+
+        if command == "/stats_back":
+            if is_admin:
+                await _send_message(chat_id=chat_id, text=_admin_help_text(), reply_markup=_admin_keyboard())
+            else:
+                await _send_message(chat_id=chat_id, text=_basic_help_text(chat_id), reply_markup=_user_keyboard())
+            return {"status": "success", "command": command}
+
+        if command == "/stats_menu":
+            await _send_message(
+                chat_id=chat_id,
+                text=_stats_menu_text(),
+                reply_markup=_stats_keyboard()
+            )
+            return {"status": "success", "command": command}
+
+        now_uz = datetime.now(UZBEKISTAN_TZ)
+        report_date = now_uz.date()
+
+        if command == "/stats_excel":
+            payload = await _collect_daily_crm_stats_payload(session, report_date, include_ai_summary=True)
+            excel_bytes = _build_daily_crm_stats_excel(report_date, payload)
+            filename = f"crm_stats_full_{report_date.isoformat()}.xlsx"
+            await _send_document(
+                chat_id=chat_id,
+                file_bytes=excel_bytes,
+                filename=filename,
+                caption="📎 CRM to'liq statistika (Excel)"
+            )
+            return {"status": "success", "command": command}
+
+        period_key, period_title = STATS_PERIOD_COMMANDS[command]
+        payload = await _collect_daily_crm_stats_payload(session, report_date, include_ai_summary=False)
+        text = _build_period_stats_text_from_payload(report_date, payload, period_key, period_title)
+        await _send_message(chat_id=chat_id, text=text, reply_markup=_stats_keyboard())
+        return {"status": "success", "command": command}
+
     is_admin = await _is_admin(session, chat_id)
     if not is_admin:
-        await _send_message(chat_id=chat_id, text="⛔ Admin emas. /admin <parol> yuboring.")
+        await _send_message(
+            chat_id=chat_id,
+            text="⛔ Admin emas. /admin <parol> yuboring.",
+            reply_markup=_user_keyboard()
+        )
         return {"status": "error", "reason": "not_admin"}
 
     if command == "/panel":
@@ -1133,16 +1321,18 @@ async def _handle_command(
         await _send_message(
             chat_id=chat_id,
             text=(
-                "📊 Daily stats yuborish natijasi\n\n"
+                "📊 3 kunlik statistika yuborish natijasi\n\n"
                 f"👥 recipients: {stats.get('recipients_count', 0)}\n"
                 f"✅ sent: {stats.get('sent', 0)}\n"
                 f"⚠️ failed: {stats.get('failed', 0)}\n"
-                f"🛡 skipped(already sent): {stats.get('skipped_already_sent', 0)}"
+                f"🛡 skipped(already sent): {stats.get('skipped_already_sent', 0)}\n"
+                f"⏱ skipped(interval): {stats.get('skipped_interval', 0)}\n"
+                f"🕐 skipped(time window): {stats.get('skipped_time_window', 0)}"
             )
         )
         return {"status": "success", "command": command, "stats": stats}
 
-    await _send_message(chat_id=chat_id, text=_admin_help_text())
+    await _send_message(chat_id=chat_id, text=_admin_help_text(), reply_markup=_admin_keyboard())
     return {"status": "ignored", "reason": "unknown_command"}
 
 

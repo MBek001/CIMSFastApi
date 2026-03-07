@@ -56,10 +56,13 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # Webhook URL
 # Update Bot Admin - Statistika uchun parol
 UPDATE_ADMIN_PASSWORD = os.environ.get('UPDATE_ADMIN_PASSWORD', 'admin123')  # Default parol
 RECALL_BOT_ADMIN_PASSWORD = os.environ.get('RECALL_BOT_ADMIN_PASSWORD', 'recall123')  # Recall bot admin paroli
-RECALL_DAILY_STATS_HOUR = int(os.environ.get('RECALL_DAILY_STATS_HOUR', 22))  # Daily CRM stats send hour (UZ)
+RECALL_DAILY_STATS_HOUR = int(os.environ.get('RECALL_DAILY_STATS_HOUR', 10))  # Daily CRM stats send hour (UZ)
 RECALL_DAILY_STATS_WINDOW_MINUTES = int(
     os.environ.get('RECALL_DAILY_STATS_WINDOW_MINUTES', 5)
-)  # 22:00-22:04 oralig'ida yuborish oynasi
+)  # 10:00-10:04 oralig'ida yuborish oynasi
+RECALL_DAILY_STATS_INTERVAL_DAYS = int(
+    os.environ.get('RECALL_DAILY_STATS_INTERVAL_DAYS', 3)
+)  # CRM digest yuborish oralig'i (kunlarda)
 
 
 FREECURRENCYAPI_KEY = os.environ.get('FREECURRENCYAPI_KEY')
