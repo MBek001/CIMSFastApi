@@ -766,6 +766,7 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
             customer.c.id,
             customer.c.full_name,
             customer.c.phone_number,
+            customer.c.notes,
             customer.c.recall_time
         ).where(
             and_(
@@ -808,6 +809,7 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
 
         customer_name = _safe_decrypt(c.full_name)
         customer_phone = _safe_decrypt(c.phone_number)
+        customer_note = _clean_note_text(_safe_decrypt(c.notes)) or "yo'q"
 
         for reminder_minutes in REMINDER_MINUTES:
             reminder_at = recall_at - timedelta(minutes=reminder_minutes)
@@ -838,7 +840,8 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
                     f"🔔 Recall eslatma: {reminder_minutes} daqiqa qoldi\n\n"
                     f"👤 Mijoz: {customer_name}\n"
                     f"📞 Telefon: {customer_phone}\n"
-                    f"🕒 Recall vaqti: {_format_uzbek_time_from_utc_naive(recall_at)}\n\n"
+                    f"🕒 Recall vaqti: {_format_uzbek_time_from_utc_naive(recall_at)}\n"
+                    f"📝 Note: {customer_note}\n\n"
                     f"✅ Shu customer bilan bog'lanishingiz kerak."
                 )
 
