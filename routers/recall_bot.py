@@ -41,7 +41,7 @@ router = APIRouter(prefix="/recall-bot", tags=["Recall Bot"])
 
 bot = Bot(token=TELEGRAM_RECALL_BOT_TOKEN) if TELEGRAM_RECALL_BOT_TOKEN else None
 
-REMINDER_MINUTES = (60, 30, 15, 1)
+REMINDER_MINUTES = (30, 1)
 SCHEDULER_INTERVAL_SECONDS = 30
 DUE_WINDOW_PAST_SECONDS = 120
 DUE_WINDOW_FUTURE_SECONDS = 20
@@ -170,6 +170,8 @@ async def _get_crm_status_stats_for_range(
         "finished": row.finished,
         "rejected": row.rejected
     }
+
+
     total = row.total_customers
     return {
         "total_customers": total,
