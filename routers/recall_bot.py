@@ -930,7 +930,7 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
 
         customer_name = _safe_decrypt(c.full_name)
         customer_phone = _safe_decrypt(c.phone_number)
-        customer_note = _clean_note_text(_safe_decrypt(c.notes)) or "yo'q"
+        customer_note = _clean_note_text(c.notes) or "yo'q"
 
         for reminder_minutes in REMINDER_MINUTES:
             reminder_at = recall_at - timedelta(minutes=reminder_minutes)
