@@ -1242,8 +1242,8 @@ async def get_company_stats(
         select(user.c.id)
         .where(
             and_(
-                user.c.is_active == True,
-                user.c.role != 'Customer'
+                user.c.is_active == True
+
             )
         )
     )
