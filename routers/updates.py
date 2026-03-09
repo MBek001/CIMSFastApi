@@ -1,11 +1,11 @@
-
+﻿
 from datetime import date, datetime
 from typing import Optional, List
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, HTTPException, Depends, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, insert, update, delete, func, and_
-from models.user_models import user_page_permission, monthly_update, user, monthly_penalty
+from sqlalchemy import select, insert, update, delete, func, and_, or_
+from models.user_models import user_page_permission, monthly_update, user, monthly_penalty, UserRole
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
 
@@ -25,6 +25,21 @@ MONTH_FILTER_ALIASES = {
     10: {"10", "oktabr", "october", "oct"},
     11: {"11", "noyabr", "november", "nov"},
     12: {"12", "dekabr", "december", "dec"},
+}
+
+MONTH_NUMBER_TO_UZ_NAME = {
+    1: "Yanvar",
+    2: "Fevral",
+    3: "Mart",
+    4: "Aprel",
+    5: "May",
+    6: "Iyun",
+    7: "Iyul",
+    8: "Avgust",
+    9: "Sentabr",
+    10: "Oktabr",
+    11: "Noyabr",
+    12: "Dekabr",
 }
 
 
@@ -49,6 +64,34 @@ def parse_employee_ids(employee_ids: Optional[str]) -> List[int]:
 
 def as_money(value: Decimal) -> float:
     return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def parse_month_to_number(raw_month: Optional[str]) -> Optional[int]:
+    if raw_month is None:
+        return None
+    normalized = str(raw_month).strip().lower()
+    for month_num, aliases in MONTH_FILTER_ALIASES.items():
+        if normalized in aliases:
+            return month_num
+    return None
+
+
+def is_ceo_user(current_user) -> bool:
+    role = getattr(current_user, "role", None)
+    role_name = getattr(role, "name", None)
+    role_value = getattr(role, "value", None)
+    company_code = str(getattr(current_user, "company_code", "") or "").strip().lower()
+
+    role_name_normalized = str(role_name or "").strip().lower()
+    role_value_normalized = str(role_value or "").strip().lower()
+    role_plain_normalized = str(role or "").strip().lower()
+
+    return (
+        role_name_normalized == "ceo"
+        or role_value_normalized == "ceo"
+        or role_plain_normalized == "ceo"
+        or company_code == "ceo"
+    )
 
 
 def calculate_salary_estimate(base_salary: Decimal, total_penalty_points: Decimal) -> dict:
@@ -82,7 +125,7 @@ async def add_member_penalty(
         )
     )
     if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yoвЂq")
 
     user_result = await session.execute(
         select(user.c.id).where(user.c.id == user_id)
@@ -107,7 +150,7 @@ async def add_member_penalty(
     await session.commit()
 
     return {
-        "message": "Jarima ball muvaffaqiyatli qo‘shildi",
+        "message": "Jarima ball muvaffaqiyatli qoвЂshildi",
         "penalty_id": penalty_id,
         "user_id": user_id,
         "year": year,
@@ -131,7 +174,7 @@ async def get_member_salary_estimate(
         )
     )
     if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yoвЂq")
 
     user_result = await session.execute(
         select(user.c.id, user.c.name, user.c.surname, user.c.default_salary).where(user.c.id == user_id)
@@ -203,7 +246,7 @@ async def get_members_salary_estimates(
         )
     )
     if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yoвЂq")
 
     selected_employee_ids = parse_employee_ids(employee_ids)
 
@@ -293,7 +336,7 @@ async def get_employee_monthly_update_statistics(
         )
     )
     if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yoвЂq")
 
     selected_employee_ids = parse_employee_ids(employee_ids)
 
@@ -422,7 +465,7 @@ async def get_employee_monthly_update_statistics(
     }
 
 
-# 🔹 1. CREATE — Yangi oy ma’lumotini kiritish (faqat update_list permission bilan)
+# рџ”№ 1. CREATE вЂ” Yangi oy maвЂ™lumotini kiritish (faqat update_list permission bilan)
 @router.post("/member/update", summary="Member uchun yangi oylik ma'lumot kiritish")
 async def add_member_update(
     user_id: int,
@@ -443,7 +486,7 @@ async def add_member_update(
         )
     )
     if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga ruxsatingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Bu sahifaga ruxsatingiz yoвЂq")
 
     new_update = {
         "user_id": user_id,
@@ -458,51 +501,243 @@ async def add_member_update(
 
     await session.execute(insert(monthly_update).values(**new_update))
     await session.commit()
-    return {"message": f"{month}/{year} uchun update muvaffaqiyatli qo‘shildi"}
+    return {"message": f"{month}/{year} uchun update muvaffaqiyatli qoвЂshildi"}
 
 
-# 🔹 2. GET — Hamma foydalanuvchilar uchun barcha update’lar (faqat update_list sahifasiga ruxsati borlar uchun)
-@router.get("/member/updates/all", summary="Barcha foydalanuvchilarning update'larini olish (ruxsat bilan)")
+# рџ”№ 2. GET вЂ” Hamma foydalanuvchilar uchun barcha updateвЂ™lar (faqat update_list sahifasiga ruxsati borlar uchun)
+@router.get("/member/updates/all", summary="CEO uchun employee update/jarima/oylik statistikasi (oylar kesimida)")
 async def get_all_updates(
+    year: Optional[int] = Query(default=None, ge=2020, le=2035),
+    month: Optional[int] = Query(default=None, ge=1, le=12),
+    employee_ids: Optional[str] = Query(default=None, description="Comma-separated user IDs. Masalan: 1,2,3"),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    # 🔐 "update_list" sahifasiga ruxsati borligini tekshirish
-    permission_check = await session.execute(
-        select(user_page_permission).where(
-            user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == "update_list"
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Faqat CEO bu ma'lumotni ko'ra oladi")
+
+    selected_employee_ids = parse_employee_ids(employee_ids)
+
+    employees_query = (
+        select(
+            user.c.id,
+            user.c.name,
+            user.c.surname,
+            user.c.default_salary
         )
+        .where(
+            and_(
+                user.c.is_active == True,
+                or_(user.c.role.is_(None), user.c.role != UserRole.customer)
+            )
+        )
+        .order_by(user.c.name, user.c.surname)
     )
-    if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yo‘q")
+    if selected_employee_ids:
+        employees_query = employees_query.where(user.c.id.in_(selected_employee_ids))
 
-    # 🔍 Barcha foydalanuvchilarning update’larini olish
-    result = await session.execute(select(monthly_update))
-    updates = result.fetchall()
+    employees_result = await session.execute(employees_query)
+    employee_rows = employees_result.fetchall()
 
-    if not updates:
-        return {"message": "Hech qanday update topilmadi", "data": []}
-
-    return [
-        {
-            "id": u.id,
-            "user_id": u.user_id,
-            "year": u.year,
-            "month": u.month,
-            "update_date": u.update_date,
-            "update_percentage": float(u.update_percentage),
-            "salary_amount": float(u.salary_amount),
-            "next_payment_date": u.next_payment_date,
-            "note":u.note,
+    if not employee_rows:
+        return {
+            "filters": {
+                "year": year,
+                "month": month,
+                "employee_ids": selected_employee_ids
+            },
+            "summary": {
+                "employees_count": 0,
+                "periods_count": 0,
+                "total_reports": 0,
+                "average_update_percentage": 0.0
+            },
+            "employees": []
         }
-        for u in updates
-    ]
+
+    employee_id_list = [row.id for row in employee_rows]
+    employee_id_set = set(employee_id_list)
+
+    updates_query = (
+        select(
+            monthly_update.c.user_id,
+            monthly_update.c.year,
+            monthly_update.c.month,
+            monthly_update.c.update_percentage,
+            monthly_update.c.salary_amount,
+            monthly_update.c.update_date
+        )
+        .where(monthly_update.c.user_id.in_(employee_id_list))
+    )
+
+    if year is not None:
+        updates_query = updates_query.where(monthly_update.c.year == year)
+    if month is not None:
+        month_values = {item.lower() for item in MONTH_FILTER_ALIASES.get(month, set())}
+        updates_query = updates_query.where(func.lower(func.trim(monthly_update.c.month)).in_(month_values))
+
+    updates_result = await session.execute(updates_query)
+    update_rows = updates_result.fetchall()
+
+    penalties_query = (
+        select(
+            monthly_penalty.c.user_id,
+            monthly_penalty.c.year,
+            monthly_penalty.c.month,
+            func.coalesce(func.sum(monthly_penalty.c.penalty_points), 0).label("total_penalty_points")
+        )
+        .where(monthly_penalty.c.user_id.in_(employee_id_list))
+        .group_by(monthly_penalty.c.user_id, monthly_penalty.c.year, monthly_penalty.c.month)
+    )
+    if year is not None:
+        penalties_query = penalties_query.where(monthly_penalty.c.year == year)
+    if month is not None:
+        penalties_query = penalties_query.where(monthly_penalty.c.month == month)
+
+    penalties_result = await session.execute(penalties_query)
+    penalty_rows = penalties_result.fetchall()
+
+    penalties_map = {}
+    employee_penalty_periods = {employee_id: set() for employee_id in employee_id_list}
+    for row in penalty_rows:
+        key = (row.user_id, int(row.year), int(row.month))
+        penalties_map[key] = Decimal(str(row.total_penalty_points or 0))
+        employee_penalty_periods[row.user_id].add((int(row.year), int(row.month)))
+
+    monthly_updates_map = {employee_id: {} for employee_id in employee_id_list}
+    for row in update_rows:
+        if row.user_id not in employee_id_set:
+            continue
+
+        month_number = parse_month_to_number(row.month)
+        if month is not None and month_number != month:
+            continue
+
+        period_key = (int(row.year), month_number)
+        if period_key not in monthly_updates_map[row.user_id]:
+            monthly_updates_map[row.user_id][period_key] = {
+                "year": int(row.year),
+                "month": month_number,
+                "month_name": MONTH_NUMBER_TO_UZ_NAME.get(month_number, row.month),
+                "reports_count": 0,
+                "update_percentage_sum": Decimal("0"),
+                "total_salary_amount": Decimal("0"),
+                "latest_report_date": None
+            }
+
+        period_item = monthly_updates_map[row.user_id][period_key]
+        period_item["reports_count"] += 1
+        period_item["update_percentage_sum"] += Decimal(str(row.update_percentage or 0))
+        period_item["total_salary_amount"] += Decimal(str(row.salary_amount or 0))
+
+        if row.update_date and (
+            period_item["latest_report_date"] is None
+            or row.update_date > period_item["latest_report_date"]
+        ):
+            period_item["latest_report_date"] = row.update_date
+
+    employees_response = []
+    total_periods = 0
+    total_reports = 0
+    total_update_percentage_sum = Decimal("0")
+
+    for employee in employee_rows:
+        employee_periods = monthly_updates_map.get(employee.id, {})
+        penalty_periods = employee_penalty_periods.get(employee.id, set())
+
+        merged_keys = set(employee_periods.keys()) | penalty_periods
+        sorted_keys = sorted(
+            merged_keys,
+            key=lambda item: (
+                item[0],
+                item[1] if item[1] is not None else 13
+            )
+        )
+
+        periods_response = []
+        employee_reports_count = 0
+        employee_update_percentage_sum = Decimal("0")
+
+        base_salary = Decimal(str(employee.default_salary or 0))
+
+        for period_key in sorted_keys:
+            period_update = employee_periods.get(period_key)
+            period_year, period_month = period_key
+            total_penalty_points = penalties_map.get((employee.id, period_year, period_month or 0), Decimal("0"))
+            salary_estimate = calculate_salary_estimate(base_salary, total_penalty_points)
+
+            if period_update:
+                reports_count = period_update["reports_count"]
+                average_update_percentage = (
+                    period_update["update_percentage_sum"] / reports_count
+                    if reports_count > 0 else Decimal("0")
+                )
+                total_salary_amount = period_update["total_salary_amount"]
+                latest_report_date = period_update["latest_report_date"]
+            else:
+                reports_count = 0
+                average_update_percentage = Decimal("0")
+                total_salary_amount = Decimal("0")
+                latest_report_date = None
+
+            employee_reports_count += reports_count
+            employee_update_percentage_sum += average_update_percentage * reports_count
+
+            periods_response.append({
+                "year": period_year,
+                "month": period_month,
+                "month_name": MONTH_NUMBER_TO_UZ_NAME.get(period_month, str(period_month) if period_month else None),
+                "reports_count": reports_count,
+                "average_update_percentage": round(float(average_update_percentage), 2),
+                "total_penalty_points": as_money(total_penalty_points),
+                "total_salary_amount": as_money(total_salary_amount),
+                "salary_estimate": salary_estimate,
+                "latest_report_date": str(latest_report_date) if latest_report_date else None
+            })
+
+        employee_average_update = (
+            employee_update_percentage_sum / employee_reports_count
+            if employee_reports_count > 0 else Decimal("0")
+        )
+
+        total_periods += len(periods_response)
+        total_reports += employee_reports_count
+        total_update_percentage_sum += employee_update_percentage_sum
+
+        employees_response.append({
+            "user_id": employee.id,
+            "full_name": f"{employee.name} {employee.surname}",
+            "default_salary": as_money(base_salary),
+            "summary": {
+                "periods_count": len(periods_response),
+                "total_reports": employee_reports_count,
+                "average_update_percentage": round(float(employee_average_update), 2)
+            },
+            "periods": periods_response
+        })
+
+    average_update_percentage = (
+        total_update_percentage_sum / total_reports
+        if total_reports > 0 else Decimal("0")
+    )
+
+    return {
+        "filters": {
+            "year": year,
+            "month": month,
+            "employee_ids": selected_employee_ids
+        },
+        "summary": {
+            "employees_count": len(employees_response),
+            "periods_count": total_periods,
+            "total_reports": total_reports,
+            "average_update_percentage": round(float(average_update_percentage), 2)
+        },
+        "employees": employees_response
+    }
 
 
-
-# 🔹 3. GET — Foydalanuvchining o‘z update’larini ko‘rish
-@router.get("/member/updates", summary="Foydalanuvchining o‘z update’larini olish")
+@router.get("/member/updates", summary="Foydalanuvchining oвЂz updateвЂ™larini olish")
 async def get_member_updates(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
@@ -526,8 +761,8 @@ async def get_member_updates(
     ]
 
 
-# 🔹 4. PUT — To‘liq update’ni tahrirlash (faqat ruxsat bilan)
-@router.put("/member/update/{update_id}", summary="Update’ni tahrirlash (to‘liq)")
+# рџ”№ 4. PUT вЂ” ToвЂliq updateвЂ™ni tahrirlash (faqat ruxsat bilan)
+@router.put("/member/update/{update_id}", summary="UpdateвЂ™ni tahrirlash (toвЂliq)")
 async def edit_update(
     update_id: int,
     year: int,
@@ -546,7 +781,7 @@ async def edit_update(
         )
     )
     if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga ruxsatingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Bu sahifaga ruxsatingiz yoвЂq")
 
     update_data = {
         "year": year,
@@ -567,8 +802,8 @@ async def edit_update(
     return {"message": "Update muvaffaqiyatli tahrirlandi"}
 
 
-# 🔹 5. PATCH — Qisman yangilash (faqat ruxsat bilan)
-@router.patch("/member/update/{update_id}", summary="Update’ni qisman yangilash")
+# рџ”№ 5. PATCH вЂ” Qisman yangilash (faqat ruxsat bilan)
+@router.patch("/member/update/{update_id}", summary="UpdateвЂ™ni qisman yangilash")
 async def patch_update(
     update_id: int,
     update_percentage: float = None,
@@ -585,7 +820,7 @@ async def patch_update(
         )
     )
     if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga ruxsatingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Bu sahifaga ruxsatingiz yoвЂq")
 
     update_data = {}
     if update_percentage is not None:
@@ -610,8 +845,8 @@ async def patch_update(
     return {"message": "Update ma'lumotlari yangilandi"}
 
 
-# 🔹 6. DELETE — Update’ni o‘chirish (faqat ruxsat bilan)
-@router.delete("/member/update/{update_id}", summary="Update’ni o‘chirish")
+# рџ”№ 6. DELETE вЂ” UpdateвЂ™ni oвЂchirish (faqat ruxsat bilan)
+@router.delete("/member/update/{update_id}", summary="UpdateвЂ™ni oвЂchirish")
 async def delete_update(
     update_id: int,
     session: AsyncSession = Depends(get_async_session),
@@ -624,7 +859,7 @@ async def delete_update(
         )
     )
     if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga ruxsatingiz yo‘q")
+        raise HTTPException(status_code=403, detail="Bu sahifaga ruxsatingiz yoвЂq")
 
     result = await session.execute(
         delete(monthly_update).where(monthly_update.c.id == update_id)
@@ -633,4 +868,5 @@ async def delete_update(
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Update topilmadi")
 
-    return {"message": "Update muvaffaqiyatli o‘chirildi"}
+    return {"message": "Update muvaffaqiyatli oвЂchirildi"}
+

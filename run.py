@@ -35,7 +35,7 @@ app = FastAPI(
 # CORS (handled only here, not in nginx)
 # --------------------------------------------------
 origins = [
-    # "https://cims-two.vercel.app",  # ✅ Frontend domain (single origin)
+    "http://localhost:3000",
     "https://cims.cognilabs.org"
 ]
 
@@ -63,7 +63,7 @@ app.include_router(advanced_router)
 app.include_router(updates_router)
 app.include_router(update_tracking_router)
 app.include_router(management_router)
-app.include_router(instagram_router)
+# app.include_router(instagram_router)
 app.include_router(recall_bot_router)
 
 
