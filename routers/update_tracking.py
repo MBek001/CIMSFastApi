@@ -5,17 +5,18 @@ Automatic daily update tracking from Telegram channel
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, desc, insert, update as sql_update
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dt_time, timezone
 import calendar
 from typing import Optional, Dict, List
 from pydantic import BaseModel
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, ReactionTypeEmoji
+from zoneinfo import ZoneInfo
 
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
 from models.admin_models import (
     daily_update_log, department, user_department,
-    missed_update_notification, update_config
+    missed_update_notification
 )
 from models.user_models import user
 from utils.update_parser import (
@@ -36,6 +37,14 @@ import os
 load_dotenv()
 
 bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
+
+DEFAULT_UPDATE_ACCEPT_HOUR_NEXT_DAY = 4
+try:
+    UPDATE_TRACKING_TIMEZONE = ZoneInfo(
+        os.getenv("UPDATE_TRACKING_TIMEZONE", "Asia/Tashkent")
+    )
+except Exception:
+    UPDATE_TRACKING_TIMEZONE = timezone(timedelta(hours=5))
 
 # ========================================
 # PYDANTIC MODELS
@@ -155,6 +164,37 @@ def get_date_ranges():
         'last_month_end': last_month_end,
         'three_months_ago': three_months_ago
     }
+
+
+def get_update_accept_hour_next_day() -> int:
+    """Get cutoff hour for accepting previous day updates (default: 4)."""
+    hour = os.getenv("UPDATE_ACCEPT_HOUR_NEXT_DAY", str(DEFAULT_UPDATE_ACCEPT_HOUR_NEXT_DAY))
+    try:
+        parsed_hour = int(hour)
+    except (TypeError, ValueError):
+        return DEFAULT_UPDATE_ACCEPT_HOUR_NEXT_DAY
+
+    if 0 <= parsed_hour <= 23:
+        return parsed_hour
+    return DEFAULT_UPDATE_ACCEPT_HOUR_NEXT_DAY
+
+
+def compute_update_deadline(update_day: date, cutoff_hour: int) -> datetime:
+    """
+    Accept updates for `update_day` until next day `cutoff_hour:59:59`.
+    Example: update_day=2026-03-09, cutoff_hour=4 -> deadline=2026-03-10 04:59:59.
+    """
+    deadline_day = update_day + timedelta(days=1)
+    return datetime.combine(
+        deadline_day,
+        dt_time(hour=cutoff_hour, minute=59, second=59),
+        tzinfo=UPDATE_TRACKING_TIMEZONE
+    )
+
+
+def is_update_within_acceptance_window(update_day: date, submitted_at: datetime, cutoff_hour: int) -> tuple[bool, datetime]:
+    deadline = compute_update_deadline(update_day, cutoff_hour)
+    return submitted_at <= deadline, deadline
 
 
 async def calculate_update_percentage(
@@ -636,6 +676,31 @@ async def telegram_webhook(
                  f"{get_update_template_text()}"
         )
         return {"status": "error", "reason": "parser_failed"}
+
+    cutoff_hour = get_update_accept_hour_next_day()
+    submitted_at = datetime.now(UPDATE_TRACKING_TIMEZONE)
+    is_in_window, deadline_at = is_update_within_acceptance_window(
+        parsed['update_date'],
+        submitted_at,
+        cutoff_hour
+    )
+    if not is_in_window:
+        await bot.send_message(
+            chat_id=message.chat.id,
+            text=(
+                "⏰ Bu sana uchun update yuborish vaqti tugagan.\n\n"
+                f"Update sanasi: {parsed['update_date']}\n"
+                f"Oxirgi muddat: {deadline_at.strftime('%Y-%m-%d %H:%M')} "
+                f"({deadline_at.tzname() or 'local time'})\n\n"
+                "Iltimos, bugungi sana uchun yangilanish yuboring."
+            )
+        )
+        return {
+            "status": "error",
+            "reason": "submission_deadline_passed",
+            "update_date": str(parsed['update_date']),
+            "deadline_at": deadline_at.isoformat()
+        }
 
     # Find user by telegram username
     user_id = await find_user_by_telegram_username(
@@ -1314,4 +1379,3 @@ async def get_company_stats(
         avg_percentage_this_month=round(avg_perc_month, 1),
         avg_percentage_last_3_months=round(avg_perc_3_months, 1)
     )
-

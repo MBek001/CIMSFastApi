@@ -313,6 +313,8 @@ async def crm_dashboard(
         search: Optional[str] = Query(None, description="Qidiruv so'zi"),
         status_filter: Optional[CustomerStatus] = Query(None, description="Status bo'yicha filter"),
         show_all: bool = Query(False, description="Barcha mijozlarni ko'rsatish"),
+        page: int = Query(1, ge=1, description="Sahifa raqami"),
+        page_size: int = Query(50, ge=1, le=50, description="Sahifadagi mijozlar soni (max 50)"),
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
@@ -400,6 +402,12 @@ async def crm_dashboard(
             "created_at": c.created_at.isoformat()
         })
 
+    total_items = len(filtered_customers)
+    total_pages = (total_items + page_size - 1) // page_size if total_items > 0 else 0
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    paginated_customers = filtered_customers[start_idx:end_idx]
+
     # СЂСџвЂќв„– Statistikalarni hisoblash (o'zgarmaydi)
     status_stats_result = await session.execute(
         select(
@@ -469,7 +477,11 @@ async def crm_dashboard(
     period_stats = period_stats_result.fetchone()
 
     return CustomerListResponse(
-        customers=filtered_customers,  # СЂСџСџСћ Deshifrlangan va filterlangan ro'yxat
+        customers=paginated_customers,  # Deshifrlangan, filterlangan va sahifalangan ro'yxat
+        page=page,
+        page_size=page_size,
+        total_items=total_items,
+        total_pages=total_pages,
         status_stats={
             "total_customers": stats.total_customers,
             "need_to_call": stats.need_to_call,

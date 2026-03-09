@@ -528,7 +528,11 @@ async def get_all_updates(
         .where(
             and_(
                 user.c.is_active == True,
-                or_(user.c.role.is_(None), user.c.role != UserRole.customer)
+                or_(
+                    user.c.role.is_(None),
+                    and_(user.c.role != UserRole.customer, user.c.role != UserRole.CEO)
+                ),
+                func.lower(func.coalesce(user.c.company_code, "")) != "ceo"
             )
         )
         .order_by(user.c.name, user.c.surname)

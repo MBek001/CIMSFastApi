@@ -126,6 +126,10 @@ class CustomerStatsResponse(BaseModel):
 
 class CustomerListResponse(BaseModel):
     customers: List[CustomerResponse]
+    page: int = Field(..., description="Joriy sahifa raqami")
+    page_size: int = Field(..., description="Har bir sahifadagi yozuvlar soni")
+    total_items: int = Field(..., description="Filterdan keyingi jami yozuvlar soni")
+    total_pages: int = Field(..., description="Jami sahifalar soni")
     status_stats: Dict[str, int] = Field(..., description="Status bo'yicha statistika")
     status_dict: Dict[str, int] = Field(..., description="Status soni")
     status_percentages: Dict[str, float] = Field(..., description="Status foizlari")

@@ -2,11 +2,12 @@
 CRM Sales Manager Extension
 Sales Manager assignment and conversion rate tracking
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, insert, update, delete, func, desc
-from datetime import datetime
+from sqlalchemy import select, insert, update, delete, func, desc, and_, or_
+from datetime import datetime, date, timezone, timedelta
 from typing import List
+from zoneinfo import ZoneInfo
 
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
@@ -15,6 +16,7 @@ from models.admin_models import (
     customer,
     sales_manager_assignment,
     sales_manager_counter,
+    customer_status_change_log,
     CustomerStatus
 )
 from schemes.schemes_management import (
@@ -25,6 +27,7 @@ from schemes.schemes_management import (
 )
 
 router = APIRouter(prefix="/crm", tags=["CRM - Sales Manager"])
+UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
 
 
 # ========================================
@@ -361,3 +364,211 @@ async def maybe_auto_assign_sales_manager(customer_id: int, session: AsyncSessio
     except HTTPException:
         # No sales managers available - skip auto-assignment
         pass
+
+
+@router.get("/sales-manager/stats", summary="Sales Manager status o'zgarish statistikasi (davr bo'yicha)")
+async def get_sales_manager_status_stats(
+    from_date: date | None = Query(None, description="Boshlanish sana (YYYY-MM-DD). Default: bugun"),
+    to_date: date | None = Query(None, description="Tugash sana (YYYY-MM-DD). Default: bugun"),
+    sales_manager_id: int | None = Query(None, description="CEO uchun ixtiyoriy: konkret sales manager ID"),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Sales manager uchun davr bo'yicha real status-change statistikasi.
+    Ma'lumot customer_status_change_log asosida hisoblanadi.
+    """
+    is_ceo = (current_user.role == UserRole.CEO) or (str(getattr(current_user, "company_code", "")).lower() == "ceo")
+    is_sales_manager = current_user.role == UserRole.sales_manager
+
+    if sales_manager_id is not None:
+        if not is_ceo and current_user.id != sales_manager_id:
+            raise HTTPException(status_code=403, detail="Faqat CEO boshqa sales manager statistikasini ko'ra oladi")
+        target_sales_manager_id = sales_manager_id
+    else:
+        if is_sales_manager:
+            target_sales_manager_id = current_user.id
+        elif is_ceo:
+            managers_result = await session.execute(
+                select(user.c.id)
+                .where(
+                    and_(
+                        user.c.role == UserRole.sales_manager,
+                        user.c.is_active == True
+                    )
+                )
+                .order_by(user.c.id.asc())
+            )
+            managers = managers_result.fetchall()
+            if not managers:
+                raise HTTPException(status_code=404, detail="Faol sales manager topilmadi")
+            if len(managers) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Bir nechta sales manager bor. sales_manager_id parameter yuboring."
+                )
+            target_sales_manager_id = managers[0].id
+        else:
+            raise HTTPException(status_code=403, detail="Bu statistika faqat sales manager yoki CEO uchun")
+
+    manager_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.email)
+        .where(
+            and_(
+                user.c.id == target_sales_manager_id,
+                user.c.role == UserRole.sales_manager,
+                user.c.is_active == True
+            )
+        )
+    )
+    manager = manager_result.fetchone()
+    if not manager:
+        raise HTTPException(status_code=404, detail="Sales manager topilmadi yoki faol emas")
+
+    today_uz = datetime.now(UZBEKISTAN_TZ).date()
+    period_from = from_date or today_uz
+    period_to = to_date or today_uz
+    if period_from > period_to:
+        raise HTTPException(status_code=400, detail="from_date to_date'dan katta bo'lishi mumkin emas")
+
+    start_uz = datetime(period_from.year, period_from.month, period_from.day, tzinfo=UZBEKISTAN_TZ)
+    end_next_uz = datetime(period_to.year, period_to.month, period_to.day, tzinfo=UZBEKISTAN_TZ) + timedelta(days=1)
+    start_utc_naive = start_uz.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc_naive = end_next_uz.astimezone(timezone.utc).replace(tzinfo=None)
+
+    assignment_condition = and_(
+        sales_manager_assignment.c.customer_id == customer_status_change_log.c.customer_id,
+        sales_manager_assignment.c.sales_manager_id == target_sales_manager_id,
+        sales_manager_assignment.c.is_active == True,
+        or_(
+            sales_manager_assignment.c.assigned_at.is_(None),
+            customer_status_change_log.c.changed_at >= sales_manager_assignment.c.assigned_at
+        )
+    )
+
+    assigned_count_result = await session.execute(
+        select(func.count(sales_manager_assignment.c.id))
+        .where(
+            and_(
+                sales_manager_assignment.c.sales_manager_id == target_sales_manager_id,
+                sales_manager_assignment.c.is_active == True
+            )
+        )
+    )
+    assigned_customers = assigned_count_result.scalar() or 0
+
+    status_counts_result = await session.execute(
+        select(
+            func.count(customer_status_change_log.c.id).label("total_changes"),
+            func.count(func.distinct(customer_status_change_log.c.customer_id)).label("changed_customers"),
+            func.count(customer_status_change_log.c.id)
+            .filter(customer_status_change_log.c.to_status == CustomerStatus.need_to_call).label("need_to_call"),
+            func.count(customer_status_change_log.c.id)
+            .filter(customer_status_change_log.c.to_status == CustomerStatus.contacted).label("contacted"),
+            func.count(customer_status_change_log.c.id)
+            .filter(customer_status_change_log.c.to_status == CustomerStatus.project_started).label("project_started"),
+            func.count(customer_status_change_log.c.id)
+            .filter(customer_status_change_log.c.to_status == CustomerStatus.continuing).label("continuing"),
+            func.count(customer_status_change_log.c.id)
+            .filter(customer_status_change_log.c.to_status == CustomerStatus.finished).label("finished"),
+            func.count(customer_status_change_log.c.id)
+            .filter(customer_status_change_log.c.to_status == CustomerStatus.rejected).label("rejected")
+        )
+        .select_from(
+            customer_status_change_log.join(
+                sales_manager_assignment,
+                assignment_condition
+            )
+        )
+        .where(
+            and_(
+                customer_status_change_log.c.changed_at >= start_utc_naive,
+                customer_status_change_log.c.changed_at < end_utc_naive
+            )
+        )
+    )
+    row = status_counts_result.fetchone()
+
+    to_status_counts = {
+        "need_to_call": row.need_to_call or 0,
+        "contacted": row.contacted or 0,
+        "project_started": row.project_started or 0,
+        "continuing": row.continuing or 0,
+        "finished": row.finished or 0,
+        "rejected": row.rejected or 0,
+    }
+
+    raw_changes_result = await session.execute(
+        select(
+            customer_status_change_log.c.changed_at,
+            customer_status_change_log.c.to_status
+        )
+        .select_from(
+            customer_status_change_log.join(
+                sales_manager_assignment,
+                assignment_condition
+            )
+        )
+        .where(
+            and_(
+                customer_status_change_log.c.changed_at >= start_utc_naive,
+                customer_status_change_log.c.changed_at < end_utc_naive
+            )
+        )
+        .order_by(customer_status_change_log.c.changed_at.asc())
+    )
+    raw_changes = raw_changes_result.fetchall()
+
+    daily_map = {}
+    for item in raw_changes:
+        changed_at_utc = item.changed_at.replace(tzinfo=timezone.utc)
+        changed_date_uz = changed_at_utc.astimezone(UZBEKISTAN_TZ).date().isoformat()
+        status_key = item.to_status.value if item.to_status else "unknown"
+
+        if changed_date_uz not in daily_map:
+            daily_map[changed_date_uz] = {
+                "date": changed_date_uz,
+                "total_changes": 0,
+                "to_status_counts": {
+                    "need_to_call": 0,
+                    "contacted": 0,
+                    "project_started": 0,
+                    "continuing": 0,
+                    "finished": 0,
+                    "rejected": 0,
+                }
+            }
+
+        daily_map[changed_date_uz]["total_changes"] += 1
+        if status_key in daily_map[changed_date_uz]["to_status_counts"]:
+            daily_map[changed_date_uz]["to_status_counts"][status_key] += 1
+
+    daily_stats = [daily_map[k] for k in sorted(daily_map.keys())]
+
+    total_changes = row.total_changes or 0
+    changed_customers = row.changed_customers or 0
+    conversion_to_project_started = round((to_status_counts["project_started"] / total_changes) * 100, 2) if total_changes else 0.0
+    finish_rate = round((to_status_counts["finished"] / total_changes) * 100, 2) if total_changes else 0.0
+
+    return {
+        "sales_manager": {
+            "id": manager.id,
+            "name": manager.name,
+            "surname": manager.surname,
+            "email": manager.email
+        },
+        "period": {
+            "from_date": period_from.isoformat(),
+            "to_date": period_to.isoformat(),
+            "timezone": "Asia/Tashkent"
+        },
+        "summary": {
+            "assigned_customers": assigned_customers,
+            "changed_customers": changed_customers,
+            "total_status_changes": total_changes,
+            "to_status_counts": to_status_counts,
+            "conversion_to_project_started_percent": conversion_to_project_started,
+            "finish_rate_percent": finish_rate
+        },
+        "daily_stats": daily_stats
+    }
