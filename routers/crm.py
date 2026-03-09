@@ -445,8 +445,8 @@ async def crm_dashboard(
     permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
     page_order = ['ceo', 'payment_list', 'project_toggle', 'crm', 'finance_list']
     modified_permissions = []
-    for page in page_order:
-        if page in permissions:
+    for page_name in page_order:
+        if page_name in permissions:
             mapping = {
                 'ceo': 'Dashboard',
                 'payment_list': 'Payment',
@@ -454,7 +454,7 @@ async def crm_dashboard(
                 'crm': 'Sales CRM',
                 'finance_list': 'Finance'
             }
-            modified_permissions.append(mapping.get(page, page))
+            modified_permissions.append(mapping.get(page_name, page_name))
 
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day)
