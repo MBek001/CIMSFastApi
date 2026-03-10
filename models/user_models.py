@@ -37,6 +37,7 @@ user = Table(
     Column("password", String(255), nullable=False),
     Column("company_code", String(255), default="oddiy"),
     Column("telegram_id", String(50), nullable=True),
+    Column("chat_id", String(64), nullable=True),
     Column("default_salary", DECIMAL(10, 2), default=0.00),
     Column("role", Enum(UserRole), default=UserRole.customer),
     Column("role_name", String(100), nullable=True),  # NEW: Dynamic role from user_role table (optional, for custom roles)

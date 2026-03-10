@@ -6,19 +6,20 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, desc, insert, update as sql_update
 from datetime import datetime, date, timedelta, time as dt_time, timezone
+import asyncio
 import calendar
 from typing import Optional, Dict, List
 from pydantic import BaseModel
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, ReactionTypeEmoji
 from zoneinfo import ZoneInfo
 
-from database import get_async_session
+from database import get_async_session, async_session_maker
 from auth_utils.auth_func import get_current_active_user
 from models.admin_models import (
     daily_update_log, department, user_department,
     missed_update_notification
 )
-from models.user_models import user
+from models.user_models import user, UserRole
 from utils.update_parser import (
     parse_update_message,
     find_user_by_telegram_username,
@@ -45,6 +46,15 @@ try:
     )
 except Exception:
     UPDATE_TRACKING_TIMEZONE = timezone(timedelta(hours=5))
+
+UPDATE_DAILY_NOTIFY_HOUR = int(os.getenv("UPDATE_DAILY_NOTIFY_HOUR", 23))
+UPDATE_DAILY_NOTIFY_MINUTE = int(os.getenv("UPDATE_DAILY_NOTIFY_MINUTE", 59))
+UPDATE_BOT_SCHEDULER_INTERVAL_SECONDS = int(os.getenv("UPDATE_BOT_SCHEDULER_INTERVAL_SECONDS", 30))
+UPDATE_BOT_LINK_TTL_MINUTES = int(os.getenv("UPDATE_BOT_LINK_TTL_MINUTES", 10))
+
+_update_bot_scheduler_task: Optional[asyncio.Task] = None
+_last_daily_notification_date: Optional[date] = None
+_pending_telegram_id_link_chats: dict[int, datetime] = {}
 
 # ========================================
 # PYDANTIC MODELS
@@ -166,6 +176,22 @@ def get_date_ranges():
     }
 
 
+def is_ceo_user(current_user) -> bool:
+    """Allow CEO access by role or company_code (case-insensitive)."""
+    role = getattr(current_user, "role", None)
+    role_name = str(getattr(role, "name", "") or "").strip().lower()
+    role_value = str(getattr(role, "value", "") or "").strip().lower()
+    role_plain = str(role or "").strip().lower()
+    company_code = str(getattr(current_user, "company_code", "") or "").strip().lower()
+
+    return (
+        role_name == "ceo"
+        or role_value == "ceo"
+        or role_plain == "ceo"
+        or company_code == "ceo"
+    )
+
+
 def get_update_accept_hour_next_day() -> int:
     """Get cutoff hour for accepting previous day updates (default: 4)."""
     hour = os.getenv("UPDATE_ACCEPT_HOUR_NEXT_DAY", str(DEFAULT_UPDATE_ACCEPT_HOUR_NEXT_DAY))
@@ -195,6 +221,245 @@ def compute_update_deadline(update_day: date, cutoff_hour: int) -> datetime:
 def is_update_within_acceptance_window(update_day: date, submitted_at: datetime, cutoff_hour: int) -> tuple[bool, datetime]:
     deadline = compute_update_deadline(update_day, cutoff_hour)
     return submitted_at <= deadline, deadline
+
+
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _normalize_telegram_id(raw_value: str) -> str:
+    return raw_value.strip().lstrip("@").lower()
+
+
+def _cleanup_pending_telegram_id_link_chats() -> None:
+    now_utc = datetime.now(timezone.utc)
+    expired_chat_ids = []
+    for chat_id, created_at in _pending_telegram_id_link_chats.items():
+        if (now_utc - created_at).total_seconds() > UPDATE_BOT_LINK_TTL_MINUTES * 60:
+            expired_chat_ids.append(chat_id)
+    for chat_id in expired_chat_ids:
+        _pending_telegram_id_link_chats.pop(chat_id, None)
+
+
+def _mark_chat_waiting_for_link(chat_id: int) -> None:
+    _cleanup_pending_telegram_id_link_chats()
+    _pending_telegram_id_link_chats[chat_id] = datetime.now(timezone.utc)
+
+
+def _is_chat_waiting_for_link(chat_id: int) -> bool:
+    _cleanup_pending_telegram_id_link_chats()
+    return chat_id in _pending_telegram_id_link_chats
+
+
+def _clear_chat_link_wait_state(chat_id: int) -> None:
+    _pending_telegram_id_link_chats.pop(chat_id, None)
+
+
+def _as_telegram_chat_target(chat_id_value: str | int) -> str | int:
+    if isinstance(chat_id_value, str) and chat_id_value.lstrip("-").isdigit():
+        return int(chat_id_value)
+    return chat_id_value
+
+
+async def link_user_chat_id_by_telegram_id(
+    session: AsyncSession,
+    chat_id: int,
+    telegram_id_text: str
+) -> dict:
+    normalized_telegram_id = _normalize_telegram_id(telegram_id_text)
+    if not normalized_telegram_id:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="❌ Telegram ID bo'sh bo'lmasligi kerak. Masalan: `johndoe`",
+            parse_mode="Markdown"
+        )
+        return {"status": "error", "reason": "empty_telegram_id"}
+
+    user_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname)
+        .where(
+            and_(
+                func.lower(user.c.telegram_id) == normalized_telegram_id,
+                user.c.is_active == True
+            )
+        )
+    )
+    user_row = user_result.fetchone()
+    if not user_row:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "❌ Bunday `telegram_id` bazada topilmadi.\n"
+                "Iltimos, to'g'ri ID yuboring (masalan: `johndoe`)."
+            ),
+            parse_mode="Markdown"
+        )
+        return {"status": "error", "reason": "telegram_id_not_found"}
+
+    await session.execute(
+        sql_update(user)
+        .where(user.c.id == user_row.id)
+        .values(chat_id=str(chat_id))
+    )
+    await session.commit()
+
+    _clear_chat_link_wait_state(chat_id)
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"✅ Ulandi: {user_row.name} {user_row.surname}\n"
+            "Endi kunlik update eslatmalari shu chatga yuboriladi."
+        )
+    )
+
+    return {"status": "success", "user_id": user_row.id, "chat_id": str(chat_id)}
+
+
+async def process_daily_update_notifications(
+    session: AsyncSession,
+    target_date: Optional[date] = None
+) -> dict:
+    report_date = target_date or datetime.now(UPDATE_TRACKING_TIMEZONE).date()
+    if report_date.weekday() == 6:
+        return {
+            "date": str(report_date),
+            "skipped": True,
+            "reason": "sunday",
+            "total_users": 0,
+            "sent_success": 0,
+            "sent_failed": 0
+        }
+
+    users_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.chat_id)
+        .where(
+            and_(
+                user.c.is_active == True,
+                or_(user.c.role.is_(None), user.c.role != UserRole.customer),
+                user.c.chat_id.is_not(None),
+                user.c.chat_id != ""
+            )
+        )
+    )
+    users_with_chat = users_result.fetchall()
+
+    if not users_with_chat:
+        return {
+            "date": str(report_date),
+            "skipped": True,
+            "reason": "no_linked_users",
+            "total_users": 0,
+            "sent_success": 0,
+            "sent_failed": 0
+        }
+
+    user_ids = [u.id for u in users_with_chat]
+    submitted_result = await session.execute(
+        select(daily_update_log.c.user_id)
+        .where(
+            and_(
+                daily_update_log.c.update_date == report_date,
+                daily_update_log.c.is_valid == True,
+                daily_update_log.c.user_id.in_(user_ids)
+            )
+        )
+    )
+    submitted_user_ids = {row.user_id for row in submitted_result.fetchall()}
+
+    existing_notif_result = await session.execute(
+        select(
+            missed_update_notification.c.id,
+            missed_update_notification.c.user_id,
+            missed_update_notification.c.notification_sent
+        ).where(
+            and_(
+                missed_update_notification.c.missed_date == report_date,
+                missed_update_notification.c.user_id.in_(user_ids)
+            )
+        )
+    )
+    existing_notif_map = {row.user_id: row for row in existing_notif_result.fetchall()}
+
+    sent_success = 0
+    sent_failed = 0
+
+    for u in users_with_chat:
+        existing_log = existing_notif_map.get(u.id)
+        if existing_log and existing_log.notification_sent:
+            continue
+
+        has_update = u.id in submitted_user_ids
+        if has_update:
+            message_text = (
+                f"✅ {report_date} sanasi uchun update berganingiz uchun rahmat!"
+            )
+        else:
+            message_text = (
+                f"⚠️ Kechirasiz, {report_date} sanasi uchun update bermadingiz."
+            )
+
+        notification_sent = False
+        try:
+            await bot.send_message(
+                chat_id=_as_telegram_chat_target(u.chat_id),
+                text=message_text
+            )
+            notification_sent = True
+            sent_success += 1
+        except Exception as exc:
+            print(f"[update-tracking] daily notify error user_id={u.id}: {exc}")
+            sent_failed += 1
+
+        if existing_log:
+            await session.execute(
+                sql_update(missed_update_notification)
+                .where(missed_update_notification.c.id == existing_log.id)
+                .values(
+                    notification_sent=notification_sent,
+                    notified_at=_utc_now_naive()
+                )
+            )
+        else:
+            await session.execute(
+                insert(missed_update_notification).values(
+                    user_id=u.id,
+                    missed_date=report_date,
+                    notification_sent=notification_sent,
+                    notified_at=_utc_now_naive()
+                )
+            )
+
+    await session.commit()
+
+    return {
+        "date": str(report_date),
+        "skipped": False,
+        "total_users": len(users_with_chat),
+        "submitted_count": len(submitted_user_ids),
+        "sent_success": sent_success,
+        "sent_failed": sent_failed
+    }
+
+
+async def _update_bot_scheduler_loop() -> None:
+    global _last_daily_notification_date
+    while True:
+        try:
+            now_local = datetime.now(UPDATE_TRACKING_TIMEZONE)
+            if (
+                now_local.weekday() != 6
+                and now_local.hour == UPDATE_DAILY_NOTIFY_HOUR
+                and now_local.minute == UPDATE_DAILY_NOTIFY_MINUTE
+                and _last_daily_notification_date != now_local.date()
+            ):
+                async with async_session_maker() as session:
+                    await process_daily_update_notifications(session, target_date=now_local.date())
+                _last_daily_notification_date = now_local.date()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[update-tracking] scheduler error: {exc}")
+        await asyncio.sleep(UPDATE_BOT_SCHEDULER_INTERVAL_SECONDS)
 
 
 async def calculate_update_percentage(
@@ -628,6 +893,36 @@ async def set_message_reaction_safe(chat_id: int, message_id: int, emoji: str):
         print(f"Error setting message reaction: {e}")
 
 
+@router.on_event("startup")
+async def start_update_tracking_scheduler() -> None:
+    global _update_bot_scheduler_task
+    if _update_bot_scheduler_task is None or _update_bot_scheduler_task.done():
+        _update_bot_scheduler_task = asyncio.create_task(_update_bot_scheduler_loop())
+
+
+@router.on_event("shutdown")
+async def stop_update_tracking_scheduler() -> None:
+    global _update_bot_scheduler_task
+    if _update_bot_scheduler_task and not _update_bot_scheduler_task.done():
+        _update_bot_scheduler_task.cancel()
+        try:
+            await _update_bot_scheduler_task
+        except asyncio.CancelledError:
+            pass
+
+
+@router.post("/process-daily-notifications", summary="Kunlik update xabarlarini majburan ishga tushirish")
+async def run_daily_update_notifications(
+    target_date: Optional[date] = None,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Only CEO can run this")
+    stats = await process_daily_update_notifications(session=session, target_date=target_date)
+    return {"status": "ok", "stats": stats}
+
+
 @router.post("/telegram-webhook", summary="Telegram bot webhook")
 async def telegram_webhook(
     payload: TelegramWebhookPayload,
@@ -656,11 +951,38 @@ async def telegram_webhook(
         if text.startswith('/admin'):
             result = await handle_admin_command(message, session)
             return result if result else {"status": "ignored"}
+        if text.startswith('/start'):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 2 and parts[1].strip():
+                return await link_user_chat_id_by_telegram_id(
+                    session=session,
+                    chat_id=message.chat.id,
+                    telegram_id_text=parts[1].strip()
+                )
+
+            _mark_chat_waiting_for_link(message.chat.id)
+            await bot.send_message(
+                chat_id=message.chat.id,
+                text=(
+                    "👋 Salom!\n"
+                    "Iltimos, `telegram_id` kiriting (masalan: `johndoe`).\n\n"
+                    "Yoki /start johndoe ko'rinishida ham yuborishingiz mumkin."
+                ),
+                parse_mode="Markdown"
+            )
+            return {"status": "waiting_for_telegram_id"}
         return {"status": "ignored", "reason": "Unknown command"}
 
     # 2. Month selection (admin keyboard)
     if await is_month_selection(text):
         return await handle_month_selection(text, message, session)
+
+    if _is_chat_waiting_for_link(message.chat.id):
+        return await link_user_chat_id_by_telegram_id(
+            session=session,
+            chat_id=message.chat.id,
+            telegram_id_text=text
+        )
 
     # 3. '#' bo'lmagan xabarlarga javob bermaymiz
     if '#' not in text:
@@ -1235,6 +1557,79 @@ async def get_recent_updates(
     ]
 
 
+@router.get("/employee-monthly-updates", summary="Get employee monthly updates with message texts")
+async def get_employee_monthly_updates(
+    employee_id: int,
+    year: int,
+    month: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """CEO endpoint: get all update messages for an employee in a given year/month."""
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Only CEO can access this")
+
+    if year < 2000 or year > 2100:
+        raise HTTPException(status_code=400, detail="year must be between 2000 and 2100")
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="month must be between 1 and 12")
+
+    employee_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.is_active)
+        .where(user.c.id == employee_id)
+    )
+    employee = employee_result.fetchone()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    month_start = date(year, month, 1)
+    month_end = date(year, month, calendar.monthrange(year, month)[1])
+
+    updates_result = await session.execute(
+        select(
+            daily_update_log.c.id,
+            daily_update_log.c.update_date,
+            daily_update_log.c.update_content,
+            daily_update_log.c.is_valid,
+            daily_update_log.c.created_at
+        )
+        .where(
+            and_(
+                daily_update_log.c.user_id == employee_id,
+                daily_update_log.c.update_date >= month_start,
+                daily_update_log.c.update_date <= month_end
+            )
+        )
+        .order_by(daily_update_log.c.update_date.asc(), daily_update_log.c.created_at.asc())
+    )
+    rows = updates_result.fetchall()
+
+    return {
+        "employee": {
+            "id": employee.id,
+            "full_name": f"{employee.name} {employee.surname}",
+            "is_active": bool(employee.is_active),
+        },
+        "period": {
+            "year": year,
+            "month": month,
+            "from": str(month_start),
+            "to": str(month_end),
+        },
+        "total_updates": len(rows),
+        "updates": [
+            {
+                "id": row.id,
+                "update_date": str(row.update_date),
+                "update_content": row.update_content,
+                "is_valid": row.is_valid,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ],
+    }
+
+
 @router.get("/missing", summary="Get users with missing updates")
 async def get_missing_updates(
     date_check: Optional[date] = None,
@@ -1242,7 +1637,7 @@ async def get_missing_updates(
     current_user=Depends(get_current_active_user)
 ):
     """Get list of users who haven't submitted updates for a specific date (default: today)"""
-    if current_user.company_code != "ceo":
+    if not is_ceo_user(current_user):
         raise HTTPException(status_code=403, detail="Only CEO can access this")
 
     check_date = date_check or date.today()
@@ -1253,7 +1648,7 @@ async def get_missing_updates(
         .where(
             and_(
                 user.c.is_active == True,
-                user.c.role != 'Customer'  # Exclude customers
+                or_(user.c.role.is_(None), user.c.role != UserRole.customer)
             )
         )
     )
@@ -1297,7 +1692,7 @@ async def get_company_stats(
     current_user=Depends(get_current_active_user)
 ):
     """Get company-wide update statistics (CEO only)"""
-    if current_user.company_code != "ceo":
+    if not is_ceo_user(current_user):
         raise HTTPException(status_code=403, detail="Only CEO can access this")
 
     dates = get_date_ranges()
