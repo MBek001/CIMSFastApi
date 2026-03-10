@@ -5,7 +5,14 @@ from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, HTTPException, Depends, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, insert, update, delete, func, and_, or_
-from models.user_models import user_page_permission, monthly_update, user, monthly_penalty, UserRole
+from models.user_models import (
+    user_page_permission,
+    monthly_update,
+    user,
+    monthly_penalty,
+    monthly_bonus,
+    UserRole,
+)
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
 
@@ -94,18 +101,73 @@ def is_ceo_user(current_user) -> bool:
     )
 
 
-def calculate_salary_estimate(base_salary: Decimal, total_penalty_points: Decimal) -> dict:
+def calculate_salary_estimate(
+    base_salary: Decimal,
+    total_penalty_points: Decimal,
+    total_bonus_amount: Decimal = Decimal("0")
+) -> dict:
     clamped_penalty = min(max(total_penalty_points, Decimal("0")), Decimal("100"))
     deduction_amount = (base_salary * clamped_penalty / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    estimated_salary = (base_salary - deduction_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    salary_after_penalty = (base_salary - deduction_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    salary_after_penalty = max(salary_after_penalty, Decimal("0"))
+    final_salary = (salary_after_penalty + total_bonus_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     return {
         "base_salary": as_money(base_salary),
         "total_penalty_points": as_money(total_penalty_points),
         "penalty_percentage": as_money(clamped_penalty),
         "deduction_amount": as_money(deduction_amount),
-        "estimated_salary": as_money(max(estimated_salary, Decimal("0")))
+        "salary_after_penalty": as_money(salary_after_penalty),
+        "total_bonus_amount": as_money(total_bonus_amount),
+        "final_salary": as_money(final_salary),
+        "estimated_salary": as_money(final_salary)
     }
+
+
+async def get_penalty_bonus_maps(
+    session: AsyncSession,
+    user_ids: List[int],
+    year: int,
+    month: int
+):
+    if not user_ids:
+        return {}, {}
+
+    penalties_result = await session.execute(
+        select(
+            monthly_penalty.c.user_id,
+            func.coalesce(func.sum(monthly_penalty.c.penalty_points), 0).label("total_penalty_points"),
+            func.count(monthly_penalty.c.id).label("penalties_count"),
+        )
+        .where(
+            and_(
+                monthly_penalty.c.user_id.in_(user_ids),
+                monthly_penalty.c.year == year,
+                monthly_penalty.c.month == month,
+            )
+        )
+        .group_by(monthly_penalty.c.user_id)
+    )
+    penalty_map = {row.user_id: row for row in penalties_result.fetchall()}
+
+    bonuses_result = await session.execute(
+        select(
+            monthly_bonus.c.user_id,
+            func.coalesce(func.sum(monthly_bonus.c.bonus_amount), 0).label("total_bonus_amount"),
+            func.count(monthly_bonus.c.id).label("bonuses_count"),
+        )
+        .where(
+            and_(
+                monthly_bonus.c.user_id.in_(user_ids),
+                monthly_bonus.c.year == year,
+                monthly_bonus.c.month == month,
+            )
+        )
+        .group_by(monthly_bonus.c.user_id)
+    )
+    bonus_map = {row.user_id: row for row in bonuses_result.fetchall()}
+
+    return penalty_map, bonus_map
 
 
 @router.post("/member/penalties/add", summary="Employee uchun oylik jarima ball qo'shish")
@@ -159,6 +221,157 @@ async def add_member_penalty(
     }
 
 
+@router.put("/member/penalties/{penalty_id}", summary="Jarimani to'liq tahrirlash")
+async def edit_member_penalty(
+    penalty_id: int,
+    year: int = Query(..., ge=2020, le=2035),
+    month: int = Query(..., ge=1, le=12),
+    penalty_points: float = Query(..., gt=0, le=100),
+    reason: Optional[str] = None,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    permission_check = await session.execute(
+        select(user_page_permission).where(
+            user_page_permission.c.user_id == current_user.id,
+            user_page_permission.c.page_name == "update_list"
+        )
+    )
+    if not permission_check.fetchone():
+        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yo‘q")
+
+    result = await session.execute(
+        update(monthly_penalty)
+        .where(monthly_penalty.c.id == penalty_id)
+        .values(
+            year=year,
+            month=month,
+            penalty_points=Decimal(str(penalty_points)),
+            reason=reason
+        )
+    )
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Jarima topilmadi")
+
+    return {"message": "Jarima muvaffaqiyatli yangilandi", "penalty_id": penalty_id}
+
+
+@router.delete("/member/penalties/{penalty_id}", summary="Jarimani o'chirish")
+async def delete_member_penalty(
+    penalty_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    permission_check = await session.execute(
+        select(user_page_permission).where(
+            user_page_permission.c.user_id == current_user.id,
+            user_page_permission.c.page_name == "update_list"
+        )
+    )
+    if not permission_check.fetchone():
+        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yo‘q")
+
+    result = await session.execute(
+        delete(monthly_penalty).where(monthly_penalty.c.id == penalty_id)
+    )
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Jarima topilmadi")
+
+    return {"message": "Jarima o‘chirildi", "penalty_id": penalty_id}
+
+
+@router.post("/member/bonuses/add", summary="CEO tomonidan bonus qo'shish")
+async def add_member_bonus(
+    user_id: int,
+    year: int = Query(..., ge=2020, le=2035),
+    month: int = Query(..., ge=1, le=12),
+    bonus_amount: float = Query(..., gt=0),
+    reason: Optional[str] = None,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Faqat CEO bonus qo'sha oladi")
+
+    user_result = await session.execute(select(user.c.id).where(user.c.id == user_id))
+    if not user_result.fetchone():
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+
+    result = await session.execute(
+        insert(monthly_bonus)
+        .values(
+            user_id=user_id,
+            year=year,
+            month=month,
+            bonus_amount=Decimal(str(bonus_amount)),
+            reason=reason,
+            created_by=current_user.id,
+            created_at=datetime.now()
+        )
+        .returning(monthly_bonus.c.id)
+    )
+    bonus_id = result.scalar()
+    await session.commit()
+
+    return {
+        "message": "Bonus muvaffaqiyatli qo'shildi",
+        "bonus_id": bonus_id,
+        "user_id": user_id,
+        "year": year,
+        "month": month,
+        "bonus_amount": bonus_amount
+    }
+
+
+@router.put("/member/bonuses/{bonus_id}", summary="Bonusni tahrirlash")
+async def edit_member_bonus(
+    bonus_id: int,
+    year: int = Query(..., ge=2020, le=2035),
+    month: int = Query(..., ge=1, le=12),
+    bonus_amount: float = Query(..., gt=0),
+    reason: Optional[str] = None,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Faqat CEO bonusni tahrirlay oladi")
+
+    result = await session.execute(
+        update(monthly_bonus)
+        .where(monthly_bonus.c.id == bonus_id)
+        .values(
+            year=year,
+            month=month,
+            bonus_amount=Decimal(str(bonus_amount)),
+            reason=reason
+        )
+    )
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Bonus topilmadi")
+
+    return {"message": "Bonus muvaffaqiyatli yangilandi", "bonus_id": bonus_id}
+
+
+@router.delete("/member/bonuses/{bonus_id}", summary="Bonusni o'chirish")
+async def delete_member_bonus(
+    bonus_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Faqat CEO bonusni o'chira oladi")
+
+    result = await session.execute(delete(monthly_bonus).where(monthly_bonus.c.id == bonus_id))
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Bonus topilmadi")
+
+    return {"message": "Bonus o‘chirildi", "bonus_id": bonus_id}
+
+
 @router.get("/member/salary-estimate", summary="Tanlangan oy uchun taxminiy oylik hisoblash")
 async def get_member_salary_estimate(
     user_id: int,
@@ -205,8 +418,30 @@ async def get_member_salary_estimate(
     for row in penalty_rows:
         total_penalty_points += Decimal(str(row.penalty_points or 0))
 
+    bonuses_result = await session.execute(
+        select(
+            monthly_bonus.c.id,
+            monthly_bonus.c.bonus_amount,
+            monthly_bonus.c.reason,
+            monthly_bonus.c.created_at
+        )
+        .where(
+            and_(
+                monthly_bonus.c.user_id == user_id,
+                monthly_bonus.c.year == year,
+                monthly_bonus.c.month == month
+            )
+        )
+        .order_by(monthly_bonus.c.created_at.asc())
+    )
+    bonus_rows = bonuses_result.fetchall()
+
+    total_bonus_amount = Decimal("0")
+    for row in bonus_rows:
+        total_bonus_amount += Decimal(str(row.bonus_amount or 0))
+
     base_salary = Decimal(str(user_data.default_salary or 0))
-    estimate = calculate_salary_estimate(base_salary, total_penalty_points)
+    estimate = calculate_salary_estimate(base_salary, total_penalty_points, total_bonus_amount)
 
     return {
         "user": {
@@ -226,6 +461,16 @@ async def get_member_salary_estimate(
                 "created_at": row.created_at.isoformat() if row.created_at else None
             }
             for row in penalty_rows
+        ],
+        "bonuses_count": len(bonus_rows),
+        "bonuses": [
+            {
+                "id": row.id,
+                "bonus_amount": float(row.bonus_amount or 0),
+                "reason": row.reason,
+                "created_at": row.created_at.isoformat() if row.created_at else None
+            }
+            for row in bonus_rows
         ],
         "salary_estimate": estimate
     }
@@ -263,43 +508,39 @@ async def get_members_salary_estimates(
     users_result = await session.execute(users_query)
     users_rows = users_result.fetchall()
 
-    penalties_query = select(
-        monthly_penalty.c.user_id,
-        func.coalesce(func.sum(monthly_penalty.c.penalty_points), 0).label("total_penalty_points"),
-        func.count(monthly_penalty.c.id).label("penalties_count")
-    ).where(
-        and_(
-            monthly_penalty.c.year == year,
-            monthly_penalty.c.month == month
-        )
-    ).group_by(monthly_penalty.c.user_id)
-
-    if selected_employee_ids:
-        penalties_query = penalties_query.where(monthly_penalty.c.user_id.in_(selected_employee_ids))
-
-    penalties_result = await session.execute(penalties_query)
-    penalties_map = {row.user_id: row for row in penalties_result.fetchall()}
+    penalty_map, bonus_map = await get_penalty_bonus_maps(
+        session=session,
+        user_ids=[row.id for row in users_rows],
+        year=year,
+        month=month
+    )
 
     employees = []
     total_base_salary = Decimal("0")
-    total_estimated_salary = Decimal("0")
+    total_final_salary = Decimal("0")
     total_deduction = Decimal("0")
+    total_bonus = Decimal("0")
 
     for row in users_rows:
         base_salary = Decimal(str(row.default_salary or 0))
-        penalty_row = penalties_map.get(row.id)
+        penalty_row = penalty_map.get(row.id)
+        bonus_row = bonus_map.get(row.id)
         total_penalty_points = Decimal(str(penalty_row.total_penalty_points if penalty_row else 0))
         penalties_count = int(penalty_row.penalties_count) if penalty_row else 0
+        total_bonus_amount = Decimal(str(bonus_row.total_bonus_amount if bonus_row else 0))
+        bonuses_count = int(bonus_row.bonuses_count) if bonus_row else 0
 
-        estimate = calculate_salary_estimate(base_salary, total_penalty_points)
+        estimate = calculate_salary_estimate(base_salary, total_penalty_points, total_bonus_amount)
         total_base_salary += Decimal(str(estimate["base_salary"]))
-        total_estimated_salary += Decimal(str(estimate["estimated_salary"]))
+        total_final_salary += Decimal(str(estimate["final_salary"]))
         total_deduction += Decimal(str(estimate["deduction_amount"]))
+        total_bonus += Decimal(str(estimate["total_bonus_amount"]))
 
         employees.append({
             "user_id": row.id,
             "full_name": f"{row.name} {row.surname}",
             "penalties_count": penalties_count,
+            "bonuses_count": bonuses_count,
             "salary_estimate": estimate
         })
 
@@ -315,7 +556,9 @@ async def get_members_salary_estimates(
             "employees_count": len(employees),
             "total_base_salary": as_money(total_base_salary),
             "total_deduction_amount": as_money(total_deduction),
-            "total_estimated_salary": as_money(total_estimated_salary)
+            "total_bonus_amount": as_money(total_bonus),
+            "total_final_salary": as_money(total_final_salary),
+            "total_estimated_salary": as_money(total_final_salary)
         },
         "employees": employees
     }
@@ -382,45 +625,43 @@ async def get_employee_monthly_update_statistics(
         )
         salary_base_map = {row.id: Decimal(str(row.default_salary or 0)) for row in salary_result.fetchall()}
 
-        penalty_result = await session.execute(
-            select(
-                monthly_penalty.c.user_id,
-                func.coalesce(func.sum(monthly_penalty.c.penalty_points), 0).label("total_penalty_points"),
-                func.count(monthly_penalty.c.id).label("penalties_count")
-            )
-            .where(
-                and_(
-                    monthly_penalty.c.user_id.in_(employee_id_list),
-                    monthly_penalty.c.year == year,
-                    monthly_penalty.c.month == month
-                )
-            )
-            .group_by(monthly_penalty.c.user_id)
+        penalty_map, bonus_map = await get_penalty_bonus_maps(
+            session=session,
+            user_ids=employee_id_list,
+            year=year,
+            month=month
         )
-        penalty_map = {row.user_id: row for row in penalty_result.fetchall()}
 
         total_base_salary = Decimal("0")
         total_deduction_amount = Decimal("0")
-        total_estimated_salary = Decimal("0")
+        total_bonus_amount = Decimal("0")
+        total_final_salary = Decimal("0")
 
         for employee_id in employee_id_list:
             base_salary = salary_base_map.get(employee_id, Decimal("0"))
             penalty_row = penalty_map.get(employee_id)
+            bonus_row = bonus_map.get(employee_id)
             total_penalty_points = Decimal(str(penalty_row.total_penalty_points if penalty_row else 0))
             penalties_count = int(penalty_row.penalties_count) if penalty_row else 0
+            total_bonus = Decimal(str(bonus_row.total_bonus_amount if bonus_row else 0))
+            bonuses_count = int(bonus_row.bonuses_count) if bonus_row else 0
 
-            estimate = calculate_salary_estimate(base_salary, total_penalty_points)
+            estimate = calculate_salary_estimate(base_salary, total_penalty_points, total_bonus)
             estimate["penalties_count"] = penalties_count
+            estimate["bonuses_count"] = bonuses_count
             salary_estimate_map[employee_id] = estimate
 
             total_base_salary += Decimal(str(estimate["base_salary"]))
             total_deduction_amount += Decimal(str(estimate["deduction_amount"]))
-            total_estimated_salary += Decimal(str(estimate["estimated_salary"]))
+            total_bonus_amount += Decimal(str(estimate["total_bonus_amount"]))
+            total_final_salary += Decimal(str(estimate["final_salary"]))
 
         salary_summary = {
             "total_base_salary": as_money(total_base_salary),
             "total_deduction_amount": as_money(total_deduction_amount),
-            "total_estimated_salary": as_money(total_estimated_salary)
+            "total_bonus_amount": as_money(total_bonus_amount),
+            "total_final_salary": as_money(total_final_salary),
+            "total_estimated_salary": as_money(total_final_salary)
         }
 
     summary_query = select(
@@ -608,6 +849,31 @@ async def get_all_updates(
         penalties_map[key] = Decimal(str(row.total_penalty_points or 0))
         employee_penalty_periods[row.user_id].add((int(row.year), int(row.month)))
 
+    bonuses_query = (
+        select(
+            monthly_bonus.c.user_id,
+            monthly_bonus.c.year,
+            monthly_bonus.c.month,
+            func.coalesce(func.sum(monthly_bonus.c.bonus_amount), 0).label("total_bonus_amount")
+        )
+        .where(monthly_bonus.c.user_id.in_(employee_id_list))
+        .group_by(monthly_bonus.c.user_id, monthly_bonus.c.year, monthly_bonus.c.month)
+    )
+    if year is not None:
+        bonuses_query = bonuses_query.where(monthly_bonus.c.year == year)
+    if month is not None:
+        bonuses_query = bonuses_query.where(monthly_bonus.c.month == month)
+
+    bonuses_result = await session.execute(bonuses_query)
+    bonus_rows = bonuses_result.fetchall()
+
+    bonuses_map = {}
+    employee_bonus_periods = {employee_id: set() for employee_id in employee_id_list}
+    for row in bonus_rows:
+        key = (row.user_id, int(row.year), int(row.month))
+        bonuses_map[key] = Decimal(str(row.total_bonus_amount or 0))
+        employee_bonus_periods[row.user_id].add((int(row.year), int(row.month)))
+
     monthly_updates_map = {employee_id: {} for employee_id in employee_id_list}
     for row in update_rows:
         if row.user_id not in employee_id_set:
@@ -648,8 +914,9 @@ async def get_all_updates(
     for employee in employee_rows:
         employee_periods = monthly_updates_map.get(employee.id, {})
         penalty_periods = employee_penalty_periods.get(employee.id, set())
+        bonus_periods = employee_bonus_periods.get(employee.id, set())
 
-        merged_keys = set(employee_periods.keys()) | penalty_periods
+        merged_keys = set(employee_periods.keys()) | penalty_periods | bonus_periods
         sorted_keys = sorted(
             merged_keys,
             key=lambda item: (
@@ -668,7 +935,8 @@ async def get_all_updates(
             period_update = employee_periods.get(period_key)
             period_year, period_month = period_key
             total_penalty_points = penalties_map.get((employee.id, period_year, period_month or 0), Decimal("0"))
-            salary_estimate = calculate_salary_estimate(base_salary, total_penalty_points)
+            total_bonus_amount = bonuses_map.get((employee.id, period_year, period_month or 0), Decimal("0"))
+            salary_estimate = calculate_salary_estimate(base_salary, total_penalty_points, total_bonus_amount)
 
             if period_update:
                 reports_count = period_update["reports_count"]
@@ -694,6 +962,7 @@ async def get_all_updates(
                 "reports_count": reports_count,
                 "average_update_percentage": round(float(average_update_percentage), 2),
                 "total_penalty_points": as_money(total_penalty_points),
+                "total_bonus_amount": as_money(total_bonus_amount),
                 "total_salary_amount": as_money(total_salary_amount),
                 "salary_estimate": salary_estimate,
                 "latest_report_date": str(latest_report_date) if latest_report_date else None
