@@ -3,6 +3,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from schemes.schemes_auth import *
 from auth_utils.auth_func import *
 from auth_utils.email_service import email_service
+from auth_utils.telegram_auth_service import telegram_auth_service
 from typing import Optional
 
 from config import VERIFICATION_CODE_EXPIRE_MINUTES, PASSWORD_RESET_EXPIRE_MINUTES
@@ -219,16 +220,23 @@ async def forgot_password(
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_async_session),
 ):
-    result = await session.execute(select(user.c.id).where(user.c.email == request.email))
-    user_id = result.scalar()
-    print(user_id)
+    result = await session.execute(
+        select(user.c.id, user.c.chat_id).where(user.c.email == request.email)
+    )
+    user_row = result.fetchone()
 
-    if user_id:
+    if user_row:
         code = email_service.generate_verification_code()
-        print(code)
-        await db_code_storage.set_code(session, user_id, code, "reset_password")
+        await db_code_storage.set_code(session, user_row.id, code, "reset_password")
 
-        background_tasks.add_task(email_service.send_password_reset_email, request.email, code)
+        if user_row.chat_id:
+            background_tasks.add_task(
+                telegram_auth_service.send_password_reset_code,
+                user_row.chat_id,
+                code,
+            )
+        else:
+            background_tasks.add_task(email_service.send_password_reset_email, request.email, code)
 
     return SuccessResponse(message="Agar email mavjud bo'lsa, parol tiklash kodi yuborildi")
 
