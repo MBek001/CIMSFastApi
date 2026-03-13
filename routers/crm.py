@@ -27,11 +27,14 @@ from  auth_utils.auth_func import get_current_user
 from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
 from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram, validate_audio_file
-from utils.ai_summary import generate_customer_ai_summary
+from utils.ai_summary import generate_customer_ai_summary, infer_recall_time_from_notes_ai
 
 router = APIRouter(prefix="/crm", tags=['Sales CRM'])
 
-UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
+try:
+    UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
+except Exception:
+    UZBEKISTAN_TZ = timezone(timedelta(hours=5), name="Asia/Tashkent")
 
 
 def _to_utc_naive_from_uz(value: Optional[datetime]) -> Optional[datetime]:
@@ -1097,6 +1100,15 @@ async def create_customer_api(
         request: Request,
         session: AsyncSession = Depends(get_async_session)
 ):
+    created_at_uz = datetime.now(UZBEKISTAN_TZ)
+    created_at = created_at_uz.replace(tzinfo=None)
+    resolved_recall_time = customer_data.recall_time
+    if resolved_recall_time is None:
+        resolved_recall_time = await infer_recall_time_from_notes_ai(
+            customer_data.notes,
+            created_at=created_at_uz
+        )
+
     ai_summary = await generate_customer_ai_summary(customer_data.notes)
 
     customer_dict = {
@@ -1108,8 +1120,8 @@ async def create_customer_api(
         "assistant_name": customer_data.assistant_name,
         "notes": customer_data.notes,
         "aisummary": ai_summary,
-        "recall_time": _to_utc_naive_from_uz(customer_data.recall_time),
-        "created_at": datetime.now()
+        "recall_time": _to_utc_naive_from_uz(resolved_recall_time),
+        "created_at": created_at
     }
 
     result = await session.execute(insert(customer).values(**customer_dict))
