@@ -12,6 +12,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 FLEXIBLE_RECALL_OFFSET_MINUTES = 32
+IMMEDIATE_RECALL_OFFSET_MINUTES = 5
 try:
     UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
 except Exception:
@@ -172,6 +173,21 @@ def _contains_flexible_time_phrase(text: str) -> bool:
     return any(phrase in normalized for phrase in phrases)
 
 
+def _contains_immediate_time_phrase(text: str) -> bool:
+    normalized = _normalize_notes(text).lower()
+    phrases = (
+        "hozir",
+        "hazir",
+        "hzir",
+        "right now",
+        "now",
+        "asap",
+        "iloji boricha tez",
+        "tezroq",
+    )
+    return any(phrase in normalized for phrase in phrases)
+
+
 def _fallback_infer_recall_time(notes: str, base_time_uz: datetime) -> Optional[datetime]:
     text = _normalize_notes(notes).lower()
     if not text:
@@ -191,8 +207,11 @@ def _fallback_infer_recall_time(notes: str, base_time_uz: datetime) -> Optional[
             )
             return parsed
 
-    if any(token in text for token in ("hozir", "hazir", "now")):
-        result = base_time_uz.replace(second=0, microsecond=0)
+    if _contains_immediate_time_phrase(text):
+        result = (base_time_uz + timedelta(minutes=IMMEDIATE_RECALL_OFFSET_MINUTES)).replace(
+            second=0,
+            microsecond=0,
+        )
         _debug_recall(f"fallback: immediate time phrase matched -> {result.isoformat()}")
         return result
 
@@ -344,6 +363,14 @@ async def infer_recall_time_from_notes_ai(
         f"ai: start parse base_time={base_time_uz.isoformat()} notes='{cleaned_notes[:220]}'"
     )
 
+    if _contains_immediate_time_phrase(cleaned_notes):
+        result = (base_time_uz + timedelta(minutes=IMMEDIATE_RECALL_OFFSET_MINUTES)).replace(
+            second=0,
+            microsecond=0,
+        )
+        _debug_recall(f"ai: immediate phrase override matched -> {result.isoformat()}")
+        return result
+
     if not api_key:
         _debug_recall("ai: OPENAI_API_KEY missing, switching to fallback")
         return _fallback_infer_recall_time(cleaned_notes, base_time_uz)
@@ -360,7 +387,7 @@ async def infer_recall_time_from_notes_ai(
         "'bir soatdan keyin' => created_at plus 1 hour, "
         "'bugun 21:20' => same date 21:20, "
         "'21:20' => same date 21:20 if still upcoming, otherwise next day 21:20, "
-        "'hozir' => created_at rounded to minute, "
+        "'hozir' => created_at plus 5 minutes, "
         "'istalgan vaqt' => created_at plus 32 minutes, "
         "'9:00 to 18:00' => null."
     )
