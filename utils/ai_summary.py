@@ -18,6 +18,10 @@ except Exception:
     UZBEKISTAN_TZ = timezone(timedelta(hours=5), name="Asia/Tashkent")
 
 
+def _debug_recall(message: str) -> None:
+    print(f"[recall-debug] {message}", flush=True)
+
+
 def _normalize_notes(notes: str) -> str:
     return re.sub(r"\s+", " ", notes).strip()
 
@@ -171,6 +175,7 @@ def _contains_flexible_time_phrase(text: str) -> bool:
 def _fallback_infer_recall_time(notes: str, base_time_uz: datetime) -> Optional[datetime]:
     text = _normalize_notes(notes).lower()
     if not text:
+        _debug_recall("fallback: empty notes, returning None")
         return None
 
     absolute_match = re.search(
@@ -181,10 +186,15 @@ def _fallback_infer_recall_time(notes: str, base_time_uz: datetime) -> Optional[
     if absolute_match:
         parsed = _parse_datetime_value(absolute_match.group(1))
         if parsed:
+            _debug_recall(
+                f"fallback: absolute datetime matched '{absolute_match.group(1)}' -> {parsed.isoformat()}"
+            )
             return parsed
 
     if any(token in text for token in ("hozir", "hazir", "now")):
-        return base_time_uz.replace(second=0, microsecond=0)
+        result = base_time_uz.replace(second=0, microsecond=0)
+        _debug_recall(f"fallback: immediate time phrase matched -> {result.isoformat()}")
+        return result
 
     relative_match = re.search(
         r"(?:(\d+)|bir|one)\s*(soat|hour|kun|day|minute|minut|min|daqiqa)[a-z]*\s*(?:keyin|later)",
@@ -196,36 +206,49 @@ def _fallback_infer_recall_time(notes: str, base_time_uz: datetime) -> Optional[
         amount = int(raw_amount) if raw_amount else 1
         unit = relative_match.group(2).lower()
         if unit in {"soat", "hour"}:
-            return (base_time_uz + timedelta(hours=amount)).replace(second=0, microsecond=0)
+            result = (base_time_uz + timedelta(hours=amount)).replace(second=0, microsecond=0)
+            _debug_recall(f"fallback: relative hour matched amount={amount} -> {result.isoformat()}")
+            return result
         if unit in {"kun", "day"}:
-            return (base_time_uz + timedelta(days=amount)).replace(second=0, microsecond=0)
-        return (base_time_uz + timedelta(minutes=amount)).replace(second=0, microsecond=0)
+            result = (base_time_uz + timedelta(days=amount)).replace(second=0, microsecond=0)
+            _debug_recall(f"fallback: relative day matched amount={amount} -> {result.isoformat()}")
+            return result
+        result = (base_time_uz + timedelta(minutes=amount)).replace(second=0, microsecond=0)
+        _debug_recall(f"fallback: relative minute matched amount={amount} -> {result.isoformat()}")
+        return result
 
     if _contains_flexible_time_phrase(text):
-        return (base_time_uz + timedelta(minutes=FLEXIBLE_RECALL_OFFSET_MINUTES)).replace(
+        result = (base_time_uz + timedelta(minutes=FLEXIBLE_RECALL_OFFSET_MINUTES)).replace(
             second=0,
             microsecond=0,
         )
+        _debug_recall(f"fallback: flexible time matched -> {result.isoformat()}")
+        return result
 
     time_parts = _extract_time_components(text)
     if any(token in text for token in ("ertaga", "zavtra", "tomorrow")) and time_parts:
         hours, minutes = time_parts
-        return (base_time_uz + timedelta(days=1)).replace(
+        result = (base_time_uz + timedelta(days=1)).replace(
             hour=hours,
             minute=minutes,
             second=0,
             microsecond=0,
         )
+        _debug_recall(f"fallback: tomorrow phrase matched -> {result.isoformat()}")
+        return result
 
     if any(token in text for token in ("bugun", "segodnya", "today")) and time_parts:
         hours, minutes = time_parts
-        return base_time_uz.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        result = base_time_uz.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        _debug_recall(f"fallback: today phrase matched -> {result.isoformat()}")
+        return result
 
     if "preferred call time" in text and time_parts:
         hours, minutes = time_parts
         candidate = base_time_uz.replace(hour=hours, minute=minutes, second=0, microsecond=0)
         if candidate < base_time_uz:
             candidate += timedelta(days=1)
+        _debug_recall(f"fallback: preferred call time with clock matched -> {candidate.isoformat()}")
         return candidate
 
     if time_parts and not re.search(r"\b\d{1,2}\s*(?:-|dan|to)\s*\d{1,2}\b", text):
@@ -233,8 +256,10 @@ def _fallback_infer_recall_time(notes: str, base_time_uz: datetime) -> Optional[
         candidate = base_time_uz.replace(hour=hours, minute=minutes, second=0, microsecond=0)
         if candidate < base_time_uz:
             candidate += timedelta(days=1)
+        _debug_recall(f"fallback: generic clock matched -> {candidate.isoformat()}")
         return candidate
 
+    _debug_recall("fallback: no rule matched, returning None")
     return None
 
 
@@ -302,10 +327,12 @@ async def infer_recall_time_from_notes_ai(
     created_at: Optional[datetime] = None,
 ) -> Optional[datetime]:
     if notes is None:
+        _debug_recall("ai: notes is None, returning None")
         return None
 
     cleaned_notes = _normalize_notes(notes)
     if not cleaned_notes:
+        _debug_recall("ai: notes empty after normalize, returning None")
         return None
 
     base_time_uz = _coerce_to_uz_datetime(created_at or datetime.now(UZBEKISTAN_TZ))
@@ -313,7 +340,12 @@ async def infer_recall_time_from_notes_ai(
     model = os.getenv("OPENAI_MODEL", OPENAI_MODEL)
     base_url = os.getenv("OPENAI_BASE_URL", OPENAI_BASE_URL)
 
+    _debug_recall(
+        f"ai: start parse base_time={base_time_uz.isoformat()} notes='{cleaned_notes[:220]}'"
+    )
+
     if not api_key:
+        _debug_recall("ai: OPENAI_API_KEY missing, switching to fallback")
         return _fallback_infer_recall_time(cleaned_notes, base_time_uz)
 
     system_prompt = (
@@ -362,6 +394,7 @@ async def infer_recall_time_from_notes_ai(
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
+            _debug_recall(f"ai: sending request to model={model} base_url={base_url}")
             response = await client.post(
                 f"{base_url.rstrip('/')}/responses",
                 json=payload,
@@ -370,21 +403,34 @@ async def infer_recall_time_from_notes_ai(
             response.raise_for_status()
             data = response.json()
             raw_text = _extract_response_text(data)
+            _debug_recall(f"ai: raw response text='{(raw_text or '')[:220]}'")
             if raw_text:
                 parsed_json = _extract_first_json_object(raw_text)
                 if parsed_json:
+                    _debug_recall(f"ai: parsed json={parsed_json}")
                     recall_time_value = parsed_json.get("recall_time")
                     if recall_time_value in (None, "", "null"):
                         if _contains_flexible_time_phrase(cleaned_notes):
-                            return (
+                            result = (
                                 base_time_uz + timedelta(minutes=FLEXIBLE_RECALL_OFFSET_MINUTES)
                             ).replace(second=0, microsecond=0)
+                            _debug_recall(
+                                f"ai: model returned null but flexible phrase matched -> {result.isoformat()}"
+                            )
+                            return result
+                        _debug_recall("ai: model returned null recall_time")
                         return None
                     parsed_dt = _parse_datetime_value(str(recall_time_value))
                     if parsed_dt:
-                        return parsed_dt.replace(second=0, microsecond=0)
-    except Exception:
-        pass
+                        result = parsed_dt.replace(second=0, microsecond=0)
+                        _debug_recall(f"ai: parsed model recall_time -> {result.isoformat()}")
+                        return result
+                else:
+                    _debug_recall("ai: response text did not contain valid JSON object")
+            else:
+                _debug_recall("ai: response text empty")
+    except Exception as exc:
+        _debug_recall(f"ai: request failed, switching to fallback, error={exc}")
 
     return _fallback_infer_recall_time(cleaned_notes, base_time_uz)
 

@@ -37,6 +37,10 @@ except Exception:
     UZBEKISTAN_TZ = timezone(timedelta(hours=5), name="Asia/Tashkent")
 
 
+def _debug_customer_create(source: str, message: str) -> None:
+    print(f"[customer-create-debug][{source}] {message}", flush=True)
+
+
 def _to_utc_naive_from_uz(value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
         return None
@@ -592,6 +596,11 @@ async def create_customer(
     Status: dinamik status name (string) - masalan: "contacted", "project_started", va hokazo
     Type: "local" yoki "international" - default null
     """
+    _debug_customer_create(
+        "form",
+        f"request received platform={platform} phone={phone_number} notes='{(notes or '')[:220]}' recall_time_input={recall_time}"
+    )
+
     # Huquq tekshiruvi
     permissions_result = await session.execute(
         select(user_page_permission.c.page_name)
@@ -659,6 +668,18 @@ async def create_customer(
             parsed_type = CustomerType.local
 
     ai_summary = await generate_customer_ai_summary(notes)
+    created_at_uz = datetime.now(UZBEKISTAN_TZ)
+    created_at = created_at_uz.replace(tzinfo=None)
+    resolved_recall_time = recall_time
+    if resolved_recall_time is None:
+        resolved_recall_time = await infer_recall_time_from_notes_ai(
+            notes,
+            created_at=created_at_uz
+        )
+    _debug_customer_create(
+        "form",
+        f"resolved recall_time={resolved_recall_time} created_at_uz={created_at_uz.isoformat()}"
+    )
 
     # Mijozni yaratish
     customer_dict = {
@@ -673,13 +694,17 @@ async def create_customer(
         "notes": notes,
         "aisummary": ai_summary,
         "audio_file_id": audio_file_id,
-        "recall_time": _to_utc_naive_from_uz(recall_time),
+        "recall_time": _to_utc_naive_from_uz(resolved_recall_time),
         "conversation_language": conversation_language.value.upper(),
-        "created_at": datetime.now()
+        "created_at": created_at
     }
 
     result = await session.execute(insert(customer).values(**customer_dict))
     await session.commit()
+    _debug_customer_create(
+        "form",
+        f"customer inserted id={result.inserted_primary_key[0]} recall_time_saved={customer_dict['recall_time']}"
+    )
 
     new_customer_id = result.inserted_primary_key[0]
 
@@ -1100,6 +1125,11 @@ async def create_customer_api(
         request: Request,
         session: AsyncSession = Depends(get_async_session)
 ):
+    _debug_customer_create(
+        "api",
+        f"request received platform={customer_data.platform} phone={customer_data.phone_number} notes='{(customer_data.notes or '')[:220]}' recall_time_input={customer_data.recall_time}"
+    )
+
     created_at_uz = datetime.now(UZBEKISTAN_TZ)
     created_at = created_at_uz.replace(tzinfo=None)
     resolved_recall_time = customer_data.recall_time
@@ -1108,6 +1138,10 @@ async def create_customer_api(
             customer_data.notes,
             created_at=created_at_uz
         )
+    _debug_customer_create(
+        "api",
+        f"resolved recall_time={resolved_recall_time} created_at_uz={created_at_uz.isoformat()}"
+    )
 
     ai_summary = await generate_customer_ai_summary(customer_data.notes)
 
@@ -1126,6 +1160,10 @@ async def create_customer_api(
 
     result = await session.execute(insert(customer).values(**customer_dict))
     await session.commit()
+    _debug_customer_create(
+        "api",
+        f"customer inserted id={result.inserted_primary_key[0]} recall_time_saved={customer_dict['recall_time']}"
+    )
 
     return CreateResponse(
         message="Mijoz muvaffaqiyatli yaratildi",
