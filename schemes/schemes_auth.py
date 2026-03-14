@@ -14,6 +14,7 @@ class UserCreate(BaseModel):
     company_code: Optional[str] = "oddiy"
     telegram_id: Optional[str] = None
     role: Optional[UserRole] = UserRole.customer
+    job_title: Optional[str] = None
 
 
 class UserLogin(BaseModel):
@@ -28,6 +29,7 @@ class UserResponse(BaseModel):
     surname: str
     company_code: str
     role: UserRole
+    job_title: Optional[str] = None
     is_active: bool
     permissions: Optional[Dict[str, bool]] = None  # Yangi field qo'shildi
 

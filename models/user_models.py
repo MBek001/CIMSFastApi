@@ -41,6 +41,7 @@ user = Table(
     Column("default_salary", DECIMAL(10, 2), default=0.00),
     Column("role", Enum(UserRole), default=UserRole.customer),
     Column("role_name", String(100), nullable=True),  # NEW: Dynamic role from user_role table (optional, for custom roles)
+    Column("job_title", String(100), nullable=True),
     Column("is_active", Boolean, default=True),
     Column("is_admin", Boolean, default=False),
     Column("is_staff", Boolean, default=False),

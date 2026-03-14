@@ -61,6 +61,7 @@ async def register(
         "company_code": company_code,
         "telegram_id": user_data.telegram_id,
         "role": role,
+        "job_title": user_data.job_title,
         "is_active": False,
         "is_admin": is_admin,
         "is_staff": is_staff,
@@ -296,6 +297,7 @@ async def get_current_user_info(
         surname=current_user.surname,
         company_code=current_user.company_code,
         role=current_user.role,
+        job_title=current_user.job_title,
         is_active=current_user.is_active,
         permissions=permissions_object
     )

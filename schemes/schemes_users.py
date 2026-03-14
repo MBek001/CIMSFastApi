@@ -14,6 +14,7 @@ class UserCreateRequest(BaseModel):
     telegram_id: Optional[str] = None
     default_salary: Optional[Decimal] = Decimal('0.00')
     role: UserRole = UserRole.customer
+    job_title: Optional[str] = None
     is_active: bool = True
 
 class UserUpdateRequest(BaseModel):
@@ -25,6 +26,7 @@ class UserUpdateRequest(BaseModel):
     telegram_id: Optional[str] = None
     default_salary: Optional[Decimal] = None
     role: Optional[UserRole] = None
+    job_title: Optional[str] = None
     is_active: Optional[bool] = None
 
 class UserResponse(BaseModel):
@@ -36,6 +38,7 @@ class UserResponse(BaseModel):
     telegram_id: Optional[str]
     default_salary: Decimal
     role: str
+    job_title: Optional[str]
     is_active: bool
     permissions: List[str] = []
 
@@ -256,6 +259,7 @@ class UserPermissionsOverviewResponse(BaseModel):
     email: str
     name: str
     role: str
+    job_title: Optional[str]
     is_active: bool
     permissions: List[str]
     permissions_display: List[str]

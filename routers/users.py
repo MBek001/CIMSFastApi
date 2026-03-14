@@ -89,6 +89,7 @@ async def ceo_dashboard(
             "telegram_id": user_data.telegram_id,
             "default_salary": float(user_data.default_salary),
             "role": user_data.role.value,
+            "job_title": user_data.job_title,
             "is_active": user_data.is_active,
             "permissions": modified_permissions
         }
@@ -214,6 +215,7 @@ async def create_user(
         "telegram_id": user_data.telegram_id,
         "default_salary": user_data.default_salary,
         "role": user_data.role,
+        "job_title": user_data.job_title,
         "is_active": user_data.is_active
     }
 
@@ -254,6 +256,8 @@ async def update_user(
     for field, value in user_data.dict(exclude_unset=True).items():
         if field == "password" and value:
             update_data[field] = get_password_hash(value)
+        elif field == "job_title":
+            update_data[field] = value
         elif value is not None:
             update_data[field] = value
 
@@ -1033,6 +1037,7 @@ async def get_all_users_permissions_overview(
             "email": user_data.email,
             "name": f"{user_data.name} {user_data.surname}",
             "role": user_data.role.value,
+            "job_title": user_data.job_title,
             "is_active": user_data.is_active,
             "permissions": permissions,
             "permissions_display": modified_permissions,
