@@ -71,3 +71,22 @@ FREECURRENCYAPI_KEY = os.environ.get('FREECURRENCYAPI_KEY')
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
+
+def _as_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Google Calendar sync (optional)
+GOOGLE_CALENDAR_SYNC_ENABLED = _as_bool(os.environ.get("GOOGLE_CALENDAR_SYNC_ENABLED"), False)
+GOOGLE_CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID")
+GOOGLE_CALENDAR_TIMEZONE = os.environ.get("GOOGLE_CALENDAR_TIMEZONE", "Asia/Tashkent")
+GOOGLE_CALENDAR_EVENT_DURATION_MINUTES = int(
+    os.environ.get("GOOGLE_CALENDAR_EVENT_DURATION_MINUTES", 20)
+)
+GOOGLE_CALENDAR_EVENT_COLOR_ID = os.environ.get("GOOGLE_CALENDAR_EVENT_COLOR_ID")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+GOOGLE_SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+GOOGLE_SERVICE_ACCOUNT_SUBJECT = os.environ.get("GOOGLE_SERVICE_ACCOUNT_SUBJECT")

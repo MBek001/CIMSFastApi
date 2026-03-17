@@ -72,6 +72,7 @@ async def initialize_default_roles(session: AsyncSession):
         default_roles = [
             {"name": "ceo", "display_name": "CEO", "description": "Chief Executive Officer", "is_system": True},
             {"name": "financial_director", "display_name": "Financial Director", "description": "Financial Director", "is_system": True},
+            {"name": "general_manager", "display_name": "General Manager", "description": "General Manager", "is_system": True},
             {"name": "sales_manager", "display_name": "Sales Manager", "description": "Sales Manager for CRM", "is_system": True},
             {"name": "member", "display_name": "Member", "description": "Team Member", "is_system": True},
             {"name": "customer", "display_name": "Customer", "description": "Customer/Client", "is_system": True},

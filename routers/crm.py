@@ -28,6 +28,7 @@ from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
 from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram, validate_audio_file
 from utils.ai_summary import generate_customer_ai_summary, infer_recall_time_from_notes_ai
+from utils.google_calendar import sync_customer_recall_event, delete_customer_recall_event
 
 router = APIRouter(prefix="/crm", tags=['Sales CRM'])
 
@@ -39,6 +40,15 @@ except Exception:
 
 def _debug_customer_create(source: str, message: str) -> None:
     print(f"[customer-create-debug][{source}] {message}", flush=True)
+
+
+def _safe_decrypt(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return decrypt_text(value)
+    except Exception:
+        return value
 
 
 def _to_utc_naive_from_uz(value: Optional[datetime]) -> Optional[datetime]:
@@ -99,6 +109,48 @@ def _normalize_customer_status(value) -> Optional[CustomerStatus]:
         return CustomerStatus(value)
     except Exception:
         return None
+
+
+def _calendar_customer_payload(
+    customer_id: int,
+    *,
+    full_name: Optional[str],
+    phone_number: Optional[str],
+    platform: Optional[str],
+    username: Optional[str],
+    assistant_name: Optional[str],
+    notes: Optional[str],
+    recall_time: Optional[datetime],
+    status: Optional[str],
+) -> dict:
+    return {
+        "id": customer_id,
+        "full_name": full_name,
+        "phone_number": phone_number,
+        "platform": platform,
+        "username": username,
+        "assistant_name": assistant_name,
+        "notes": notes,
+        "recall_time": recall_time,
+        "status": status,
+    }
+
+
+async def _sync_customer_calendar_best_effort(customer_data: dict) -> None:
+    try:
+        await sync_customer_recall_event(customer_data)
+    except Exception as exc:
+        print(
+            f"[google-calendar-sync] customer_id={customer_data.get('id')} sync error: {exc}",
+            flush=True,
+        )
+
+
+async def _delete_customer_calendar_best_effort(customer_id: int) -> None:
+    try:
+        await delete_customer_recall_event(customer_id)
+    except Exception as exc:
+        print(f"[google-calendar-sync] customer_id={customer_id} delete error: {exc}", flush=True)
 
 
 async def _log_customer_status_change(
@@ -715,6 +767,20 @@ async def create_customer(
     except Exception:
         pass  # Ignore sales manager assignment errors
 
+    await _sync_customer_calendar_best_effort(
+        _calendar_customer_payload(
+            new_customer_id,
+            full_name=full_name,
+            phone_number=phone_number,
+            platform=platform,
+            username=username,
+            assistant_name=assistant_name,
+            notes=notes,
+            recall_time=customer_dict["recall_time"],
+            status=status_name,
+        )
+    )
+
     return CreateResponse(
         message="Mijoz muvaffaqiyatli yaratildi",
         id=result.inserted_primary_key[0]
@@ -771,6 +837,8 @@ async def update_customer(
             detail="Mijoz topilmadi"
         )
     previous_status = existing_customer.status
+    current_full_name = _safe_decrypt(existing_customer.full_name)
+    current_phone_number = _safe_decrypt(existing_customer.phone_number)
 
     # --- 3. Yangilanadigan ma'lumotlarni tayyorlash ---
     update_data = {}
@@ -829,6 +897,25 @@ async def update_customer(
         )
     await session.commit()
 
+    calendar_recall_time = None if clear_recall_time else update_data.get("recall_time", existing_customer.recall_time)
+    calendar_status = (
+        customer_status.value if customer_status is not None
+        else existing_customer.status_name or existing_customer.status.value
+    )
+    await _sync_customer_calendar_best_effort(
+        _calendar_customer_payload(
+            customer_id,
+            full_name=full_name if full_name is not None else current_full_name,
+            phone_number=phone_number if phone_number is not None else current_phone_number,
+            platform=platform if platform is not None else existing_customer.platform,
+            username=username if username is not None else existing_customer.username,
+            assistant_name=assistant_name if assistant_name is not None else existing_customer.assistant_name,
+            notes=notes if notes is not None else existing_customer.notes,
+            recall_time=calendar_recall_time,
+            status=calendar_status,
+        )
+    )
+
     return SuccessResponse(message="Mijoz ma'lumotlari muvaffaqiyatli yangilandi")
 
 
@@ -873,6 +960,8 @@ async def patch_customer(
     if not existing:
         raise HTTPException(status_code=404, detail="Mijoz topilmadi")
     previous_status = existing.status
+    current_full_name = _safe_decrypt(existing.full_name)
+    current_phone_number = _safe_decrypt(existing.phone_number)
 
     update_data = {}
 
@@ -924,6 +1013,25 @@ async def patch_customer(
         )
     await session.commit()
 
+    calendar_recall_time = None if clear_recall_time else update_data.get("recall_time", existing.recall_time)
+    calendar_status = (
+        customer_status.value if customer_status is not None
+        else existing.status_name or existing.status.value
+    )
+    await _sync_customer_calendar_best_effort(
+        _calendar_customer_payload(
+            customer_id,
+            full_name=full_name if full_name is not None else current_full_name,
+            phone_number=phone_number if phone_number is not None else current_phone_number,
+            platform=platform if platform is not None else existing.platform,
+            username=username if username is not None else existing.username,
+            assistant_name=assistant_name if assistant_name is not None else existing.assistant_name,
+            notes=notes if notes is not None else existing.notes,
+            recall_time=calendar_recall_time,
+            status=calendar_status,
+        )
+    )
+
     return SuccessResponse(message="Mijoz ma'lumotlari qisman yangilandi")
 
 
@@ -968,6 +1076,7 @@ async def delete_customer(
     # Mijozni o'chirish
     await session.execute(delete(customer).where(customer.c.id == customer_id))
     await session.commit()
+    await _delete_customer_calendar_best_effort(customer_id)
 
     return SuccessResponse(message=f"Mijoz {existing_customer.full_name} muvaffaqiyatli o'chirildi")
 
@@ -1101,10 +1210,16 @@ async def bulk_delete_customers(
         )
 
     # Mijozlarni o'chirish
+    customers_result = await session.execute(
+        select(customer.c.id).where(customer.c.id.in_(delete_data.customer_ids))
+    )
+    existing_customer_ids = [row.id for row in customers_result.fetchall()]
     await session.execute(
         delete(customer).where(customer.c.id.in_(delete_data.customer_ids))
     )
     await session.commit()
+    for customer_id in existing_customer_ids:
+        await _delete_customer_calendar_best_effort(customer_id)
 
     return SuccessResponse(message=f"{len(delete_data.customer_ids)} ta mijoz muvaffaqiyatli o'chirildi")
 
@@ -1165,9 +1280,24 @@ async def create_customer_api(
         f"customer inserted id={result.inserted_primary_key[0]} recall_time_saved={customer_dict['recall_time']}"
     )
 
+    new_customer_id = result.inserted_primary_key[0]
+    await _sync_customer_calendar_best_effort(
+        _calendar_customer_payload(
+            new_customer_id,
+            full_name=customer_data.full_name,
+            phone_number=customer_data.phone_number,
+            platform=customer_data.platform,
+            username=customer_data.username,
+            assistant_name=customer_data.assistant_name,
+            notes=customer_data.notes,
+            recall_time=customer_dict["recall_time"],
+            status=customer_data.status.value,
+        )
+    )
+
     return CreateResponse(
         message="Mijoz muvaffaqiyatli yaratildi",
-        id=result.inserted_primary_key[0]
+        id=new_customer_id
     )
 
 from auth_utils.auth_func import  get_current_user
