@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy import select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
@@ -14,6 +14,7 @@ from schemes.schemes_users import (
 )
 from auth_utils.auth_func import get_current_active_user, get_password_hash
 from database import get_async_session
+from utils.file_storage import delete_image_if_exists, save_image
 
 from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
 from models.user_models import  user_payment
@@ -71,6 +72,8 @@ async def ceo_dashboard(
                 modified_permissions.append('Payment')
             elif perm == 'project_toggle':
                 modified_permissions.append('Wordpress')
+            elif perm == 'projects':
+                modified_permissions.append('Projects')
             elif perm == 'crm':
                 modified_permissions.append('Sales CRM')
             elif perm == 'finance_list':
@@ -90,6 +93,7 @@ async def ceo_dashboard(
             "default_salary": float(user_data.default_salary),
             "role": user_data.role.value,
             "job_title": user_data.job_title,
+            "profile_image": user_data.profile_image,
             "is_active": user_data.is_active,
             "permissions": modified_permissions
         }
@@ -216,6 +220,7 @@ async def create_user(
         "default_salary": user_data.default_salary,
         "role": user_data.role,
         "job_title": user_data.job_title,
+        "profile_image": user_data.profile_image,
         "is_active": user_data.is_active
     }
 
@@ -274,6 +279,35 @@ async def update_user(
     await session.commit()
 
     return SuccessResponse(message="Foydalanuvchi muvaffaqiyatli yangilandi")
+
+
+@router.post("/users/{user_id}/profile-image", response_model=SuccessResponse, summary="User profil rasmini yuklash")
+async def upload_user_profile_image(
+        user_id: int,
+        image: UploadFile = File(...),
+        session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(require_ceo_access)
+):
+    user_result = await session.execute(
+        select(user).where(user.c.id == user_id)
+    )
+    user_data = user_result.fetchone()
+
+    if not user_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Foydalanuvchi topilmadi"
+        )
+
+    image_path = await save_image(image, "profile")
+    delete_image_if_exists(user_data.profile_image)
+
+    await session.execute(
+        update(user).where(user.c.id == user_id).values(profile_image=image_path)
+    )
+    await session.commit()
+
+    return SuccessResponse(message=f"Profil rasmi yuklandi: {image_path}")
 
 
 # --- 4. USER O'CHIRISH ---
@@ -740,6 +774,8 @@ async def get_user_permissions(
             permissions_display['Payment'] = has_permission
         elif page_name == 'project_toggle':
             permissions_display['Wordpress'] = has_permission
+        elif page_name == 'projects':
+            permissions_display['Projects'] = has_permission
         elif page_name == 'crm':
             permissions_display['Sales CRM'] = has_permission
         elif page_name == 'finance_list':
@@ -1023,6 +1059,8 @@ async def get_all_users_permissions_overview(
                 modified_permissions.append('Payment')
             elif perm == 'project_toggle':
                 modified_permissions.append('Wordpress')
+            elif perm == 'projects':
+                modified_permissions.append('Projects')
             elif perm == 'crm':
                 modified_permissions.append('Sales CRM')
             elif perm == 'finance_list':
@@ -1056,6 +1094,7 @@ async def get_all_users_permissions_overview(
             "users_with_ceo_access": len([u for u in users_permissions if "ceo" in u["permissions"]]),
             "users_with_payment_access": len([u for u in users_permissions if "payment_list" in u["permissions"]]),
             "users_with_wordpress_access": len([u for u in users_permissions if "project_toggle" in u["permissions"]]),
+            "users_with_projects_access": len([u for u in users_permissions if "projects" in u["permissions"]]),
             "users_with_crm_access": len([u for u in users_permissions if "crm" in u["permissions"]]),
             "users_with_finance_access": len([u for u in users_permissions if "finance_list" in u["permissions"]]),
             "users_with_update":len([u for u in users_permissions if "update_list" in u["permissions"]]),

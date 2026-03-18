@@ -8,6 +8,7 @@ from alembic import context
 
 from models.admin_models import metadata as admin_metadata
 from models.user_models import metadata as user_metadata
+from models import projects_models  # noqa: F401
 from sqlalchemy import MetaData
 
 combined_metadata = MetaData()

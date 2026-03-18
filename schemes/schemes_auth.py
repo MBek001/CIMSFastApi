@@ -30,6 +30,7 @@ class UserResponse(BaseModel):
     company_code: str
     role: UserRole
     job_title: Optional[str] = None
+    profile_image: Optional[str] = None
     is_active: bool
     permissions: Optional[Dict[str, bool]] = None  # Yangi field qo'shildi
 

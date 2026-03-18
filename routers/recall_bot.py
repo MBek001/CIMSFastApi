@@ -38,12 +38,12 @@ from models.admin_models import (
 from models.user_models import user_page_permission, PageName
 from utils.crypto import decrypt_text
 from utils.ai_summary import generate_customer_ai_summary
+from utils.recall_policy import get_target_reminder_minutes
 
 router = APIRouter(prefix="/recall-bot", tags=["Recall Bot"])
 
 bot = Bot(token=TELEGRAM_RECALL_BOT_TOKEN) if TELEGRAM_RECALL_BOT_TOKEN else None
 
-REMINDER_MINUTES = (30, 1)
 SCHEDULER_INTERVAL_SECONDS = 30
 DUE_WINDOW_PAST_SECONDS = 120
 DUE_WINDOW_FUTURE_SECONDS = 20
@@ -299,6 +299,20 @@ def _clean_note_text(value: Optional[str]) -> Optional[str]:
         return None
     cleaned = " ".join(str(value).split()).strip()
     return cleaned or None
+
+
+def _format_reminder_message_prefix(
+    reminder_minutes: int,
+    *,
+    recall_at: datetime,
+    now: datetime,
+) -> str:
+    if reminder_minutes <= 0 or recall_at <= now:
+        return "🔔 Recall vaqti bo'ldi"
+
+    seconds_left = max(0, int((recall_at - now).total_seconds()))
+    actual_minutes_left = max(1, (seconds_left + 59) // 60)
+    return f"🔔 Recall eslatma: {actual_minutes_left} daqiqa qoldi"
 
 
 async def _collect_notes_for_range(
@@ -888,7 +902,9 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
             customer.c.full_name,
             customer.c.phone_number,
             customer.c.notes,
-            customer.c.recall_time
+            customer.c.recall_time,
+            customer.c.status,
+            customer.c.status_name,
         ).where(
             and_(
                 customer.c.recall_time.isnot(None),
@@ -931,64 +947,69 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
         customer_name = _safe_decrypt(c.full_name)
         customer_phone = _safe_decrypt(c.phone_number)
         customer_note = _clean_note_text(c.notes) or "yo'q"
+        customer_status = c.status_name or c.status
+        target_reminder_minutes = get_target_reminder_minutes(customer_status)
+        target_reminder_at = recall_at - timedelta(minutes=target_reminder_minutes)
 
-        for reminder_minutes in REMINDER_MINUTES:
-            reminder_at = recall_at - timedelta(minutes=reminder_minutes)
-            if not (due_window_start <= reminder_at <= due_window_end):
+        if due_window_start <= target_reminder_at <= due_window_end:
+            reminder_minutes = target_reminder_minutes
+        elif target_reminder_at < due_window_start and due_window_start <= recall_at <= due_window_end:
+            reminder_minutes = 0
+        else:
+            continue
+
+        for recipient in recipients:
+            key = (c.id, recipient.chat_id, reminder_minutes, recall_at)
+            if key in existing_keys:
+                stats["skipped_duplicate"] += 1
                 continue
 
-            for recipient in recipients:
-                key = (c.id, recipient.chat_id, reminder_minutes, recall_at)
-                if key in existing_keys:
-                    stats["skipped_duplicate"] += 1
-                    continue
+            stats["due_notifications"] += 1
+            insert_result = await session.execute(
+                insert(recall_notification_log).values(
+                    customer_id=c.id,
+                    recipient_chat_id=recipient.chat_id,
+                    reminder_minutes=reminder_minutes,
+                    scheduled_for=recall_at,
+                    notification_sent=False,
+                    created_at=_utc_now_naive()
+                )
+            )
+            log_id = insert_result.inserted_primary_key[0]
+            existing_keys.add(key)
 
-                stats["due_notifications"] += 1
-                insert_result = await session.execute(
-                    insert(recall_notification_log).values(
-                        customer_id=c.id,
-                        recipient_chat_id=recipient.chat_id,
-                        reminder_minutes=reminder_minutes,
-                        scheduled_for=recall_at,
+            message_text = (
+                f"{_format_reminder_message_prefix(reminder_minutes, recall_at=recall_at, now=now)}\n\n"
+                f"👤 Mijoz: {customer_name}\n"
+                f"📞 Telefon: {customer_phone}\n"
+                f"🕒 Recall vaqti: {_format_uzbek_time_from_utc_naive(recall_at)}\n"
+                f"📝 Note: {customer_note}\n\n"
+                f"✅ Shu customer bilan bog'lanishingiz kerak."
+            )
+
+            try:
+                await _send_message(recipient.chat_id, message_text)
+                await session.execute(
+                    update(recall_notification_log)
+                    .where(recall_notification_log.c.id == log_id)
+                    .values(
+                        notification_sent=True,
+                        sent_at=_utc_now_naive(),
+                        error_message=None
+                    )
+                )
+                stats["sent"] += 1
+            except Exception as exc:
+                await session.execute(
+                    update(recall_notification_log)
+                    .where(recall_notification_log.c.id == log_id)
+                    .values(
                         notification_sent=False,
-                        created_at=_utc_now_naive()
+                        sent_at=None,
+                        error_message=str(exc)[:500]
                     )
                 )
-                log_id = insert_result.inserted_primary_key[0]
-                existing_keys.add(key)
-
-                message_text = (
-                    f"🔔 Recall eslatma: {reminder_minutes} daqiqa qoldi\n\n"
-                    f"👤 Mijoz: {customer_name}\n"
-                    f"📞 Telefon: {customer_phone}\n"
-                    f"🕒 Recall vaqti: {_format_uzbek_time_from_utc_naive(recall_at)}\n"
-                    f"📝 Note: {customer_note}\n\n"
-                    f"✅ Shu customer bilan bog'lanishingiz kerak."
-                )
-
-                try:
-                    await _send_message(recipient.chat_id, message_text)
-                    await session.execute(
-                        update(recall_notification_log)
-                        .where(recall_notification_log.c.id == log_id)
-                        .values(
-                            notification_sent=True,
-                            sent_at=_utc_now_naive(),
-                            error_message=None
-                        )
-                    )
-                    stats["sent"] += 1
-                except Exception as exc:
-                    await session.execute(
-                        update(recall_notification_log)
-                        .where(recall_notification_log.c.id == log_id)
-                        .values(
-                            notification_sent=False,
-                            sent_at=None,
-                            error_message=str(exc)[:500]
-                        )
-                    )
-                    stats["failed"] += 1
+                stats["failed"] += 1
 
     await session.commit()
     return stats

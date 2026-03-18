@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header, UploadFile, File
 from fastapi.security import OAuth2PasswordRequestForm
 from schemes.schemes_auth import *
 from auth_utils.auth_func import *
@@ -8,6 +8,7 @@ from typing import Optional
 
 from config import VERIFICATION_CODE_EXPIRE_MINUTES, PASSWORD_RESET_EXPIRE_MINUTES
 from sqlalchemy import func
+from utils.file_storage import delete_image_if_exists, save_image
 router = APIRouter(prefix="/auth",tags=['Autentifikatsiya'])
 from auth_utils.db_code_storage import db_code_storage
 
@@ -77,6 +78,7 @@ async def register(
             {"user_id": user_id, "page_name": PageName.ceo},
             {"user_id": user_id, "page_name": PageName.payment_list},
             {"user_id": user_id, "page_name": PageName.project_toggle},
+            {"user_id": user_id, "page_name": PageName.projects},
             {"user_id": user_id, "page_name": PageName.crm},
             {"user_id": user_id, "page_name": PageName.finance_list},
         ]
@@ -298,9 +300,27 @@ async def get_current_user_info(
         company_code=current_user.company_code,
         role=current_user.role,
         job_title=current_user.job_title,
+        profile_image=current_user.profile_image,
         is_active=current_user.is_active,
         permissions=permissions_object
     )
+
+
+@router.post("/me/profile-image", response_model=SuccessResponse, summary="Joriy user profil rasmini yuklash")
+async def upload_my_profile_image(
+    image: UploadFile = File(...),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    image_path = await save_image(image, "profile")
+    delete_image_if_exists(current_user.profile_image)
+
+    await session.execute(
+        update(user).where(user.c.id == current_user.id).values(profile_image=image_path)
+    )
+    await session.commit()
+
+    return SuccessResponse(message=f"Profil rasmi yuklandi: {image_path}")
 
 # 8. REFRESH TOKEN (NEW)
 @router.post("/refresh", response_model=TokenWithRefresh, summary="Refresh token orqali yangi access token olish")
@@ -418,6 +438,7 @@ async def dashboard_redirect(
             'payment_list': '/payment_list',
             'finance_list': '/finance_list',
             'project_toggle': '/project_toggle',
+            'projects': '/projects',
             'dashboard': f'/user_dashboard/{current_user.company_code}',
         }
 

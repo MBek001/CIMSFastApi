@@ -73,7 +73,7 @@ async def wordpress_dashboard(
     permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
 
     # Ruxsat nomlarini o'zgartirish
-    page_order = ['ceo', 'payment_list', 'project_toggle', 'crm', 'finance_list']
+    page_order = ['ceo', 'payment_list', 'project_toggle', 'projects', 'crm', 'finance_list']
     modified_permissions = []
     for page in page_order:
         if page in permissions:
@@ -83,6 +83,8 @@ async def wordpress_dashboard(
                 modified_permissions.append('Payment')
             elif page == 'project_toggle':
                 modified_permissions.append('Wordpress')
+            elif page == 'projects':
+                modified_permissions.append('Projects')
             elif page == 'crm':
                 modified_permissions.append('Sales CRM')
             elif page == 'finance_list':

@@ -167,7 +167,7 @@ async def finance_dashboard(
     )
     permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
 
-    page_order = ['ceo', 'payment_list', 'project_toggle', 'crm', 'finance_list']
+    page_order = ['ceo', 'payment_list', 'project_toggle', 'projects', 'crm', 'finance_list']
     modified_permissions = []
     for page in page_order:
         if page in permissions:
@@ -175,6 +175,7 @@ async def finance_dashboard(
                 'ceo': 'Dashboard',
                 'payment_list': 'Payment',
                 'project_toggle': 'Wordpress',
+                'projects': 'Projects',
                 'crm': 'Sales CRM',
                 'finance_list': 'Finance'
             }.get(page, page))

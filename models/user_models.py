@@ -11,6 +11,7 @@ from models.admin_models import metadata
 class UserRole(enum.Enum):
     CEO = "CEO"
     financial_director = "Financial Director"
+    general_manager = "General Manager"
     member = "Member"
     customer = "Customer"
     sales_manager = "Sales Manager"  # NEW: Sales Manager role
@@ -20,6 +21,7 @@ class PageName(enum.Enum):
     ceo = "ceo"
     payment_list = "payment_list"
     project_toggle = "project_toggle"
+    projects = "projects"
     crm = "crm"
     finance_list = "finance_list"
     update_list = "update_list"
@@ -42,6 +44,7 @@ user = Table(
     Column("role", Enum(UserRole), default=UserRole.customer),
     Column("role_name", String(100), nullable=True),  # NEW: Dynamic role from user_role table (optional, for custom roles)
     Column("job_title", String(100), nullable=True),
+    Column("profile_image", String(500), nullable=True),
     Column("is_active", Boolean, default=True),
     Column("is_admin", Boolean, default=False),
     Column("is_staff", Boolean, default=False),

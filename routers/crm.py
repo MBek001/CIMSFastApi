@@ -502,7 +502,7 @@ async def crm_dashboard(
         .where(user_page_permission.c.user_id == current_user.id)
     )
     permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
-    page_order = ['ceo', 'payment_list', 'project_toggle', 'crm', 'finance_list']
+    page_order = ['ceo', 'payment_list', 'project_toggle', 'projects', 'crm', 'finance_list']
     modified_permissions = []
     for page_name in page_order:
         if page_name in permissions:
@@ -510,6 +510,7 @@ async def crm_dashboard(
                 'ceo': 'Dashboard',
                 'payment_list': 'Payment',
                 'project_toggle': 'Wordpress',
+                'projects': 'Projects',
                 'crm': 'Sales CRM',
                 'finance_list': 'Finance'
             }

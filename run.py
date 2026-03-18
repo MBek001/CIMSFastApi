@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.responses import JSONResponse
 
 # Routers
@@ -18,6 +19,8 @@ from routers.update_tracking import router as update_tracking_router
 from routers.management import router as management_router
 from routers.instagram import router as instagram_router
 from routers.recall_bot import router as recall_bot_router
+from routers.projects import router as projects_router
+from utils.file_storage import IMAGES_ROOT, ensure_image_directories
 
 from fastapi.responses import JSONResponse
 
@@ -29,6 +32,9 @@ app = FastAPI(
     version="1.0.0",
     description="Table-based SQLAlchemy bilan Auth Sistema",
 )
+
+ensure_image_directories()
+app.mount("/images", StaticFiles(directory=str(IMAGES_ROOT)), name="images")
 
 
 # --------------------------------------------------
@@ -65,6 +71,7 @@ app.include_router(update_tracking_router)
 app.include_router(management_router)
 # app.include_router(instagram_router)
 app.include_router(recall_bot_router)
+app.include_router(projects_router)
 
 
 # --------------------------------------------------

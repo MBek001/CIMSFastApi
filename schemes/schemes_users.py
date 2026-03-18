@@ -15,6 +15,7 @@ class UserCreateRequest(BaseModel):
     default_salary: Optional[Decimal] = Decimal('0.00')
     role: UserRole = UserRole.customer
     job_title: Optional[str] = None
+    profile_image: Optional[str] = None
     is_active: bool = True
 
 class UserUpdateRequest(BaseModel):
@@ -27,6 +28,7 @@ class UserUpdateRequest(BaseModel):
     default_salary: Optional[Decimal] = None
     role: Optional[UserRole] = None
     job_title: Optional[str] = None
+    profile_image: Optional[str] = None
     is_active: Optional[bool] = None
 
 class UserResponse(BaseModel):
@@ -39,6 +41,7 @@ class UserResponse(BaseModel):
     default_salary: Decimal
     role: str
     job_title: Optional[str]
+    profile_image: Optional[str] = None
     is_active: bool
     permissions: List[str] = []
 
@@ -134,6 +137,7 @@ class PageName(str, Enum):
     ceo = "ceo"
     payment_list = "payment_list"
     project_toggle = "project_toggle"
+    projects = "projects"
     crm = "crm"
     finance_list = "finance_list"
     update_list = "update_list"
@@ -147,6 +151,7 @@ class UserPermissionUpdateRequest(BaseModel):
     ceo: bool = Field(default=False, description="Dashboard sahifasiga ruxsat")
     payment_list: bool = Field(default=False, description="Payment sahifasiga ruxsat")
     project_toggle: bool = Field(default=False, description="Wordpress sahifasiga ruxsat")
+    projects: bool = Field(default=False, description="Projects sahifasiga ruxsat")
     crm: bool = Field(default=False, description="Sales CRM sahifasiga ruxsat")
     finance_list: bool = Field(default=False, description="Finance sahifasiga ruxsat")
     update_list: bool = Field(default=False, description="Update sahifasiga ruxsat")
@@ -157,6 +162,7 @@ class UserPermissionUpdateRequest(BaseModel):
                 "ceo": True,
                 "payment_list": False,
                 "project_toggle": True,
+                "projects": True,
                 "crm": False,
                 "finance_list": True,
                 "update_list": True,
@@ -169,6 +175,7 @@ class UserPermissionUpdateRequest(BaseModel):
             "ceo": self.ceo,
             "payment_list": self.payment_list,
             "project_toggle": self.project_toggle,
+            "projects": self.projects,
             "crm": self.crm,
             "finance_list": self.finance_list,
             "update_list": self.update_list,
@@ -184,6 +191,7 @@ class UserPermissionAddRequest(BaseModel):
     ceo: bool = Field(default=False, description="Dashboard sahifasiga ruxsat")
     payment_list: bool = Field(default=False, description="Payment sahifasiga ruxsat")
     project_toggle: bool = Field(default=False, description="Wordpress sahifasiga ruxsat")
+    projects: bool = Field(default=False, description="Projects sahifasiga ruxsat")
     crm: bool = Field(default=False, description="Sales CRM sahifasiga ruxsat")
     finance_list: bool = Field(default=False, description="Finance sahifasiga ruxsat")
     update_list: bool = Field(default=False, description="Update sahifasiga ruxsat")
@@ -194,6 +202,7 @@ class UserPermissionAddRequest(BaseModel):
                 "ceo": True,
                 "payment_list": False,
                 "project_toggle": True,
+                "projects": True,
                 "crm": False,
                 "finance_list": True,
                 "update_list": True
@@ -206,6 +215,7 @@ class UserPermissionAddRequest(BaseModel):
             "ceo": self.ceo,
             "payment_list": self.payment_list,
             "project_toggle": self.project_toggle,
+            "projects": self.projects,
             "crm": self.crm,
             "finance_list": self.finance_list,
             "update_list": self.update_list,
@@ -233,6 +243,7 @@ class UserPermissionResponse(BaseModel):
                     "ceo": True,
                     "payment_list": False,
                     "project_toggle": True,
+                    "projects": True,
                     "crm": False,
                     "finance_list": True,
                     "update_list":True
@@ -241,12 +252,13 @@ class UserPermissionResponse(BaseModel):
                     "Dashboard": True,
                     "Payment": False,
                     "Wordpress": True,
+                    "Projects": True,
                     "Sales CRM": False,
                     "Finance": True,
                     "Update": True
                 },
-                "active_permissions_count": 3,
-                "total_available_pages": 5
+                "active_permissions_count": 5,
+                "total_available_pages": 7
             }
         }
 
