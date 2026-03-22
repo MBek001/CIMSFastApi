@@ -229,7 +229,27 @@ daily_update_log = Table(
     Column("created_at", DateTime, default=datetime.utcnow)
 )
 
-# 14. Update Configuration table (NEW) - system-wide update tracking settings
+# 14. Workday override table - holidays and shortened workdays
+workday_override = Table(
+    "workday_override",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("special_date", Date, nullable=False, index=True),
+    Column("target_type", String(20), nullable=False),  # all | member
+    Column("target_key", String(50), nullable=False),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True, index=True),
+    Column("day_type", String(20), nullable=False),  # holiday | short_day
+    Column("title", String(255), nullable=False),
+    Column("note", Text, nullable=True),
+    Column("workday_hours", DECIMAL(4, 2), nullable=True),
+    Column("update_required", Boolean, default=True),
+    Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
+    UniqueConstraint("special_date", "target_key", name="uq_workday_override_date_target")
+)
+
+# 15. Update Configuration table (NEW) - system-wide update tracking settings
 update_config = Table(
     "update_config",
     metadata,
@@ -241,7 +261,7 @@ update_config = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 15. Missed Update Notification table (NEW) - tracks when notifications were sent
+# 16. Missed Update Notification table (NEW) - tracks when notifications were sent
 missed_update_notification = Table(
     "missed_update_notification",
     metadata,
@@ -253,7 +273,7 @@ missed_update_notification = Table(
     UniqueConstraint("user_id", "missed_date", name="uq_user_missed_date")
 )
 
-# 16. Recall bot admin chats
+# 17. Recall bot admin chats
 recall_bot_admin = Table(
     "recall_bot_admin",
     metadata,
@@ -266,7 +286,7 @@ recall_bot_admin = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 17. Recall bot recipients (notification subscribers)
+# 18. Recall bot recipients (notification subscribers)
 recall_bot_recipient = Table(
     "recall_bot_recipient",
     metadata,
@@ -280,7 +300,7 @@ recall_bot_recipient = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 18. Recall notifications log (dedupe + delivery status)
+# 19. Recall notifications log (dedupe + delivery status)
 recall_notification_log = Table(
     "recall_notification_log",
     metadata,
@@ -302,7 +322,7 @@ recall_notification_log = Table(
     )
 )
 
-# 19. CRM daily stats delivery log (for 22:00 digest dedupe)
+# 20. CRM daily stats delivery log (for 22:00 digest dedupe)
 crm_daily_stats_delivery_log = Table(
     "crm_daily_stats_delivery_log",
     metadata,
@@ -316,7 +336,7 @@ crm_daily_stats_delivery_log = Table(
     UniqueConstraint("report_date", "recipient_chat_id", name="uq_crm_daily_stats_delivery")
 )
 
-# 20. CRM customer status change log (for period statistics)
+# 21. CRM customer status change log (for period statistics)
 customer_status_change_log = Table(
     "customer_status_change_log",
     metadata,

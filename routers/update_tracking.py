@@ -4,7 +4,7 @@ Automatic daily update tracking from Telegram channel
 """
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_, desc, insert, update as sql_update
+from sqlalchemy import select, func, and_, or_, desc, insert, delete, update as sql_update
 from datetime import datetime, date, timedelta, time as dt_time, timezone
 import asyncio
 import calendar
@@ -19,9 +19,18 @@ from database import get_async_session, async_session_maker
 from auth_utils.auth_func import get_current_active_user
 from models.admin_models import (
     daily_update_log, department, user_department,
-    missed_update_notification
+    missed_update_notification, workday_override
 )
 from models.user_models import user, UserRole
+from schemes.schemes_update_tracking import (
+    WorkdayOverrideBulkResponse,
+    WorkdayOverrideCreateRequest,
+    WorkdayOverrideMemberOption,
+    WorkdayOverrideResponse,
+    WorkdayOverrideTargetType,
+    WorkdayOverrideType,
+    WorkdayOverrideUpdateRequest,
+)
 from utils.update_parser import (
     parse_update_message,
     find_user_by_telegram_username,
@@ -29,7 +38,18 @@ from utils.update_parser import (
 )
 from utils.ai_summary import generate_update_tracking_ai_summary
 from dotenv import load_dotenv
-from utils.admin_stats import generate_admin_statistics, get_working_days_in_month
+from utils.admin_stats import generate_admin_statistics
+from utils.workday_overrides import (
+    TARGET_TYPE_ALL,
+    TARGET_TYPE_MEMBER,
+    build_target_key,
+    fetch_override_pack,
+    get_effective_override,
+    is_expected_update_day,
+    list_expected_update_days,
+    normalize_update_required,
+    summarize_expected_days,
+)
 from config import UPDATE_ADMIN_PASSWORD, TELEGRAM_UPDATE_BOT_TOKEN
 
 
@@ -207,6 +227,104 @@ def is_ceo_user(current_user) -> bool:
     )
 
 
+async def get_active_member_map(session: AsyncSession, member_ids: List[int], strict: bool = True) -> Dict[int, Any]:
+    normalized_ids = sorted({int(member_id) for member_id in member_ids if member_id is not None})
+    if not normalized_ids:
+        return {}
+
+    result = await session.execute(
+        select(
+            user.c.id,
+            user.c.name,
+            user.c.surname,
+            user.c.telegram_id,
+            user.c.role,
+            user.c.is_active,
+            user.c.company_code,
+        )
+        .where(user.c.id.in_(normalized_ids))
+    )
+    rows = result.fetchall()
+    members = {}
+    for row in rows:
+        if not row.is_active:
+            continue
+        if row.role == UserRole.customer:
+            continue
+        if str(row.company_code or "").strip().lower() == "ceo" or row.role == UserRole.CEO:
+            continue
+        members[row.id] = row
+
+    missing_ids = [member_id for member_id in normalized_ids if member_id not in members]
+    if strict and missing_ids:
+        raise HTTPException(status_code=400, detail=f"Noto'g'ri member id lar: {missing_ids}")
+
+    return members
+
+
+def _serialize_workday_override(row: Any, member_row: Any = None) -> WorkdayOverrideResponse:
+    member_name = None
+    if member_row is not None:
+        member_name = f"{member_row.name} {member_row.surname}".strip()
+
+    return WorkdayOverrideResponse(
+        id=row.id,
+        special_date=row.special_date,
+        day_type=WorkdayOverrideType(row.day_type),
+        title=row.title,
+        note=row.note,
+        target_type=WorkdayOverrideTargetType(row.target_type),
+        member_id=row.user_id,
+        member_name=member_name,
+        workday_hours=row.workday_hours,
+        update_required=bool(row.update_required),
+        created_by=row.created_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _serialize_effective_override(row: Any) -> Optional[dict]:
+    if row is None:
+        return None
+    return {
+        "id": row.id,
+        "special_date": str(row.special_date),
+        "day_type": row.day_type,
+        "title": row.title,
+        "note": row.note,
+        "target_type": row.target_type,
+        "member_id": row.user_id,
+        "workday_hours": float(row.workday_hours) if row.workday_hours is not None else None,
+        "update_required": bool(row.update_required),
+    }
+
+
+async def _fetch_override_rows_with_members(
+    session: AsyncSession,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> List[WorkdayOverrideResponse]:
+    conditions = []
+    if start_date is not None:
+        conditions.append(workday_override.c.special_date >= start_date)
+    if end_date is not None:
+        conditions.append(workday_override.c.special_date <= end_date)
+
+    query = select(workday_override)
+    if conditions:
+        query = query.where(and_(*conditions))
+    query = query.order_by(workday_override.c.special_date.asc(), workday_override.c.target_type.asc(), workday_override.c.id.asc())
+
+    result = await session.execute(query)
+    rows = result.fetchall()
+
+    member_ids = [row.user_id for row in rows if row.user_id is not None]
+    member_map = await get_active_member_map(session, member_ids, strict=False) if member_ids else {}
+
+    return [_serialize_workday_override(row, member_map.get(row.user_id)) for row in rows]
+
+
 def get_update_accept_hour_next_day() -> int:
     """Get cutoff hour for accepting previous day updates (default: 4)."""
     hour = os.getenv("UPDATE_ACCEPT_HOUR_NEXT_DAY", str(DEFAULT_UPDATE_ACCEPT_HOUR_NEXT_DAY))
@@ -369,6 +487,20 @@ async def process_daily_update_notifications(
         }
 
     user_ids = [u.id for u in users_with_chat]
+    override_pack = await fetch_override_pack(session, report_date, report_date, user_ids=user_ids)
+    users_expected_today = [u for u in users_with_chat if is_expected_update_day(override_pack, u.id, report_date)]
+
+    if not users_expected_today:
+        return {
+            "date": str(report_date),
+            "skipped": True,
+            "reason": "company_day_off",
+            "total_users": 0,
+            "sent_success": 0,
+            "sent_failed": 0
+        }
+
+    user_ids = [u.id for u in users_expected_today]
     submitted_result = await session.execute(
         select(daily_update_log.c.user_id)
         .where(
@@ -398,7 +530,7 @@ async def process_daily_update_notifications(
     sent_success = 0
     sent_failed = 0
 
-    for u in users_with_chat:
+    for u in users_expected_today:
         existing_log = existing_notif_map.get(u.id)
         if existing_log and existing_log.notification_sent:
             continue
@@ -449,7 +581,7 @@ async def process_daily_update_notifications(
     return {
         "date": str(report_date),
         "skipped": False,
-        "total_users": len(users_with_chat),
+        "total_users": len(users_expected_today),
         "submitted_count": len(submitted_user_ids),
         "sent_success": sent_success,
         "sent_failed": sent_failed
@@ -497,9 +629,8 @@ async def calculate_update_percentage(
     Returns:
         Percentage (0-100)
     """
-    # Count actual updates in date range
     result = await session.execute(
-        select(func.count()).select_from(daily_update_log)
+        select(daily_update_log.c.update_date).distinct()
         .where(
             and_(
                 daily_update_log.c.user_id == user_id,
@@ -509,12 +640,19 @@ async def calculate_update_percentage(
             )
         )
     )
-    actual_updates = result.scalar() or 0
+    override_pack = await fetch_override_pack(session, start_date, end_date, user_ids=[user_id])
+    expected_workdays = list_expected_update_days(override_pack, user_id, start_date, end_date)
+    expected_dates = set(expected_workdays)
 
-    # Calculate expected updates based on date range
-    days = (end_date - start_date).days + 1
-    weeks = days / 7.0
-    expected_updates = int(weeks * expected_per_week)
+    actual_updates = len(
+        {
+            row.update_date
+            for row in result.fetchall()
+            if row.update_date in expected_dates
+        }
+    )
+
+    expected_updates = len(expected_workdays)
 
     if expected_updates == 0:
         return 0.0
@@ -682,9 +820,15 @@ def extract_top_keywords(texts: List[str], limit: int = 8) -> List[Dict[str, Any
     return [{"keyword": word, "count": count} for word, count in counts.most_common(limit)]
 
 
-def calculate_workday_streaks(valid_update_dates: List[date], first_day: date, last_day: date) -> Dict[str, int]:
+def calculate_workday_streaks(
+    valid_update_dates: List[date],
+    expected_workdays: List[date],
+    first_day: date,
+    last_day: date,
+) -> Dict[str, int]:
     valid_set = set(valid_update_dates)
-    if not valid_set:
+    expected_set = set(expected_workdays)
+    if not valid_set or not expected_set:
         return {"longest": 0, "current": 0}
 
     longest = 0
@@ -692,7 +836,7 @@ def calculate_workday_streaks(valid_update_dates: List[date], first_day: date, l
     current_day = first_day
 
     while current_day <= last_day:
-        if current_day.weekday() != 6:
+        if current_day in expected_set:
             if current_day in valid_set:
                 running += 1
                 longest = max(longest, running)
@@ -703,7 +847,7 @@ def calculate_workday_streaks(valid_update_dates: List[date], first_day: date, l
     current = 0
     cursor = min(last_day, date.today())
     while cursor >= first_day:
-        if cursor.weekday() == 6:
+        if cursor not in expected_set:
             cursor -= timedelta(days=1)
             continue
         if cursor in valid_set:
@@ -715,8 +859,14 @@ def calculate_workday_streaks(valid_update_dates: List[date], first_day: date, l
     return {"longest": longest, "current": current}
 
 
-def build_weekly_breakdown(valid_update_dates: List[date], selected_year: int, selected_month: int) -> List[Dict[str, int]]:
+def build_weekly_breakdown(
+    valid_update_dates: List[date],
+    expected_workdays: List[date],
+    selected_year: int,
+    selected_month: int,
+) -> List[Dict[str, int]]:
     valid_set = set(valid_update_dates)
+    expected_set = set(expected_workdays)
     _, _, total_days = get_month_range(selected_year, selected_month)
     total_weeks = ((total_days - 1) // 7) + 1
     breakdown: List[Dict[str, int]] = []
@@ -729,7 +879,7 @@ def build_weekly_breakdown(valid_update_dates: List[date], selected_year: int, s
 
         for day in range(week_start_day, week_end_day + 1):
             current_date = date(selected_year, selected_month, day)
-            if current_date.weekday() == 6:
+            if current_date not in expected_set:
                 continue
             expected_working_days += 1
             if current_date in valid_set:
@@ -832,21 +982,23 @@ async def get_user_trends_payload(
             target_year -= 1
 
         first_day, last_day, _ = get_month_range(target_year, target_month)
-        working_days, _ = get_working_days_in_month(target_year, target_month)
+        override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[user_id])
+        month_summary = summarize_expected_days(override_pack, user_id, first_day, last_day)
+        expected_dates = set(list_expected_update_days(override_pack, user_id, first_day, last_day))
 
         updates_result = await session.execute(
-            select(func.count()).select_from(daily_update_log)
+            select(daily_update_log.c.update_date).distinct()
             .where(
                 and_(
                     daily_update_log.c.user_id == user_id,
                     daily_update_log.c.update_date >= first_day,
                     daily_update_log.c.update_date <= last_day,
                     daily_update_log.c.is_valid == True,
-                    func.extract('dow', daily_update_log.c.update_date) != 0
                 )
             )
         )
-        update_count = updates_result.scalar() or 0
+        update_count = len({row.update_date for row in updates_result.fetchall() if row.update_date in expected_dates})
+        working_days = month_summary["working_days"]
         percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
         trends.append(
             {
@@ -854,6 +1006,8 @@ async def get_user_trends_payload(
                 "year": target_year,
                 "month_name": MONTH_NAMES_UZ[target_month],
                 "working_days": working_days,
+                "day_off_count": month_summary["day_off_count"],
+                "short_day_count": month_summary["short_day_count"],
                 "update_days": update_count,
                 "percentage": percentage,
             }
@@ -873,7 +1027,6 @@ async def build_user_combined_report(
 ) -> Dict[str, Any]:
     selected_year, selected_month = normalize_month_year(month, year)
     first_day, last_day, total_days = get_month_range(selected_year, selected_month)
-    working_days, sundays = get_working_days_in_month(selected_year, selected_month)
 
     user_result = await session.execute(
         select(
@@ -886,6 +1039,10 @@ async def build_user_combined_report(
         raise HTTPException(status_code=404, detail="User not found")
 
     overall_stats = await get_user_update_stats(session, user_id)
+    override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[user_id])
+    month_summary = summarize_expected_days(override_pack, user_id, first_day, last_day)
+    expected_workdays = list_expected_update_days(override_pack, user_id, first_day, last_day)
+    expected_dates = set(expected_workdays)
 
     updates_result = await session.execute(
         select(
@@ -907,7 +1064,8 @@ async def build_user_combined_report(
     all_updates = updates_result.fetchall()
 
     valid_rows = [row for row in all_updates if bool(row.is_valid)]
-    valid_dates = sorted({row.update_date for row in valid_rows if row.update_date.weekday() != 6})
+    valid_dates = sorted({row.update_date for row in valid_rows if row.update_date in expected_dates})
+    working_days = month_summary["working_days"]
     update_days = len(valid_dates)
     missing_days = max(working_days - update_days, 0)
     update_percentage = round((update_days / working_days) * 100, 1) if working_days > 0 else 0.0
@@ -945,9 +1103,18 @@ async def build_user_combined_report(
     ]
 
     top_keywords = extract_top_keywords([row.update_content or "" for row in valid_rows], limit=8)
-    streaks = calculate_workday_streaks(valid_dates, first_day, last_day)
-    weekly_breakdown = build_weekly_breakdown(valid_dates, selected_year, selected_month)
+    streaks = calculate_workday_streaks(valid_dates, expected_workdays, first_day, last_day)
+    weekly_breakdown = build_weekly_breakdown(valid_dates, expected_workdays, selected_year, selected_month)
     trends_payload = await get_user_trends_payload(session, user_id)
+    period_overrides = []
+    override_dates = set(override_pack.get("global", {}).keys()) | set(
+        override_pack.get("member", {}).get(user_id, {}).keys()
+    )
+    for override_date in sorted(override_dates):
+        effective = get_effective_override(override_pack, user_id, override_date)
+        if effective is None:
+            continue
+        period_overrides.append(_serialize_effective_override(effective))
 
     full_name = f"{user_data.name} {user_data.surname}"
     fallback_summary = compose_dynamic_ai_summary(
@@ -1004,7 +1171,9 @@ async def build_user_combined_report(
         "overall_stats": overall_stats_dict,
         "period_stats": {
             "working_days": working_days,
-            "sundays_count": len(sundays),
+            "sundays_count": month_summary["sundays_count"],
+            "day_off_count": month_summary["day_off_count"],
+            "short_day_count": month_summary["short_day_count"],
             "total_days": total_days,
             "total_updates": len(all_updates),
             "valid_updates": len(valid_rows),
@@ -1022,6 +1191,7 @@ async def build_user_combined_report(
         },
         "recent_updates": recent_updates,
         "period_updates": period_updates,
+        "period_overrides": period_overrides,
         "top_keywords": top_keywords,
         "streaks": streaks,
         "weekly_breakdown": weekly_breakdown,
@@ -1033,7 +1203,7 @@ async def build_user_combined_report(
         "year": selected_year,
         "month_name": MONTH_NAMES_UZ[selected_month],
         "working_days": working_days,
-        "sundays_count": len(sundays),
+        "sundays_count": month_summary["sundays_count"],
         "total_days": total_days,
         "statistics": {
             "update_days": update_days,
@@ -1042,6 +1212,8 @@ async def build_user_combined_report(
             "total_updates": len(all_updates),
             "valid_updates": len(valid_rows),
             "invalid_updates": invalid_updates_count,
+            "day_off_count": month_summary["day_off_count"],
+            "short_day_count": month_summary["short_day_count"],
         },
         # Flattened old stats fields for quick compatibility
         **overall_stats_dict,
@@ -1306,6 +1478,313 @@ async def set_message_reaction_safe(chat_id: int, message_id: int, emoji: str):
         )
     except Exception as e:
         print(f"Error setting message reaction: {e}")
+
+
+async def _upsert_workday_override(
+    session: AsyncSession,
+    *,
+    special_date: date,
+    target_type: str,
+    member_id: Optional[int],
+    day_type: str,
+    title: str,
+    note: Optional[str],
+    workday_hours,
+    update_required: bool,
+    created_by: int,
+):
+    target_key = build_target_key(target_type, member_id)
+    existing_result = await session.execute(
+        select(workday_override).where(
+            and_(
+                workday_override.c.special_date == special_date,
+                workday_override.c.target_key == target_key,
+            )
+        )
+    )
+    existing = existing_result.fetchone()
+
+    payload = {
+        "special_date": special_date,
+        "target_type": target_type,
+        "target_key": target_key,
+        "user_id": member_id,
+        "day_type": day_type,
+        "title": title,
+        "note": note,
+        "workday_hours": workday_hours,
+        "update_required": update_required,
+        "updated_at": datetime.utcnow(),
+    }
+
+    if existing:
+        await session.execute(
+            sql_update(workday_override)
+            .where(workday_override.c.id == existing.id)
+            .values(**payload)
+        )
+        override_id = existing.id
+    else:
+        payload["created_by"] = created_by
+        payload["created_at"] = datetime.utcnow()
+        result = await session.execute(insert(workday_override).values(**payload))
+        override_id = result.inserted_primary_key[0]
+
+    override_result = await session.execute(
+        select(workday_override).where(workday_override.c.id == override_id)
+    )
+    return override_result.fetchone()
+
+
+@router.get(
+    "/workday-overrides/member-options",
+    response_model=List[WorkdayOverrideMemberOption],
+    summary="Holiday yoki short day uchun member list"
+)
+async def get_workday_override_member_options(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Only CEO can access this")
+
+    result = await session.execute(
+        select(
+            user.c.id,
+            user.c.name,
+            user.c.surname,
+            user.c.telegram_id,
+            user.c.role,
+            user.c.company_code,
+        )
+        .where(
+            and_(
+                user.c.is_active == True,
+                or_(user.c.role.is_(None), user.c.role != UserRole.customer),
+                func.lower(func.coalesce(user.c.company_code, "")) != "ceo",
+            )
+        )
+        .order_by(user.c.name.asc(), user.c.surname.asc())
+    )
+
+    items = []
+    for row in result.fetchall():
+        role_value = getattr(row.role, "value", None)
+        if role_value is None and row.role is not None:
+            role_value = str(row.role)
+        items.append(
+            WorkdayOverrideMemberOption(
+                id=row.id,
+                name=row.name,
+                surname=row.surname,
+                full_name=f"{row.name} {row.surname}".strip(),
+                role=role_value,
+                telegram_id=row.telegram_id,
+            )
+        )
+    return items
+
+
+@router.get(
+    "/workday-overrides",
+    response_model=List[WorkdayOverrideResponse],
+    summary="Holiday va qisqartirilgan ish kunlarini olish"
+)
+async def get_workday_overrides(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Only CEO can access this")
+
+    if month is not None or year is not None:
+        selected_year, selected_month = normalize_month_year(month, year)
+        start_date, end_date, _ = get_month_range(selected_year, selected_month)
+
+    return await _fetch_override_rows_with_members(session, start_date=start_date, end_date=end_date)
+
+
+@router.post(
+    "/workday-overrides",
+    response_model=WorkdayOverrideBulkResponse,
+    summary="Holiday yoki short day yozuvini yaratish yoki yangilash"
+)
+async def create_or_update_workday_overrides(
+    payload: WorkdayOverrideCreateRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Only CEO can access this")
+
+    update_required = normalize_update_required(payload.day_type.value, payload.update_required)
+    target_rows: List[Any] = []
+
+    if payload.applies_to_all:
+        target_rows.append(
+            await _upsert_workday_override(
+                session,
+                special_date=payload.special_date,
+                target_type=TARGET_TYPE_ALL,
+                member_id=None,
+                day_type=payload.day_type.value,
+                title=payload.title,
+                note=payload.note,
+                workday_hours=payload.workday_hours,
+                update_required=update_required,
+                created_by=current_user.id,
+            )
+        )
+    else:
+        member_map = await get_active_member_map(session, payload.member_ids)
+        for member_id in member_map:
+            target_rows.append(
+                await _upsert_workday_override(
+                    session,
+                    special_date=payload.special_date,
+                    target_type=TARGET_TYPE_MEMBER,
+                    member_id=member_id,
+                    day_type=payload.day_type.value,
+                    title=payload.title,
+                    note=payload.note,
+                    workday_hours=payload.workday_hours,
+                    update_required=update_required,
+                    created_by=current_user.id,
+                )
+            )
+
+    await session.commit()
+
+    member_map = await get_active_member_map(
+        session,
+        [row.user_id for row in target_rows if row.user_id is not None],
+        strict=False,
+    )
+
+    return WorkdayOverrideBulkResponse(
+        message="Workday override saqlandi",
+        items=[_serialize_workday_override(row, member_map.get(row.user_id)) for row in target_rows],
+    )
+
+
+@router.put(
+    "/workday-overrides/{override_id}",
+    response_model=WorkdayOverrideResponse,
+    summary="Holiday yoki short day yozuvini tahrirlash"
+)
+async def update_workday_override(
+    override_id: int,
+    payload: WorkdayOverrideUpdateRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Only CEO can access this")
+
+    existing_result = await session.execute(
+        select(workday_override).where(workday_override.c.id == override_id)
+    )
+    existing = existing_result.fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Override topilmadi")
+
+    next_target_type = payload.applies_to_all
+    if next_target_type is None:
+        resolved_target_type = existing.target_type
+    else:
+        resolved_target_type = TARGET_TYPE_ALL if next_target_type else TARGET_TYPE_MEMBER
+
+    resolved_member_id = None
+    if resolved_target_type == TARGET_TYPE_MEMBER:
+        resolved_member_id = payload.member_id if payload.member_id is not None else existing.user_id
+        if resolved_member_id is None:
+            raise HTTPException(status_code=400, detail="member target uchun member_id majburiy")
+        member_map = await get_active_member_map(session, [resolved_member_id])
+    else:
+        member_map = {}
+
+    resolved_day_type = payload.day_type.value if payload.day_type is not None else existing.day_type
+    resolved_title = payload.title if payload.title is not None else existing.title
+    resolved_note = payload.note if payload.note is not None else existing.note
+    resolved_workday_hours = payload.workday_hours if payload.workday_hours is not None else existing.workday_hours
+    if resolved_day_type == WorkdayOverrideType.holiday.value and payload.workday_hours is None:
+        resolved_workday_hours = None
+    resolved_special_date = payload.special_date if payload.special_date is not None else existing.special_date
+    update_required_input = payload.update_required
+    if update_required_input is None and payload.day_type is None:
+        update_required_input = existing.update_required
+    resolved_update_required = normalize_update_required(
+        resolved_day_type,
+        update_required_input,
+    )
+
+    if resolved_day_type == WorkdayOverrideType.short_day.value and resolved_workday_hours is None:
+        raise HTTPException(status_code=400, detail="short_day uchun workday_hours majburiy")
+
+    target_key = build_target_key(resolved_target_type, resolved_member_id)
+    duplicate_result = await session.execute(
+        select(workday_override.c.id).where(
+            and_(
+                workday_override.c.special_date == resolved_special_date,
+                workday_override.c.target_key == target_key,
+                workday_override.c.id != override_id,
+            )
+        )
+    )
+    if duplicate_result.fetchone():
+        raise HTTPException(status_code=400, detail="Bu sana va target uchun yozuv allaqachon mavjud")
+
+    await session.execute(
+        sql_update(workday_override)
+        .where(workday_override.c.id == override_id)
+        .values(
+            special_date=resolved_special_date,
+            target_type=resolved_target_type,
+            target_key=target_key,
+            user_id=resolved_member_id,
+            day_type=resolved_day_type,
+            title=resolved_title,
+            note=resolved_note,
+            workday_hours=resolved_workday_hours,
+            update_required=resolved_update_required,
+            updated_at=datetime.utcnow(),
+        )
+    )
+    await session.commit()
+
+    updated_result = await session.execute(
+        select(workday_override).where(workday_override.c.id == override_id)
+    )
+    updated_row = updated_result.fetchone()
+    member_row = member_map.get(updated_row.user_id) if updated_row.user_id is not None else None
+    return _serialize_workday_override(updated_row, member_row)
+
+
+@router.delete(
+    "/workday-overrides/{override_id}",
+    summary="Holiday yoki short day yozuvini o'chirish"
+)
+async def delete_workday_override(
+    override_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Only CEO can access this")
+
+    existing_result = await session.execute(
+        select(workday_override.c.id).where(workday_override.c.id == override_id)
+    )
+    if not existing_result.fetchone():
+        raise HTTPException(status_code=404, detail="Override topilmadi")
+
+    await session.execute(delete(workday_override).where(workday_override.c.id == override_id))
+    await session.commit()
+    return {"message": "Workday override o'chirildi"}
 
 
 @router.on_event("startup")
@@ -1670,7 +2149,6 @@ async def get_my_daily_calendar(
 
     Returns: Calendar with daily status (submitted/missing/sunday)
     """
-    from utils.admin_stats import get_working_days_in_month
 
     # Default to current month/year
     today = date.today()
@@ -1685,13 +2163,13 @@ async def get_my_daily_calendar(
     if not (2020 <= year <= 2030):
         raise HTTPException(status_code=400, detail="Invalid year")
 
-    # Get working days
-    working_days, sundays = get_working_days_in_month(year, month)
-
     # Get month range
     first_day = date(year, month, 1)
     num_days = calendar.monthrange(year, month)[1]
     last_day = date(year, month, num_days)
+    override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[current_user.id])
+    month_summary = summarize_expected_days(override_pack, current_user.id, first_day, last_day)
+    expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, last_day))
 
     # Get user's updates
     updates_result = await session.execute(
@@ -1729,14 +2207,19 @@ async def get_my_daily_calendar(
             "date": str(current_date),
             "weekday": weekday_names[weekday],
             "is_sunday": weekday == 6,
+            "is_day_off": current_date.weekday() != 6 and current_date not in expected_dates,
+            "update_expected": current_date in expected_dates,
             "has_update": current_date in updates
         }
+
+        effective_override = get_effective_override(override_pack, current_user.id, current_date)
+        day_info["workday_override"] = _serialize_effective_override(effective_override)
 
         if current_date in updates:
             update_data = updates[current_date]
             day_info["update_content"] = update_data["content"]
             day_info["is_valid"] = update_data["valid"]
-            if weekday != 6:  # Not Sunday
+            if current_date in expected_dates:
                 update_count += 1
         else:
             day_info["update_content"] = None
@@ -1744,13 +2227,16 @@ async def get_my_daily_calendar(
 
         calendar_days.append(day_info)
 
+    working_days = month_summary["working_days"]
     percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
 
     return {
         "month": month,
         "year": year,
         "working_days": working_days,
-        "sundays_count": len(sundays),
+        "sundays_count": month_summary["sundays_count"],
+        "day_off_count": month_summary["day_off_count"],
+        "short_day_count": month_summary["short_day_count"],
         "total_days": num_days,
         "update_days": update_count,
         "missing_days": working_days - update_count,
@@ -1768,8 +2254,6 @@ async def get_my_trends(
     Get performance trends for last 6 months
     Shows monthly statistics to track progress over time
     """
-    from utils.admin_stats import get_working_days_in_month
-
     today = date.today()
     trends = []
 
@@ -1783,28 +2267,28 @@ async def get_my_trends(
             target_month += 12
             target_year -= 1
 
-        # Get working days
-        working_days, _ = get_working_days_in_month(target_year, target_month)
-
         # Get month range
         first_day = date(target_year, target_month, 1)
         num_days = calendar.monthrange(target_year, target_month)[1]
         last_day = date(target_year, target_month, num_days)
+        override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[current_user.id])
+        month_summary = summarize_expected_days(override_pack, current_user.id, first_day, last_day)
+        expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, last_day))
 
         # Count updates
         updates_result = await session.execute(
-            select(func.count()).select_from(daily_update_log)
+            select(daily_update_log.c.update_date).distinct()
             .where(
                 and_(
                     daily_update_log.c.user_id == current_user.id,
                     daily_update_log.c.update_date >= first_day,
                     daily_update_log.c.update_date <= last_day,
-                    # Exclude Sundays by checking weekday
-                    func.extract('dow', daily_update_log.c.update_date) != 0  # 0 = Sunday in PostgreSQL
+                    daily_update_log.c.is_valid == True,
                 )
             )
         )
-        update_count = updates_result.scalar() or 0
+        update_count = len({row.update_date for row in updates_result.fetchall() if row.update_date in expected_dates})
+        working_days = month_summary["working_days"]
 
         percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
 
@@ -1819,6 +2303,8 @@ async def get_my_trends(
             "year": target_year,
             "month_name": month_names_uz[target_month],
             "working_days": working_days,
+            "day_off_count": month_summary["day_off_count"],
+            "short_day_count": month_summary["short_day_count"],
             "update_days": update_count,
             "percentage": percentage
         })
@@ -1973,6 +2459,12 @@ async def get_missing_updates(
         )
     )
     all_users = users_result.fetchall()
+    eligible_users = all_users
+    if check_date.weekday() != 6 and all_users:
+        override_pack = await fetch_override_pack(session, check_date, check_date, user_ids=[u.id for u in all_users])
+        eligible_users = [u for u in all_users if is_expected_update_day(override_pack, u.id, check_date)]
+    else:
+        eligible_users = []
 
     # Get users who submitted updates for this date
     updates_result = await session.execute(
@@ -1984,7 +2476,8 @@ async def get_missing_updates(
             )
         )
     )
-    submitted_user_ids = {row.user_id for row in updates_result.fetchall()}
+    eligible_user_ids = {u.id for u in eligible_users}
+    submitted_user_ids = {row.user_id for row in updates_result.fetchall() if row.user_id in eligible_user_ids}
 
     # Find missing users
     missing_users = [
@@ -1993,13 +2486,13 @@ async def get_missing_updates(
             "name": f"{u.name} {u.surname}",
             "telegram_id": u.telegram_id
         }
-        for u in all_users
+        for u in eligible_users
         if u.id not in submitted_user_ids
     ]
 
     return {
         "date": str(check_date),
-        "total_users": len(all_users),
+        "total_users": len(eligible_users),
         "submitted": len(submitted_user_ids),
         "missing": len(missing_users),
         "missing_users": missing_users

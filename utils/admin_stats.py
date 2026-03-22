@@ -14,6 +14,12 @@ from openpyxl.utils import get_column_letter
 import io
 from models.admin_models import daily_update_log
 from models.user_models import user
+from utils.workday_overrides import (
+    fetch_override_pack,
+    get_effective_override,
+    list_expected_update_days,
+    summarize_expected_days,
+)
 
 EXCLUDED_ADMIN_STATS_NAMES = {
     "muhammad ali",
@@ -115,6 +121,10 @@ async def generate_admin_statistics(
 
 
     for u in users:
+        override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[u.id])
+        month_summary = summarize_expected_days(override_pack, u.id, first_day, last_day)
+        expected_dates = set(list_expected_update_days(override_pack, u.id, first_day, last_day))
+
         # User uchun bu oydagi yangilanishlar
         updates_result = await session.execute(
             select(daily_update_log)
@@ -129,15 +139,9 @@ async def generate_admin_statistics(
         )
         updates = updates_result.fetchall()
 
-        # Yakshanba kunlaridagi updatelarni hisobga olmaymiz
-        valid_updates = [
-            upd for upd in updates
-            if upd.update_date.weekday() != 6  # 6 = Yakshanba
-        ]
-
         # Statistika
-        total_days = working_days  # Faqat ish kunlari
-        valid_update_dates = {upd.update_date for upd in updates if upd.update_date.weekday() != 6 and upd.is_valid}
+        total_days = month_summary["working_days"]
+        valid_update_dates = {upd.update_date for upd in updates if upd.update_date in expected_dates and upd.is_valid}
         update_days = len(valid_update_dates)
         update_percentage = round((update_days / total_days) * 100, 1) if total_days > 0 else 0
 
@@ -148,9 +152,12 @@ async def generate_admin_statistics(
 
         for day in range(1, num_days + 1):
             d = date(year, month, day)
+            effective_override = get_effective_override(override_pack, u.id, d)
 
             if d.weekday() == 6:  # Yakshanba
                 daily_status[day] = "💤"
+            elif effective_override is not None and d not in expected_dates:
+                daily_status[day] = "рџЏ–пёЏ"
             elif d in update_dates_set:  # Update bor
                 daily_status[day] = "✅"
             else:  # Update yo'q
@@ -190,7 +197,9 @@ async def generate_admin_statistics(
             'ai_summary': ai_summary,
             'user_id': u.id,
             'daily_status': daily_status,
-            'num_days': num_days
+            'num_days': num_days,
+            'day_off_count': month_summary["day_off_count"],
+            'short_day_count': month_summary["short_day_count"],
 
         })
 
@@ -704,13 +713,15 @@ async def generate_user_daily_report(
     full_name = f"{user_data.name} {user_data.surname}"
     telegram_username = f"#{user_data.telegram_id}" if user_data.telegram_id else "#N/A"
 
-    # Get working days
-    working_days, sundays = get_working_days_in_month(year, month)
-
     # Get all days in month
     num_days = calendar.monthrange(year, month)[1]
     first_day = date(year, month, 1)
     last_day = date(year, month, num_days)
+    override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[user_id])
+    month_summary = summarize_expected_days(override_pack, user_id, first_day, last_day)
+    working_days = month_summary["working_days"]
+    sundays = [None] * month_summary["sundays_count"]
+    expected_dates = set(list_expected_update_days(override_pack, user_id, first_day, last_day))
 
     # Get user's updates for this month
     updates_result = await session.execute(
@@ -798,11 +809,17 @@ async def generate_user_daily_report(
 
         # Check if user submitted update
         has_update = current_date in updates
+        effective_override = get_effective_override(override_pack, user_id, current_date)
 
         if weekday == 6:  # Sunday
             status = "🏖️ Dam olish"
             update_text = "-"
             comment = "Yakshanba"
+            fill_color = sunday_fill
+        elif effective_override is not None and current_date not in expected_dates:
+            status = "рџЏ–пёЏ Holiday"
+            update_text = "-"
+            comment = effective_override.title
             fill_color = sunday_fill
         elif has_update:
             status = "✅ Topshirgan"
@@ -811,7 +828,8 @@ async def generate_user_daily_report(
             update_text = update_data["content"][:50] + "..." if len(update_data["content"]) > 50 else update_data["content"]
             comment = "Valid" if update_data["valid"] else "Invalid"
             fill_color = present_fill
-            update_count += 1
+            if current_date in expected_dates:
+                update_count += 1
         else:
             status = "❌ Topshirmagan"
             update_text = "-"
