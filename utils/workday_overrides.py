@@ -23,6 +23,8 @@ def build_target_key(target_type: str, user_id: Optional[int] = None) -> str:
 
 
 def normalize_update_required(day_type: str, update_required: Optional[bool]) -> bool:
+    if day_type == DAY_TYPE_HOLIDAY:
+        return False
     if update_required is not None:
         return bool(update_required)
     return day_type != DAY_TYPE_HOLIDAY
@@ -86,6 +88,9 @@ def is_expected_update_day(override_pack: dict, user_id: int, current_date: date
     if effective is None:
         return True
 
+    if getattr(effective, "day_type", None) == DAY_TYPE_HOLIDAY:
+        return False
+
     return bool(getattr(effective, "update_required", True))
 
 
@@ -139,4 +144,3 @@ def summarize_expected_days(
         "day_off_count": day_off_count,
         "short_day_count": short_day_count,
     }
-

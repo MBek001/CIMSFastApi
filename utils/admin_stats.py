@@ -94,12 +94,13 @@ async def generate_admin_statistics(
     if year is None:
         year = today.year
 
-    # Oyda necha ish kuni bor
-    working_days, sundays = get_working_days_in_month(year, month)
-
     # Oy boshlanishi va oxiri
     first_day = date(year, month, 1)
     last_day = date(year, month, calendar.monthrange(year, month)[1])
+    global_override_pack = await fetch_override_pack(session, first_day, last_day)
+    global_month_summary = summarize_expected_days(global_override_pack, 0, first_day, last_day)
+    working_days = global_month_summary["working_days"]
+    sundays_count = global_month_summary["sundays_count"]
 
     # Barcha active userlarni olish
     result = await session.execute(
@@ -205,10 +206,10 @@ async def generate_admin_statistics(
 
     # Formatlangan xabar yaratish
     report_date = date(year, month, 1)
-    message = format_admin_report(stats_list, report_date, working_days, len(sundays))
+    message = format_admin_report(stats_list, report_date, working_days, sundays_count)
 
     # Excel file yaratish
-    excel_bytes = generate_excel_report(stats_list, year, month, working_days, len(sundays))
+    excel_bytes = generate_excel_report(stats_list, year, month, working_days, sundays_count)
 
     return message, excel_bytes
 

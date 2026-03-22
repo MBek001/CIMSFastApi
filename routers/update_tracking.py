@@ -805,6 +805,10 @@ def get_month_range(selected_year: int, selected_month: int) -> tuple[date, date
     return first_day, last_day, total_days
 
 
+def get_reporting_end_date(first_day: date, last_day: date) -> date:
+    return min(last_day, date.today())
+
+
 def extract_top_keywords(texts: List[str], limit: int = 8) -> List[Dict[str, Any]]:
     words: List[str] = []
     for text in texts:
@@ -982,9 +986,10 @@ async def get_user_trends_payload(
             target_year -= 1
 
         first_day, last_day, _ = get_month_range(target_year, target_month)
+        reporting_end = get_reporting_end_date(first_day, last_day)
         override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[user_id])
-        month_summary = summarize_expected_days(override_pack, user_id, first_day, last_day)
-        expected_dates = set(list_expected_update_days(override_pack, user_id, first_day, last_day))
+        month_summary = summarize_expected_days(override_pack, user_id, first_day, reporting_end)
+        expected_dates = set(list_expected_update_days(override_pack, user_id, first_day, reporting_end))
 
         updates_result = await session.execute(
             select(daily_update_log.c.update_date).distinct()
@@ -992,7 +997,7 @@ async def get_user_trends_payload(
                 and_(
                     daily_update_log.c.user_id == user_id,
                     daily_update_log.c.update_date >= first_day,
-                    daily_update_log.c.update_date <= last_day,
+                    daily_update_log.c.update_date <= reporting_end,
                     daily_update_log.c.is_valid == True,
                 )
             )
@@ -1027,6 +1032,7 @@ async def build_user_combined_report(
 ) -> Dict[str, Any]:
     selected_year, selected_month = normalize_month_year(month, year)
     first_day, last_day, total_days = get_month_range(selected_year, selected_month)
+    reporting_end = get_reporting_end_date(first_day, last_day)
 
     user_result = await session.execute(
         select(
@@ -1040,8 +1046,8 @@ async def build_user_combined_report(
 
     overall_stats = await get_user_update_stats(session, user_id)
     override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[user_id])
-    month_summary = summarize_expected_days(override_pack, user_id, first_day, last_day)
-    expected_workdays = list_expected_update_days(override_pack, user_id, first_day, last_day)
+    month_summary = summarize_expected_days(override_pack, user_id, first_day, reporting_end)
+    expected_workdays = list_expected_update_days(override_pack, user_id, first_day, reporting_end)
     expected_dates = set(expected_workdays)
 
     updates_result = await session.execute(
@@ -1056,7 +1062,7 @@ async def build_user_combined_report(
             and_(
                 daily_update_log.c.user_id == user_id,
                 daily_update_log.c.update_date >= first_day,
-                daily_update_log.c.update_date <= last_day
+                daily_update_log.c.update_date <= reporting_end
             )
         )
         .order_by(daily_update_log.c.update_date.asc(), daily_update_log.c.created_at.asc())
@@ -1166,7 +1172,7 @@ async def build_user_combined_report(
             "year": selected_year,
             "month_name": MONTH_NAMES_UZ[selected_month],
             "from": str(first_day),
-            "to": str(last_day),
+            "to": str(reporting_end),
         },
         "overall_stats": overall_stats_dict,
         "period_stats": {
@@ -2167,9 +2173,11 @@ async def get_my_daily_calendar(
     first_day = date(year, month, 1)
     num_days = calendar.monthrange(year, month)[1]
     last_day = date(year, month, num_days)
+    reporting_end = get_reporting_end_date(first_day, last_day)
     override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[current_user.id])
-    month_summary = summarize_expected_days(override_pack, current_user.id, first_day, last_day)
-    expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, last_day))
+    month_summary = summarize_expected_days(override_pack, current_user.id, first_day, reporting_end)
+    expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, reporting_end))
+    full_month_expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, last_day))
 
     # Get user's updates
     updates_result = await session.execute(
@@ -2207,7 +2215,7 @@ async def get_my_daily_calendar(
             "date": str(current_date),
             "weekday": weekday_names[weekday],
             "is_sunday": weekday == 6,
-            "is_day_off": current_date.weekday() != 6 and current_date not in expected_dates,
+            "is_day_off": current_date.weekday() != 6 and current_date not in full_month_expected_dates,
             "update_expected": current_date in expected_dates,
             "has_update": current_date in updates
         }
@@ -2239,7 +2247,7 @@ async def get_my_daily_calendar(
         "short_day_count": month_summary["short_day_count"],
         "total_days": num_days,
         "update_days": update_count,
-        "missing_days": working_days - update_count,
+        "missing_days": max(working_days - update_count, 0),
         "percentage": percentage,
         "calendar": calendar_days
     }
@@ -2271,9 +2279,10 @@ async def get_my_trends(
         first_day = date(target_year, target_month, 1)
         num_days = calendar.monthrange(target_year, target_month)[1]
         last_day = date(target_year, target_month, num_days)
+        reporting_end = get_reporting_end_date(first_day, last_day)
         override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[current_user.id])
-        month_summary = summarize_expected_days(override_pack, current_user.id, first_day, last_day)
-        expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, last_day))
+        month_summary = summarize_expected_days(override_pack, current_user.id, first_day, reporting_end)
+        expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, reporting_end))
 
         # Count updates
         updates_result = await session.execute(
@@ -2282,7 +2291,7 @@ async def get_my_trends(
                 and_(
                     daily_update_log.c.user_id == current_user.id,
                     daily_update_log.c.update_date >= first_day,
-                    daily_update_log.c.update_date <= last_day,
+                    daily_update_log.c.update_date <= reporting_end,
                     daily_update_log.c.is_valid == True,
                 )
             )
