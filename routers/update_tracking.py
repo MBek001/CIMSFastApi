@@ -640,17 +640,15 @@ async def calculate_update_percentage(
             )
         )
     )
+    submitted_dates = {row.update_date for row in result.fetchall()}
     override_pack = await fetch_override_pack(session, start_date, end_date, user_ids=[user_id])
-    expected_workdays = list_expected_update_days(override_pack, user_id, start_date, end_date)
+    expected_workdays = exclude_pending_today_from_expected_days(
+        list_expected_update_days(override_pack, user_id, start_date, end_date),
+        submitted_dates,
+    )
     expected_dates = set(expected_workdays)
 
-    actual_updates = len(
-        {
-            row.update_date
-            for row in result.fetchall()
-            if row.update_date in expected_dates
-        }
-    )
+    actual_updates = len(submitted_dates & expected_dates)
 
     expected_updates = len(expected_workdays)
 
@@ -807,6 +805,17 @@ def get_month_range(selected_year: int, selected_month: int) -> tuple[date, date
 
 def get_reporting_end_date(first_day: date, last_day: date) -> date:
     return min(last_day, date.today())
+
+
+def exclude_pending_today_from_expected_days(
+    expected_days: List[date],
+    submitted_dates: set[date],
+) -> List[date]:
+    today = date.today()
+    if today in submitted_dates or today not in expected_days:
+        return expected_days
+    # Don't treat today's unfinished workday as already missed.
+    return [day for day in expected_days if day != today]
 
 
 def extract_top_keywords(texts: List[str], limit: int = 8) -> List[Dict[str, Any]]:
@@ -989,7 +998,7 @@ async def get_user_trends_payload(
         reporting_end = get_reporting_end_date(first_day, last_day)
         override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[user_id])
         month_summary = summarize_expected_days(override_pack, user_id, first_day, reporting_end)
-        expected_dates = set(list_expected_update_days(override_pack, user_id, first_day, reporting_end))
+        expected_workdays = list_expected_update_days(override_pack, user_id, first_day, reporting_end)
 
         updates_result = await session.execute(
             select(daily_update_log.c.update_date).distinct()
@@ -1002,8 +1011,11 @@ async def get_user_trends_payload(
                 )
             )
         )
-        update_count = len({row.update_date for row in updates_result.fetchall() if row.update_date in expected_dates})
-        working_days = month_summary["working_days"]
+        submitted_dates = {row.update_date for row in updates_result.fetchall()}
+        expected_workdays = exclude_pending_today_from_expected_days(expected_workdays, submitted_dates)
+        expected_dates = set(expected_workdays)
+        update_count = len(submitted_dates & expected_dates)
+        working_days = len(expected_workdays)
         percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
         trends.append(
             {
@@ -1048,7 +1060,6 @@ async def build_user_combined_report(
     override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[user_id])
     month_summary = summarize_expected_days(override_pack, user_id, first_day, reporting_end)
     expected_workdays = list_expected_update_days(override_pack, user_id, first_day, reporting_end)
-    expected_dates = set(expected_workdays)
 
     updates_result = await session.execute(
         select(
@@ -1070,8 +1081,11 @@ async def build_user_combined_report(
     all_updates = updates_result.fetchall()
 
     valid_rows = [row for row in all_updates if bool(row.is_valid)]
+    submitted_dates = {row.update_date for row in valid_rows}
+    expected_workdays = exclude_pending_today_from_expected_days(expected_workdays, submitted_dates)
+    expected_dates = set(expected_workdays)
     valid_dates = sorted({row.update_date for row in valid_rows if row.update_date in expected_dates})
-    working_days = month_summary["working_days"]
+    working_days = len(expected_workdays)
     update_days = len(valid_dates)
     missing_days = max(working_days - update_days, 0)
     update_percentage = round((update_days / working_days) * 100, 1) if working_days > 0 else 0.0
@@ -2176,7 +2190,8 @@ async def get_my_daily_calendar(
     reporting_end = get_reporting_end_date(first_day, last_day)
     override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[current_user.id])
     month_summary = summarize_expected_days(override_pack, current_user.id, first_day, reporting_end)
-    expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, reporting_end))
+    expected_workdays = list_expected_update_days(override_pack, current_user.id, first_day, reporting_end)
+    expected_dates = set(expected_workdays)
     full_month_expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, last_day))
 
     # Get user's updates
@@ -2196,6 +2211,9 @@ async def get_my_daily_calendar(
     )
     updates = {row.update_date: {"content": row.update_content, "valid": row.is_valid}
                for row in updates_result.fetchall()}
+    stats_expected_dates = set(
+        exclude_pending_today_from_expected_days(expected_workdays, set(updates.keys()))
+    )
 
     # Build calendar
     weekday_names = {
@@ -2227,7 +2245,7 @@ async def get_my_daily_calendar(
             update_data = updates[current_date]
             day_info["update_content"] = update_data["content"]
             day_info["is_valid"] = update_data["valid"]
-            if current_date in expected_dates:
+            if current_date in stats_expected_dates:
                 update_count += 1
         else:
             day_info["update_content"] = None
@@ -2235,7 +2253,7 @@ async def get_my_daily_calendar(
 
         calendar_days.append(day_info)
 
-    working_days = month_summary["working_days"]
+    working_days = len(stats_expected_dates)
     percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
 
     return {
@@ -2282,7 +2300,7 @@ async def get_my_trends(
         reporting_end = get_reporting_end_date(first_day, last_day)
         override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=[current_user.id])
         month_summary = summarize_expected_days(override_pack, current_user.id, first_day, reporting_end)
-        expected_dates = set(list_expected_update_days(override_pack, current_user.id, first_day, reporting_end))
+        expected_workdays = list_expected_update_days(override_pack, current_user.id, first_day, reporting_end)
 
         # Count updates
         updates_result = await session.execute(
@@ -2296,8 +2314,11 @@ async def get_my_trends(
                 )
             )
         )
-        update_count = len({row.update_date for row in updates_result.fetchall() if row.update_date in expected_dates})
-        working_days = month_summary["working_days"]
+        submitted_dates = {row.update_date for row in updates_result.fetchall()}
+        expected_workdays = exclude_pending_today_from_expected_days(expected_workdays, submitted_dates)
+        expected_dates = set(expected_workdays)
+        update_count = len(submitted_dates & expected_dates)
+        working_days = len(expected_workdays)
 
         percentage = round((update_count / working_days) * 100, 1) if working_days > 0 else 0
 
@@ -2399,6 +2420,12 @@ async def get_employee_monthly_updates(
 
     month_start = date(year, month, 1)
     month_end = date(year, month, calendar.monthrange(year, month)[1])
+    reporting_end = get_reporting_end_date(month_start, month_end)
+    override_pack = await fetch_override_pack(session, month_start, month_end, user_ids=[employee_id])
+    month_summary = summarize_expected_days(override_pack, employee_id, month_start, reporting_end)
+    expected_workdays = list_expected_update_days(override_pack, employee_id, month_start, reporting_end)
+    expected_dates = set(expected_workdays)
+    full_month_expected_dates = set(list_expected_update_days(override_pack, employee_id, month_start, month_end))
 
     updates_result = await session.execute(
         select(
@@ -2418,6 +2445,47 @@ async def get_employee_monthly_updates(
         .order_by(daily_update_log.c.update_date.asc(), daily_update_log.c.created_at.asc())
     )
     rows = updates_result.fetchall()
+    updates_by_date = {
+        row.update_date: {
+            "content": row.update_content,
+            "valid": row.is_valid,
+        }
+        for row in rows
+    }
+    stats_expected_dates = set(
+        exclude_pending_today_from_expected_days(expected_workdays, set(updates_by_date.keys()))
+    )
+    update_days = len(stats_expected_dates & set(updates_by_date.keys()))
+    working_days = len(stats_expected_dates)
+    missing_days = max(working_days - update_days, 0)
+    percentage = round((update_days / working_days) * 100, 1) if working_days > 0 else 0.0
+
+    weekday_names = {
+        0: "Dushanba", 1: "Seshanba", 2: "Chorshanba",
+        3: "Payshanba", 4: "Juma", 5: "Shanba", 6: "Yakshanba"
+    }
+    calendar_days = []
+    num_days = calendar.monthrange(year, month)[1]
+
+    for day in range(1, num_days + 1):
+        current_date = date(year, month, day)
+        weekday = current_date.weekday()
+        effective_override = get_effective_override(override_pack, employee_id, current_date)
+
+        day_info = {
+            "day": day,
+            "date": str(current_date),
+            "weekday": weekday_names[weekday],
+            "is_sunday": weekday == 6,
+            "is_day_off": current_date.weekday() != 6 and current_date not in full_month_expected_dates,
+            "update_expected": current_date in expected_dates,
+            "has_update": current_date in updates_by_date,
+            "is_missed": current_date in stats_expected_dates and current_date not in updates_by_date,
+            "workday_override": _serialize_effective_override(effective_override),
+            "update_content": updates_by_date.get(current_date, {}).get("content"),
+            "is_valid": updates_by_date.get(current_date, {}).get("valid"),
+        }
+        calendar_days.append(day_info)
 
     return {
         "employee": {
@@ -2431,7 +2499,21 @@ async def get_employee_monthly_updates(
             "from": str(month_start),
             "to": str(month_end),
         },
+        "stats": {
+            "working_days": working_days,
+            "sundays_count": month_summary["sundays_count"],
+            "day_off_count": month_summary["day_off_count"],
+            "short_day_count": month_summary["short_day_count"],
+            "update_days": update_days,
+            "missing_days": missing_days,
+            "percentage": percentage,
+        },
+        "working_days": working_days,
+        "update_days": update_days,
+        "missing_days": missing_days,
+        "percentage": percentage,
         "total_updates": len(rows),
+        "calendar": calendar_days,
         "updates": [
             {
                 "id": row.id,
