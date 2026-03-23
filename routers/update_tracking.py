@@ -2393,6 +2393,156 @@ async def get_recent_updates(
     ]
 
 
+@router.get("/all-users-updates", summary="Get monthly updates for all active users")
+async def get_all_users_updates(
+    year: int,
+    month: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Only CEO can access this")
+
+    if year < 2000 or year > 2100:
+        raise HTTPException(status_code=400, detail="year must be between 2000 and 2100")
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="month must be between 1 and 12")
+
+    month_start = date(year, month, 1)
+    month_end = date(year, month, calendar.monthrange(year, month)[1])
+    reporting_end = get_reporting_end_date(month_start, month_end)
+
+    users_result = await session.execute(
+        select(
+            user.c.id,
+            user.c.name,
+            user.c.surname,
+            user.c.is_active,
+            user.c.role,
+            user.c.company_code,
+        )
+        .where(user.c.is_active == True)
+        .order_by(user.c.name.asc(), user.c.surname.asc(), user.c.id.asc())
+    )
+    user_rows = [
+        row for row in users_result.fetchall()
+        if row.role != UserRole.customer
+        and row.role != UserRole.CEO
+        and str(row.company_code or "").strip().lower() != "ceo"
+    ]
+    user_ids = [row.id for row in user_rows]
+
+    override_pack = await fetch_override_pack(session, month_start, month_end, user_ids=user_ids)
+
+    updates_result = await session.execute(
+        select(
+            daily_update_log.c.id,
+            daily_update_log.c.user_id,
+            daily_update_log.c.update_date,
+            daily_update_log.c.update_content,
+            daily_update_log.c.is_valid,
+            daily_update_log.c.created_at,
+        )
+        .where(
+            and_(
+                daily_update_log.c.user_id.in_(user_ids) if user_ids else False,
+                daily_update_log.c.update_date >= month_start,
+                daily_update_log.c.update_date <= month_end,
+            )
+        )
+        .order_by(
+            daily_update_log.c.user_id.asc(),
+            daily_update_log.c.update_date.desc(),
+            daily_update_log.c.created_at.desc(),
+        )
+    )
+    update_rows = updates_result.fetchall()
+
+    updates_by_user: Dict[int, List[Any]] = {}
+    for row in update_rows:
+        updates_by_user.setdefault(row.user_id, []).append(row)
+
+    payload = []
+    for member in user_rows:
+        user_update_rows = updates_by_user.get(member.id, [])
+        submitted_dates = {row.update_date for row in user_update_rows if bool(row.is_valid)}
+        expected_workdays = list_expected_update_days(override_pack, member.id, month_start, reporting_end)
+        stats_expected_dates = set(
+            exclude_pending_today_from_expected_days(expected_workdays, submitted_dates)
+        )
+        full_month_expected_dates = set(list_expected_update_days(override_pack, member.id, month_start, month_end))
+
+        merged_updates = [
+            {
+                "id": row.id,
+                "date": str(row.update_date),
+                "content": row.update_content,
+                "is_valid": row.is_valid,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "entry_type": "update",
+                "is_day_off": row.update_date.weekday() != 6 and row.update_date not in full_month_expected_dates,
+                "update_expected": row.update_date in stats_expected_dates,
+                "workday_override": _serialize_effective_override(
+                    get_effective_override(override_pack, member.id, row.update_date)
+                ),
+            }
+            for row in user_update_rows
+        ]
+
+        override_dates = set(override_pack.get("global", {}).keys()) | set(
+            override_pack.get("member", {}).get(member.id, {}).keys()
+        )
+        existing_dates = {row.update_date for row in user_update_rows}
+
+        for override_date in sorted(override_dates, reverse=True):
+            if override_date < month_start or override_date > month_end or override_date in existing_dates:
+                continue
+            effective_override = get_effective_override(override_pack, member.id, override_date)
+            if effective_override is None:
+                continue
+            merged_updates.append(
+                {
+                    "id": None,
+                    "date": str(override_date),
+                    "content": None,
+                    "is_valid": None,
+                    "created_at": None,
+                    "entry_type": "override",
+                    "is_day_off": override_date.weekday() != 6 and override_date not in full_month_expected_dates,
+                    "update_expected": override_date in stats_expected_dates,
+                    "workday_override": _serialize_effective_override(effective_override),
+                }
+            )
+
+        merged_updates.sort(
+            key=lambda item: (
+                item["date"],
+                item["created_at"] or "",
+                item["entry_type"] == "update",
+            ),
+            reverse=True,
+        )
+
+        working_days = len(stats_expected_dates)
+        update_days = len(stats_expected_dates & submitted_dates)
+        missing_days = max(working_days - update_days, 0)
+        percentage = round((update_days / working_days) * 100, 1) if working_days > 0 else 0.0
+
+        payload.append(
+            {
+                "user_id": member.id,
+                "name": f"{member.name} {member.surname}",
+                "working_days": working_days,
+                "update_days": update_days,
+                "missing_days": missing_days,
+                "percentage": percentage,
+                "updates": merged_updates,
+            }
+        )
+
+    return payload
+
+
 @router.get("/employee-monthly-updates", summary="Get employee monthly updates with message texts")
 async def get_employee_monthly_updates(
     employee_id: int,
