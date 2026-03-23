@@ -31,6 +31,7 @@ from schemes.projects_schemes import (
     ColumnCreateRequest,
     ColumnMoveRequest,
     ColumnUpdateRequest,
+    ProjectBoardsDetailResponse,
     ProjectDetailResponse,
     ProjectListResponse,
     ProjectSummaryResponse,
@@ -153,6 +154,28 @@ async def ensure_valid_member_ids(
         )
 
     return sorted(existing_ids)
+
+
+def parse_member_ids_form(raw_member_ids: Optional[Sequence[str]]) -> Optional[List[int]]:
+    if raw_member_ids is None:
+        return None
+
+    parsed_ids: List[int] = []
+    for raw_value in raw_member_ids:
+        if raw_value is None:
+            continue
+        for piece in str(raw_value).split(","):
+            normalized_piece = piece.strip()
+            if not normalized_piece:
+                continue
+            try:
+                parsed_ids.append(int(normalized_piece))
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"member_ids ichida noto'g'ri qiymat bor: '{normalized_piece}'",
+                )
+    return parsed_ids
 
 
 async def ensure_user_exists(session: AsyncSession, user_id: Optional[int]) -> None:
@@ -456,7 +479,7 @@ async def create_project(
     project_name: str = Form(...),
     project_description: Optional[str] = Form(None),
     project_url: Optional[str] = Form(None),
-    member_ids: List[int] = Form([]),
+    member_ids: Optional[List[str]] = Form(None),
     image: Optional[UploadFile] = File(None),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
@@ -469,7 +492,8 @@ async def create_project(
             detail="Project nomi bo'sh bo'lishi mumkin emas",
         )
 
-    validated_member_ids = await ensure_valid_member_ids(session, member_ids, current_user.id)
+    parsed_member_ids = parse_member_ids_form(member_ids) or []
+    validated_member_ids = await ensure_valid_member_ids(session, parsed_member_ids, current_user.id)
     image_path = await save_image(image, "project") if image else None
 
     result = await session.execute(
@@ -562,13 +586,43 @@ async def get_project_detail(
     )
 
 
+@router.get(
+    "/projects/{project_id}/boards/detail",
+    response_model=ProjectBoardsDetailResponse,
+    summary="Project boardlari columns va cardlar bilan",
+)
+async def get_project_boards_detail(
+    project_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_member_access(session, project_id, current_user)
+
+    boards_result = await session.execute(
+        select(project_board)
+        .where(
+            project_board.c.project_id == project_id,
+            project_board.c.is_archived == False,  # noqa: E712
+        )
+        .order_by(project_board.c.id.desc())
+    )
+    board_rows = boards_result.fetchall()
+    board_details = [await build_board_detail(session, board_row) for board_row in board_rows]
+
+    return ProjectBoardsDetailResponse(
+        project_id=project_id,
+        boards=board_details,
+        total_count=len(board_details),
+    )
+
+
 @router.patch("/projects/{project_id}", response_model=SuccessResponse, summary="Projectni yangilash")
 async def update_project(
     project_id: int,
     project_name: Optional[str] = Form(None),
     project_description: Optional[str] = Form(None),
     project_url: Optional[str] = Form(None),
-    member_ids: Optional[List[int]] = Form(None),
+    member_ids: Optional[List[str]] = Form(None),
     image: Optional[UploadFile] = File(None),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
@@ -589,15 +643,16 @@ async def update_project(
     if project_url is not None:
         update_values["project_url"] = project_url
 
-    if member_ids is not None:
-        member_ids = await ensure_valid_member_ids(session, member_ids, current_user.id)
+    parsed_member_ids = parse_member_ids_form(member_ids)
+    if parsed_member_ids is not None:
+        parsed_member_ids = await ensure_valid_member_ids(session, parsed_member_ids, current_user.id)
 
     if image is not None:
         image_path = await save_image(image, "project")
         delete_image_if_exists(project_row.project_image)
         update_values["project_image"] = image_path
 
-    if not update_values and member_ids is None:
+    if not update_values and parsed_member_ids is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Yangilanadigan ma'lumot topilmadi",
@@ -609,7 +664,7 @@ async def update_project(
             update(project).where(project.c.id == project_id).values(**update_values)
         )
 
-    if member_ids is not None:
+    if parsed_member_ids is not None:
         await session.execute(delete(project_member).where(project_member.c.project_id == project_id))
         await session.execute(
             insert(project_member).values(
@@ -619,7 +674,7 @@ async def update_project(
                         "user_id": member_id,
                         "created_at": datetime.utcnow(),
                     }
-                    for member_id in member_ids
+                    for member_id in parsed_member_ids
                 ]
             )
         )

@@ -75,6 +75,20 @@ class MessageResponse(BaseModel):
 class MessageListResponse(BaseModel):
     messages: List[MessageResponse]
 
+
+class MyMessageResponse(BaseModel):
+    id: int
+    sender_id: int
+    sender_name: str
+    sender_email: str
+    subject: str
+    body: str
+    sent_at: str
+
+
+class MyMessageListResponse(BaseModel):
+    messages: List[MyMessageResponse]
+
 # --- PAYMENT SCHEMAS ---
 class PaymentCreateRequest(BaseModel):
     project: str

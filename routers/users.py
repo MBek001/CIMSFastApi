@@ -10,6 +10,7 @@ from models.user_models import user, message, user_payment, user_page_permission
 from schemes.schemes_users import (
     UserCreateRequest, UserUpdateRequest, UserResponse, UserListResponse, UserToggleResponse,
     MessageToAllRequest, MessageToUserRequest, MessageListResponse,
+    MyMessageListResponse,
     PaymentCreateRequest, PaymentUpdateRequest, PaymentListResponse, PaymentToggleResponse,
     CompanyRecurringPaymentCreateRequest, CompanyRecurringPaymentUpdateRequest,
     SuccessResponse, CreateResponse, DashboardResponse
@@ -590,6 +591,44 @@ async def get_ceo_messages(
         messages_list.append(message_dict)
 
     return MessageListResponse(messages=messages_list)
+
+
+@router.get("/my-messages", response_model=MyMessageListResponse, summary="Login userga kelgan xabarlar")
+async def get_my_messages(
+        session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(get_current_active_user)
+):
+    messages_result = await session.execute(
+        select(
+            message.c.id,
+            message.c.sender_id,
+            message.c.subject,
+            message.c.body,
+            message.c.sent_at,
+            user.c.name,
+            user.c.surname,
+            user.c.email
+        )
+        .join(user, message.c.sender_id == user.c.id)
+        .where(message.c.receiver_id == current_user.id)
+        .order_by(message.c.sent_at.desc())
+    )
+    messages_data = messages_result.fetchall()
+
+    return MyMessageListResponse(
+        messages=[
+            {
+                "id": msg.id,
+                "sender_id": msg.sender_id,
+                "sender_name": f"{msg.name} {msg.surname}",
+                "sender_email": msg.email,
+                "subject": msg.subject,
+                "body": msg.body,
+                "sent_at": msg.sent_at.isoformat()
+            }
+            for msg in messages_data
+        ]
+    )
 
 
 # --- 9. XABAR O'CHIRISH ---

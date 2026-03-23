@@ -108,6 +108,12 @@ class ProjectDetailResponse(BaseModel):
     boards: List[BoardListItemResponse] = Field(default_factory=list)
 
 
+class ProjectBoardsDetailResponse(BaseModel):
+    project_id: int
+    boards: List[BoardDetailResponse] = Field(default_factory=list)
+    total_count: int
+
+
 class ProjectListResponse(BaseModel):
     projects: List[ProjectSummaryResponse]
     total_count: int
