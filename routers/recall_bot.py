@@ -3,6 +3,7 @@ Recall Bot Router
 Handles Telegram admin panel and scheduled recall reminders.
 """
 import asyncio
+import calendar
 from datetime import datetime, timedelta, timezone, date
 from io import BytesIO
 from typing import Optional, Dict
@@ -32,14 +33,14 @@ from models.admin_models import (
     recall_bot_admin,
     recall_bot_recipient,
     recall_notification_log,
+    company_recurring_payment,
+    company_payment_reminder_log,
     crm_daily_stats_delivery_log,
     customer_status_change_log
 )
 from models.user_models import user_page_permission, PageName
 from utils.crypto import decrypt_text
 from utils.ai_summary import generate_customer_ai_summary
-from utils.recall_policy import get_target_reminder_minutes
-
 router = APIRouter(prefix="/recall-bot", tags=["Recall Bot"])
 
 bot = Bot(token=TELEGRAM_RECALL_BOT_TOKEN) if TELEGRAM_RECALL_BOT_TOKEN else None
@@ -48,6 +49,7 @@ SCHEDULER_INTERVAL_SECONDS = 30
 DUE_WINDOW_PAST_SECONDS = 120
 DUE_WINDOW_FUTURE_SECONDS = 20
 LOOKAHEAD_MINUTES = 61
+RECALL_BOT_REMINDER_MINUTES = 5
 UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
 
 _scheduler_task: Optional[asyncio.Task] = None
@@ -313,6 +315,37 @@ def _format_reminder_message_prefix(
     seconds_left = max(0, int((recall_at - now).total_seconds()))
     actual_minutes_left = max(1, (seconds_left + 59) // 60)
     return f"🔔 Recall eslatma: {actual_minutes_left} daqiqa qoldi"
+
+
+def _build_company_payment_schedule_utc_naive(
+    *,
+    payment_day: int,
+    payment_time,
+    reference_dt_uz: datetime,
+) -> datetime:
+    last_day = calendar.monthrange(reference_dt_uz.year, reference_dt_uz.month)[1]
+    target_day = min(max(1, int(payment_day)), last_day)
+    local_dt = datetime(
+        reference_dt_uz.year,
+        reference_dt_uz.month,
+        target_day,
+        payment_time.hour,
+        payment_time.minute,
+        payment_time.second,
+        tzinfo=UZBEKISTAN_TZ,
+    )
+    return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _format_company_payment_message(payment_title: str, amount_value, scheduled_for: datetime, note: Optional[str]) -> str:
+    return (
+        "‼️‼️ COMPANY TO'LOV ESLATMASI ‼️‼️\n\n"
+        f"🧾 To'lov: {payment_title}\n"
+        f"💰 Summa: {amount_value}\n"
+        f"📅 Sana: {_format_uzbek_time_from_utc_naive(scheduled_for)}\n"
+        f"📝 Izoh: {note or 'yo`q'}\n\n"
+        "❗️ Shu to'lovni amalga oshirishingiz kerak."
+    )
 
 
 async def _collect_notes_for_range(
@@ -948,15 +981,12 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
         customer_phone = _safe_decrypt(c.phone_number)
         customer_note = _clean_note_text(c.notes) or "yo'q"
         customer_status = c.status_name or c.status
-        target_reminder_minutes = get_target_reminder_minutes(customer_status)
+        target_reminder_minutes = RECALL_BOT_REMINDER_MINUTES
         target_reminder_at = recall_at - timedelta(minutes=target_reminder_minutes)
 
-        if due_window_start <= target_reminder_at <= due_window_end:
-            reminder_minutes = target_reminder_minutes
-        elif target_reminder_at < due_window_start and due_window_start <= recall_at <= due_window_end:
-            reminder_minutes = 0
-        else:
+        if not (due_window_start <= target_reminder_at <= due_window_end):
             continue
+        reminder_minutes = target_reminder_minutes
 
         for recipient in recipients:
             key = (c.id, recipient.chat_id, reminder_minutes, recall_at)
@@ -1007,6 +1037,126 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
                         notification_sent=False,
                         sent_at=None,
                         error_message=str(exc)[:500]
+                    )
+                )
+                stats["failed"] += 1
+
+    await session.commit()
+    return stats
+
+
+async def process_due_company_payment_notifications(session: AsyncSession) -> Dict[str, int]:
+    stats = {
+        "payments_checked": 0,
+        "recipients_count": 0,
+        "due_notifications": 0,
+        "sent": 0,
+        "failed": 0,
+        "skipped_duplicate": 0,
+    }
+
+    if not bot:
+        return stats
+
+    now = _utc_now_naive()
+    now_uz = datetime.now(UZBEKISTAN_TZ)
+    due_window_start = now - timedelta(seconds=DUE_WINDOW_PAST_SECONDS)
+    due_window_end = now + timedelta(seconds=DUE_WINDOW_FUTURE_SECONDS)
+
+    recipients_result = await session.execute(
+        select(
+            recall_bot_recipient.c.chat_id,
+            recall_bot_recipient.c.telegram_username
+        ).where(recall_bot_recipient.c.is_active == True)
+    )
+    recipients = recipients_result.fetchall()
+    stats["recipients_count"] = len(recipients)
+    if not recipients:
+        return stats
+
+    payments_result = await session.execute(
+        select(company_recurring_payment).where(company_recurring_payment.c.is_active == True)
+    )
+    payments = payments_result.fetchall()
+    stats["payments_checked"] = len(payments)
+    if not payments:
+        return stats
+
+    candidate_start = now - timedelta(minutes=1)
+    candidate_end = now + timedelta(minutes=1)
+    existing_logs_result = await session.execute(
+        select(
+            company_payment_reminder_log.c.payment_id,
+            company_payment_reminder_log.c.recipient_chat_id,
+            company_payment_reminder_log.c.scheduled_for,
+        ).where(
+            and_(
+                company_payment_reminder_log.c.scheduled_for >= candidate_start,
+                company_payment_reminder_log.c.scheduled_for <= candidate_end,
+            )
+        )
+    )
+    existing_keys = {
+        (row.payment_id, row.recipient_chat_id, row.scheduled_for)
+        for row in existing_logs_result.fetchall()
+    }
+
+    for payment in payments:
+        scheduled_for = _build_company_payment_schedule_utc_naive(
+            payment_day=payment.payment_day,
+            payment_time=payment.payment_time,
+            reference_dt_uz=now_uz,
+        )
+        if not (due_window_start <= scheduled_for <= due_window_end):
+            continue
+
+        for recipient in recipients:
+            key = (payment.id, recipient.chat_id, scheduled_for)
+            if key in existing_keys:
+                stats["skipped_duplicate"] += 1
+                continue
+
+            stats["due_notifications"] += 1
+            insert_result = await session.execute(
+                insert(company_payment_reminder_log).values(
+                    payment_id=payment.id,
+                    recipient_chat_id=recipient.chat_id,
+                    scheduled_for=scheduled_for,
+                    notification_sent=False,
+                    created_at=_utc_now_naive(),
+                )
+            )
+            log_id = insert_result.inserted_primary_key[0]
+            existing_keys.add(key)
+
+            try:
+                await _send_message(
+                    recipient.chat_id,
+                    _format_company_payment_message(
+                        payment_title=payment.title,
+                        amount_value=payment.amount,
+                        scheduled_for=scheduled_for,
+                        note=payment.note,
+                    ),
+                )
+                await session.execute(
+                    update(company_payment_reminder_log)
+                    .where(company_payment_reminder_log.c.id == log_id)
+                    .values(
+                        notification_sent=True,
+                        sent_at=_utc_now_naive(),
+                        error_message=None,
+                    )
+                )
+                stats["sent"] += 1
+            except Exception as exc:
+                await session.execute(
+                    update(company_payment_reminder_log)
+                    .where(company_payment_reminder_log.c.id == log_id)
+                    .values(
+                        notification_sent=False,
+                        sent_at=None,
+                        error_message=str(exc)[:500],
                     )
                 )
                 stats["failed"] += 1
@@ -1158,6 +1308,7 @@ async def _scheduler_loop() -> None:
             if bot:
                 async with async_session_maker() as session:
                     await process_due_recall_notifications(session)
+                    await process_due_company_payment_notifications(session)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1228,6 +1379,26 @@ async def run_recall_reminders(
         raise HTTPException(status_code=403, detail="Ruxsat yo'q")
 
     stats = await process_due_recall_notifications(session)
+    return {"status": "ok", "stats": stats}
+
+
+@router.post("/process-company-payment-reminders", summary="Company payment reminderlarni majburan ishga tushirish")
+async def run_company_payment_reminders(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_user)
+):
+    permissions_result = await session.execute(
+        select(user_page_permission.c.page_name).where(
+            and_(
+                user_page_permission.c.user_id == current_user.id,
+                user_page_permission.c.page_name == PageName.crm
+            )
+        )
+    )
+    if not permissions_result.fetchone() and current_user.company_code != "ceo":
+        raise HTTPException(status_code=403, detail="Ruxsat yo'q")
+
+    stats = await process_due_company_payment_notifications(session)
     return {"status": "ok", "stats": stats}
 
 

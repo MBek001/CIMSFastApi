@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy import select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime
+from datetime import datetime, date, time
 from typing import List
+import calendar
 
 # Import qilinadigan modellar
 from models.user_models import user, message, user_payment, user_page_permission, UserRole, PageName
@@ -10,6 +11,7 @@ from schemes.schemes_users import (
     UserCreateRequest, UserUpdateRequest, UserResponse, UserListResponse, UserToggleResponse,
     MessageToAllRequest, MessageToUserRequest, MessageListResponse,
     PaymentCreateRequest, PaymentUpdateRequest, PaymentListResponse, PaymentToggleResponse,
+    CompanyRecurringPaymentCreateRequest, CompanyRecurringPaymentUpdateRequest,
     SuccessResponse, CreateResponse, DashboardResponse
 )
 from auth_utils.auth_func import get_current_active_user, get_password_hash
@@ -18,10 +20,82 @@ from utils.file_storage import delete_image_if_exists, save_image
 
 from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
 from models.user_models import  user_payment
-from  models.admin_models import customer,CustomerStatus
+from  models.admin_models import customer,CustomerStatus, company_recurring_payment
 from routers.finance import  get_db_exchange_rate,calculate_card_balances
 
 router = APIRouter(prefix="/ceo", tags=['CEO Dashboard'])
+
+
+def _resolve_next_company_payment_occurrence(payment_day: int, payment_time: time) -> datetime:
+    now = datetime.now()
+    year = now.year
+    month = now.month
+
+    while True:
+        last_day = calendar.monthrange(year, month)[1]
+        target_day = min(payment_day, last_day)
+        target_at = datetime(year, month, target_day, payment_time.hour, payment_time.minute, payment_time.second)
+        if target_at >= now:
+            return target_at
+        if month == 12:
+            year += 1
+            month = 1
+        else:
+            month += 1
+
+
+def _serialize_company_payment(row):
+    next_occurrence = _resolve_next_company_payment_occurrence(row.payment_day, row.payment_time)
+    return {
+        "id": row.id,
+        "title": row.title,
+        "amount": float(row.amount),
+        "payment_day": row.payment_day,
+        "payment_time": row.payment_time.strftime("%H:%M:%S") if row.payment_time else None,
+        "note": row.note,
+        "is_active": bool(row.is_active),
+        "next_occurrence": next_occurrence.isoformat(),
+        "created_at": row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+        "updated_at": row.updated_at.isoformat() if getattr(row, "updated_at", None) else None,
+    }
+
+
+def _validate_company_payment_day(payment_day: int) -> None:
+    if payment_day < 1 or payment_day > 31:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="payment_day 1 dan 31 gacha bo'lishi kerak"
+        )
+
+
+def _get_user_role_display(user_row) -> str:
+    role_name = str(getattr(user_row, "role_name", "") or "").strip()
+    if role_name == UserRole.general_manager.name:
+        return UserRole.general_manager.value
+
+    role = getattr(user_row, "role", None)
+    role_value = getattr(role, "value", None)
+    if role_value:
+        return str(role_value)
+    if role_name:
+        return role_name.replace("_", " ").title()
+    return ""
+
+
+def _prepare_role_payload(role: UserRole) -> dict:
+    return {
+        "role": role,
+        "role_name": role.name,
+    }
+
+
+def _is_missing_db_enum_value_error(exc: Exception, role: UserRole) -> bool:
+    message = str(exc).lower()
+    return (
+        "invalid input value for enum" in message
+        and "userrole" in message
+        and role.name.lower() in message
+    )
 
 
 # --- DECORATOR: CEO huquqini tekshirish ---
@@ -91,7 +165,7 @@ async def ceo_dashboard(
             "company_code": user_data.company_code,
             "telegram_id": user_data.telegram_id,
             "default_salary": float(user_data.default_salary),
-            "role": user_data.role.value,
+            "role": _get_user_role_display(user_data),
             "job_title": user_data.job_title,
             "profile_image": user_data.profile_image,
             "is_active": user_data.is_active,
@@ -218,14 +292,25 @@ async def create_user(
         "company_code": user_data.company_code,
         "telegram_id": user_data.telegram_id,
         "default_salary": user_data.default_salary,
-        "role": user_data.role,
         "job_title": user_data.job_title,
         "profile_image": user_data.profile_image,
         "is_active": user_data.is_active
     }
+    user_dict.update(_prepare_role_payload(user_data.role))
 
-    result = await session.execute(insert(user).values(**user_dict))
-    await session.commit()
+    try:
+        result = await session.execute(insert(user).values(**user_dict))
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        if user_data.role == UserRole.general_manager and _is_missing_db_enum_value_error(exc, user_data.role):
+            fallback_user_dict = dict(user_dict)
+            fallback_user_dict["role"] = UserRole.member
+            fallback_user_dict["role_name"] = UserRole.general_manager.name
+            result = await session.execute(insert(user).values(**fallback_user_dict))
+            await session.commit()
+        else:
+            raise
 
     return CreateResponse(
         message="Foydalanuvchi muvaffaqiyatli yaratildi",
@@ -261,6 +346,8 @@ async def update_user(
     for field, value in user_data.dict(exclude_unset=True).items():
         if field == "password" and value:
             update_data[field] = get_password_hash(value)
+        elif field == "role" and value is not None:
+            update_data.update(_prepare_role_payload(value))
         elif field == "job_title":
             update_data[field] = value
         elif value is not None:
@@ -273,10 +360,24 @@ async def update_user(
         )
 
     # Ma'lumotlarni yangilash
-    await session.execute(
-        update(user).where(user.c.id == user_id).values(**update_data)
-    )
-    await session.commit()
+    try:
+        await session.execute(
+            update(user).where(user.c.id == user_id).values(**update_data)
+        )
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        requested_role = user_data.role if "role" in user_data.dict(exclude_unset=True) else None
+        if requested_role == UserRole.general_manager and _is_missing_db_enum_value_error(exc, requested_role):
+            fallback_update_data = dict(update_data)
+            fallback_update_data["role"] = UserRole.member
+            fallback_update_data["role_name"] = UserRole.general_manager.name
+            await session.execute(
+                update(user).where(user.c.id == user_id).values(**fallback_update_data)
+            )
+            await session.commit()
+        else:
+            raise
 
     return SuccessResponse(message="Foydalanuvchi muvaffaqiyatli yangilandi")
 
@@ -680,6 +781,85 @@ async def toggle_payment_status(
     )
 
 
+@router.get("/company-payments", summary="Company recurring payment reminderlar ro'yxati")
+async def get_company_payments(
+        session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(require_ceo_access)
+):
+    result = await session.execute(
+        select(company_recurring_payment).order_by(company_recurring_payment.c.payment_day.asc(), company_recurring_payment.c.payment_time.asc())
+    )
+    return {"payments": [_serialize_company_payment(row) for row in result.fetchall()]}
+
+
+@router.post("/company-payments", response_model=CreateResponse, summary="Company recurring payment reminder yaratish")
+async def create_company_payment(
+        payment_data: CompanyRecurringPaymentCreateRequest,
+        session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(require_ceo_access)
+):
+    _validate_company_payment_day(payment_data.payment_day)
+    result = await session.execute(
+        insert(company_recurring_payment).values(
+            title=payment_data.title,
+            amount=payment_data.amount,
+            payment_day=payment_data.payment_day,
+            payment_time=payment_data.payment_time,
+            note=payment_data.note,
+            is_active=payment_data.is_active,
+        )
+    )
+    await session.commit()
+    return CreateResponse(message="Company payment reminder yaratildi", id=result.inserted_primary_key[0])
+
+
+@router.put("/company-payments/{payment_id}", response_model=SuccessResponse, summary="Company recurring payment reminder yangilash")
+async def update_company_payment(
+        payment_id: int,
+        payment_data: CompanyRecurringPaymentUpdateRequest,
+        session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(require_ceo_access)
+):
+    existing_result = await session.execute(
+        select(company_recurring_payment).where(company_recurring_payment.c.id == payment_id)
+    )
+    existing = existing_result.fetchone()
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company payment topilmadi")
+
+    update_data = payment_data.dict(exclude_unset=True)
+    if "payment_day" in update_data:
+        _validate_company_payment_day(update_data["payment_day"])
+    if not update_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Yangilanadigan ma'lumot topilmadi")
+
+    await session.execute(
+        update(company_recurring_payment)
+        .where(company_recurring_payment.c.id == payment_id)
+        .values(**update_data)
+    )
+    await session.commit()
+    return SuccessResponse(message="Company payment reminder yangilandi")
+
+
+@router.delete("/company-payments/{payment_id}", response_model=SuccessResponse, summary="Company recurring payment reminder o'chirish")
+async def delete_company_payment(
+        payment_id: int,
+        session: AsyncSession = Depends(get_async_session),
+        current_user=Depends(require_ceo_access)
+):
+    existing_result = await session.execute(
+        select(company_recurring_payment.c.id).where(company_recurring_payment.c.id == payment_id)
+    )
+    existing = existing_result.scalar()
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company payment topilmadi")
+
+    await session.execute(delete(company_recurring_payment).where(company_recurring_payment.c.id == payment_id))
+    await session.commit()
+    return SuccessResponse(message="Company payment reminder o'chirildi")
+
+
 
 
 
@@ -1074,7 +1254,7 @@ async def get_all_users_permissions_overview(
             "user_id": user_data.id,
             "email": user_data.email,
             "name": f"{user_data.name} {user_data.surname}",
-            "role": user_data.role.value,
+            "role": _get_user_role_display(user_data),
             "job_title": user_data.job_title,
             "is_active": user_data.is_active,
             "permissions": permissions,

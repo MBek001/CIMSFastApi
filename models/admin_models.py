@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Table, Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, MetaData, ForeignKey, UniqueConstraint
+    Table, Column, Integer, String, Boolean, DateTime, Date, Time, DECIMAL, Text, Enum, MetaData, ForeignKey, UniqueConstraint
 )
 import enum
 from datetime import datetime
@@ -336,7 +336,42 @@ crm_daily_stats_delivery_log = Table(
     UniqueConstraint("report_date", "recipient_chat_id", name="uq_crm_daily_stats_delivery")
 )
 
-# 21. CRM customer status change log (for period statistics)
+# 21. Company recurring payments (monthly reminder source)
+company_recurring_payment = Table(
+    "company_recurring_payment",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("title", String(255), nullable=False),
+    Column("amount", DECIMAL(19, 2), nullable=False),
+    Column("payment_day", Integer, nullable=False),
+    Column("payment_time", Time, nullable=False),
+    Column("note", Text, nullable=True),
+    Column("is_active", Boolean, default=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 22. Company payment reminder log (dedupe + delivery status)
+company_payment_reminder_log = Table(
+    "company_payment_reminder_log",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("payment_id", Integer, ForeignKey("company_recurring_payment.id", ondelete="CASCADE"), nullable=False),
+    Column("recipient_chat_id", String(64), nullable=False),
+    Column("scheduled_for", DateTime, nullable=False),
+    Column("notification_sent", Boolean, default=False),
+    Column("error_message", String(500), nullable=True),
+    Column("sent_at", DateTime, nullable=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    UniqueConstraint(
+        "payment_id",
+        "recipient_chat_id",
+        "scheduled_for",
+        name="uq_company_payment_reminder_once"
+    )
+)
+
+# 23. CRM customer status change log (for period statistics)
 customer_status_change_log = Table(
     "customer_status_change_log",
     metadata,

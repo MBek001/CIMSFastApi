@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
-from datetime import datetime, date
+from datetime import datetime, date, time
 from decimal import Decimal
 from models.user_models import UserRole
 
@@ -102,6 +102,24 @@ class PaymentToggleResponse(BaseModel):
     message: str
     payment_id: int
     payment_status: bool
+
+
+class CompanyRecurringPaymentCreateRequest(BaseModel):
+    title: str
+    amount: Decimal
+    payment_day: int
+    payment_time: time
+    note: Optional[str] = None
+    is_active: bool = True
+
+
+class CompanyRecurringPaymentUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    amount: Optional[Decimal] = None
+    payment_day: Optional[int] = None
+    payment_time: Optional[time] = None
+    note: Optional[str] = None
+    is_active: Optional[bool] = None
 
 # --- GENERAL RESPONSE SCHEMAS ---
 class SuccessResponse(BaseModel):
