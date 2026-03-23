@@ -25,6 +25,7 @@ class PageName(enum.Enum):
     crm = "crm"
     finance_list = "finance_list"
     update_list = "update_list"
+    company_payments = "company_payments"
 
 
 
