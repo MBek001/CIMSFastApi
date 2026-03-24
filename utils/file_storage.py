@@ -11,6 +11,11 @@ IMAGES_ROOT = PROJECT_ROOT / "images"
 PROJECT_IMAGES_DIR = IMAGES_ROOT / "project_images"
 PROFILE_IMAGES_DIR = IMAGES_ROOT / "profil_images"
 CARD_IMAGES_DIR = IMAGES_ROOT / "card_images"
+IMAGE_CATEGORY_DIRS = {
+    "project_images": PROJECT_IMAGES_DIR,
+    "profil_images": PROFILE_IMAGES_DIR,
+    "card_images": CARD_IMAGES_DIR,
+}
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -19,6 +24,53 @@ def ensure_image_directories() -> None:
     PROJECT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     PROFILE_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     CARD_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def normalize_image_path(image_path: Optional[str]) -> Optional[str]:
+    if not image_path:
+        return None
+    normalized = image_path.strip().replace("\\", "/")
+    if not normalized:
+        return None
+    normalized = "/" + normalized.lstrip("/")
+    if not normalized.startswith("/images/"):
+        return None
+    return normalized
+
+
+def resolve_image_path(image_path: Optional[str]) -> Optional[Path]:
+    normalized = normalize_image_path(image_path)
+    if not normalized:
+        return None
+    candidate = (PROJECT_ROOT / normalized.lstrip("/")).resolve()
+    try:
+        candidate.relative_to(IMAGES_ROOT.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def list_image_paths(category: Optional[str] = None) -> list[str]:
+    ensure_image_directories()
+    if category is not None and category not in IMAGE_CATEGORY_DIRS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Noto'g'ri image category",
+        )
+
+    directories = (
+        [IMAGE_CATEGORY_DIRS[category]]
+        if category is not None
+        else list(IMAGE_CATEGORY_DIRS.values())
+    )
+
+    image_paths: list[str] = []
+    for directory in directories:
+        for file_path in sorted(directory.iterdir()):
+            if not file_path.is_file() or file_path.name.startswith("."):
+                continue
+            image_paths.append(f"/images/{file_path.relative_to(IMAGES_ROOT).as_posix()}")
+    return image_paths
 
 
 def _validate_image_extension(filename: Optional[str]) -> str:
@@ -78,13 +130,6 @@ async def save_image(upload: UploadFile, category: str) -> str:
 
 
 def delete_image_if_exists(image_path: Optional[str]) -> None:
-    if not image_path:
-        return
-
-    normalized = image_path.strip().lstrip("/")
-    if not normalized.startswith("images/"):
-        return
-
-    absolute_path = PROJECT_ROOT / normalized
-    if absolute_path.exists() and absolute_path.is_file():
+    absolute_path = resolve_image_path(image_path)
+    if absolute_path and absolute_path.exists() and absolute_path.is_file():
         absolute_path.unlink()

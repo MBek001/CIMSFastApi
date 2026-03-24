@@ -2,7 +2,7 @@
 Pydantic schemas for dynamic Status and Role management
 """
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Literal, Optional
 from datetime import datetime
 
 
@@ -213,3 +213,35 @@ class ConversionRateResponse(BaseModel):
     project_started_count: int = Field(..., description="Number of leads that reached 'project_started' status")
     conversion_rate: float = Field(..., description="Percentage of conversion (0-100)")
     period: str = Field(..., description="Analysis period description")
+
+
+# ========================================
+# IMAGE CLEANUP SCHEMAS
+# ========================================
+
+class ImageDeleteResponse(BaseModel):
+    message: str
+    requested_count: int
+    deleted_count: int
+    missing_count: int
+    skipped_count: int
+    deleted_paths: list[str] = Field(default_factory=list)
+    missing_paths: list[str] = Field(default_factory=list)
+    skipped_items: list[str] = Field(default_factory=list)
+    cleared_references: dict[str, int] = Field(default_factory=dict)
+
+
+class ImageBulkDeleteRequest(BaseModel):
+    image_paths: list[str] = Field(default_factory=list, description="Delete qilinadigan image pathlar")
+    category: Optional[Literal["project_images", "profil_images", "card_images"]] = Field(
+        None,
+        description="Bulk o'chirish uchun category"
+    )
+    delete_all_in_category: bool = Field(
+        False,
+        description="True bo'lsa category ichidagi barcha rasmlar ko'rib chiqiladi"
+    )
+    only_unreferenced: bool = Field(
+        False,
+        description="Faqat DB da reference bo'lmagan rasmlarni o'chirish"
+    )

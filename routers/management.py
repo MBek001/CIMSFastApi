@@ -2,7 +2,9 @@
 Management Router - Status and Role Management APIs
 CEO can manage customer statuses and user roles dynamically
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from collections import Counter
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, insert, update, delete, func
 from datetime import datetime
@@ -17,6 +19,7 @@ from models.admin_models import (
     user_role_table,
     customer
 )
+from models.projects_models import project, project_board_card_file
 from schemes.schemes_management import (
     AppPageCreate,
     AppPageUpdate,
@@ -24,10 +27,13 @@ from schemes.schemes_management import (
     CustomerStatusCreate,
     CustomerStatusUpdate,
     CustomerStatusResponse,
+    ImageBulkDeleteRequest,
+    ImageDeleteResponse,
     UserRoleCreate,
     UserRoleUpdate,
     UserRoleResponse,
 )
+from utils.file_storage import list_image_paths, normalize_image_path, resolve_image_path
 from utils.page_permissions import initialize_default_pages
 
 router = APIRouter(prefix="/management", tags=["Management"])
@@ -87,6 +93,113 @@ async def initialize_default_roles(session: AsyncSession):
         for role_data in default_roles:
             await session.execute(insert(user_role_table).values(**role_data))
         await session.commit()
+
+
+async def _get_image_reference_counts(session: AsyncSession) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+
+    user_rows = (await session.execute(
+        select(user.c.profile_image).where(user.c.profile_image.is_not(None))
+    )).fetchall()
+    project_rows = (await session.execute(
+        select(project.c.project_image).where(project.c.project_image.is_not(None))
+    )).fetchall()
+    card_rows = (await session.execute(
+        select(project_board_card_file.c.url_path).where(project_board_card_file.c.url_path.is_not(None))
+    )).fetchall()
+
+    for row in user_rows:
+        normalized = normalize_image_path(row.profile_image)
+        if normalized:
+            counts[normalized] += 1
+    for row in project_rows:
+        normalized = normalize_image_path(row.project_image)
+        if normalized:
+            counts[normalized] += 1
+    for row in card_rows:
+        normalized = normalize_image_path(row.url_path)
+        if normalized:
+            counts[normalized] += 1
+
+    return dict(counts)
+
+
+async def _clear_image_references(session: AsyncSession, normalized_path: str) -> dict[str, int]:
+    cleared = {"user_profile_image": 0, "project_image": 0, "card_file_rows": 0}
+
+    user_result = await session.execute(
+        update(user)
+        .where(user.c.profile_image == normalized_path)
+        .values(profile_image=None)
+    )
+    project_result = await session.execute(
+        update(project)
+        .where(project.c.project_image == normalized_path)
+        .values(project_image=None)
+    )
+    card_result = await session.execute(
+        delete(project_board_card_file)
+        .where(project_board_card_file.c.url_path == normalized_path)
+    )
+
+    cleared["user_profile_image"] = user_result.rowcount or 0
+    cleared["project_image"] = project_result.rowcount or 0
+    cleared["card_file_rows"] = card_result.rowcount or 0
+    return cleared
+
+
+async def _delete_images(
+    session: AsyncSession,
+    image_paths: list[str],
+    *,
+    only_unreferenced: bool,
+) -> ImageDeleteResponse:
+    reference_counts = await _get_image_reference_counts(session)
+    deleted_paths: list[str] = []
+    missing_paths: list[str] = []
+    skipped_items: list[str] = []
+    cleared_references = Counter()
+
+    for raw_path in image_paths:
+        normalized = normalize_image_path(raw_path)
+        if not normalized:
+            skipped_items.append(f"{raw_path}: noto'g'ri path")
+            continue
+
+        absolute_path = resolve_image_path(normalized)
+        if absolute_path is None or absolute_path.name.startswith("."):
+            skipped_items.append(f"{normalized}: himoyalangan yoki noto'g'ri fayl")
+            continue
+
+        reference_count = int(reference_counts.get(normalized, 0))
+        if only_unreferenced and reference_count > 0:
+            skipped_items.append(f"{normalized}: DB da {reference_count} ta reference bor")
+            continue
+
+        if not absolute_path.exists() or not absolute_path.is_file():
+            missing_paths.append(normalized)
+            continue
+
+        if reference_count > 0:
+            cleared = await _clear_image_references(session, normalized)
+            cleared_references.update(cleared)
+
+        absolute_path.unlink()
+        deleted_paths.append(normalized)
+
+    await session.commit()
+
+    return ImageDeleteResponse(
+        message="Image cleanup yakunlandi",
+        requested_count=len(image_paths),
+        deleted_count=len(deleted_paths),
+        missing_count=len(missing_paths),
+        skipped_count=len(skipped_items),
+        deleted_paths=deleted_paths,
+        missing_paths=missing_paths,
+        skipped_items=skipped_items,
+        cleared_references=dict(cleared_references),
+    )
 
 
 # ========================================
@@ -271,6 +384,60 @@ async def delete_page(
     await session.commit()
 
     return {"message": f"Sahifa '{existing_page.display_name}' muvaffaqiyatli o'chirildi"}
+
+
+# ========================================
+# IMAGE CLEANUP ENDPOINTS
+# ========================================
+
+@router.delete("/images", response_model=ImageDeleteResponse, summary="Bitta rasmni o'chirish")
+async def delete_single_image(
+    image_path: str = Query(..., description="Masalan: /images/project_images/abc.png"),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_ceo_access)
+):
+    """
+    images papkasidagi bitta rasmni o'chiradi.
+    Agar DB da reference bo'lsa, reference ham tozalanadi.
+    """
+    return await _delete_images(session, [image_path], only_unreferenced=False)
+
+
+@router.post("/images/bulk-delete", response_model=ImageDeleteResponse, summary="Rasmlarni bulk o'chirish")
+async def bulk_delete_images(
+    payload: ImageBulkDeleteRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_ceo_access)
+):
+    """
+    Rasmlarni list bo'yicha yoki category bo'yicha bulk o'chirish.
+
+    - `image_paths` berilsa: shu rasmlar ko'rib chiqiladi
+    - `delete_all_in_category=true` bo'lsa: tanlangan category ichidagi barcha rasmlar ko'rib chiqiladi
+    - `only_unreferenced=true` bo'lsa: DB da ishlatilmayotgan rasmlar o'chiriladi
+    """
+    target_paths = [path for path in payload.image_paths if str(path).strip()]
+
+    if payload.delete_all_in_category:
+        if not payload.category:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="delete_all_in_category=true bo'lsa category berilishi kerak"
+            )
+        target_paths = list_image_paths(payload.category)
+
+    if not target_paths:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="O'chirish uchun image_paths yoki category bo'yicha rasmlar topilmadi"
+        )
+
+    unique_paths = list(dict.fromkeys(target_paths))
+    return await _delete_images(
+        session,
+        unique_paths,
+        only_unreferenced=payload.only_unreferenced,
+    )
 
 
 # ========================================
