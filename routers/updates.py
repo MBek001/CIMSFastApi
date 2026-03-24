@@ -101,6 +101,10 @@ def is_ceo_user(current_user) -> bool:
     )
 
 
+def member_only_filter():
+    return user.c.role == UserRole.member
+
+
 def calculate_salary_estimate(
     base_salary: Decimal,
     total_penalty_points: Decimal,
@@ -500,7 +504,7 @@ async def get_members_salary_estimates(
         user.c.name,
         user.c.surname,
         user.c.default_salary
-    )
+    ).where(member_only_filter())
     if selected_employee_ids:
         users_query = users_query.where(user.c.id.in_(selected_employee_ids))
     users_query = users_query.order_by(user.c.name, user.c.surname)
@@ -605,6 +609,7 @@ async def get_employee_monthly_update_statistics(
             func.max(monthly_update.c.update_date).label("latest_report_date")
         )
         .select_from(monthly_update.join(user, monthly_update.c.user_id == user.c.id))
+        .where(member_only_filter())
         .group_by(monthly_update.c.user_id, user.c.name, user.c.surname)
         .order_by(user.c.name, user.c.surname)
     )
@@ -769,11 +774,7 @@ async def get_all_updates(
         .where(
             and_(
                 user.c.is_active == True,
-                or_(
-                    user.c.role.is_(None),
-                    and_(user.c.role != UserRole.customer, user.c.role != UserRole.CEO)
-                ),
-                func.lower(func.coalesce(user.c.company_code, "")) != "ceo"
+                member_only_filter(),
             )
         )
         .order_by(user.c.name, user.c.surname)
