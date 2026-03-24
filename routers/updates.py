@@ -15,6 +15,7 @@ from models.user_models import (
 )
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
+from utils.admin_stats import _is_excluded_from_admin_stats
 
 
 router = APIRouter(prefix="/members", tags=['Employess Api'])
@@ -103,6 +104,10 @@ def is_ceo_user(current_user) -> bool:
 
 def member_only_filter():
     return user.c.role == UserRole.member
+
+
+def is_visible_update_member(name: Optional[str], surname: Optional[str]) -> bool:
+    return not _is_excluded_from_admin_stats(name, surname)
 
 
 def calculate_salary_estimate(
@@ -510,7 +515,10 @@ async def get_members_salary_estimates(
     users_query = users_query.order_by(user.c.name, user.c.surname)
 
     users_result = await session.execute(users_query)
-    users_rows = users_result.fetchall()
+    users_rows = [
+        row for row in users_result.fetchall()
+        if is_visible_update_member(row.name, row.surname)
+    ]
 
     penalty_map, bonus_map = await get_penalty_bonus_maps(
         session=session,
@@ -617,7 +625,10 @@ async def get_employee_monthly_update_statistics(
         employees_query = employees_query.where(and_(*filters))
 
     employees_result = await session.execute(employees_query)
-    employee_rows = employees_result.fetchall()
+    employee_rows = [
+        row for row in employees_result.fetchall()
+        if is_visible_update_member(row.name, row.surname)
+    ]
 
     salary_estimate_map = {}
     salary_summary = None
@@ -669,17 +680,10 @@ async def get_employee_monthly_update_statistics(
             "total_estimated_salary": as_money(total_final_salary)
         }
 
-    summary_query = select(
-        func.count(monthly_update.c.id).label("total_reports"),
-        func.count(func.distinct(monthly_update.c.user_id)).label("total_employees"),
-        func.avg(monthly_update.c.update_percentage).label("average_update_percentage"),
-        func.sum(monthly_update.c.salary_amount).label("total_salary_amount")
-    )
-    if filters:
-        summary_query = summary_query.where(and_(*filters))
-
-    summary_result = await session.execute(summary_query)
-    summary = summary_result.fetchone()
+    total_reports = sum(int(row.reports_count or 0) for row in employee_rows)
+    total_salary_amount = sum(float(row.total_salary_amount or 0) for row in employee_rows)
+    weighted_percentage_sum = sum(float(row.avg_update_percentage or 0) * int(row.reports_count or 0) for row in employee_rows)
+    average_update_percentage = round((weighted_percentage_sum / total_reports), 2) if total_reports else 0.0
 
     return {
         "filters": {
@@ -688,10 +692,10 @@ async def get_employee_monthly_update_statistics(
             "employee_ids": selected_employee_ids
         },
         "summary": {
-            "total_employees": summary.total_employees or 0,
-            "total_reports": summary.total_reports or 0,
-            "average_update_percentage": round(float(summary.average_update_percentage or 0), 2),
-            "total_salary_amount": round(float(summary.total_salary_amount or 0), 2),
+            "total_employees": len(employee_rows),
+            "total_reports": total_reports,
+            "average_update_percentage": average_update_percentage,
+            "total_salary_amount": round(total_salary_amount, 2),
             "salary_estimate_summary": salary_summary
         },
         "employees": [
@@ -783,7 +787,10 @@ async def get_all_updates(
         employees_query = employees_query.where(user.c.id.in_(selected_employee_ids))
 
     employees_result = await session.execute(employees_query)
-    employee_rows = employees_result.fetchall()
+    employee_rows = [
+        row for row in employees_result.fetchall()
+        if is_visible_update_member(row.name, row.surname)
+    ]
 
     if not employee_rows:
         return {

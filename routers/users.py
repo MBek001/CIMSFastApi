@@ -27,7 +27,7 @@ from utils.page_permissions import (
 
 from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
 from models.user_models import  user_payment
-from  models.admin_models import customer,CustomerStatus, company_recurring_payment
+from  models.admin_models import customer,CustomerStatus, company_recurring_payment, user_role_table
 from routers.finance import  get_db_exchange_rate,calculate_card_balances
 
 router = APIRouter(prefix="/ceo", tags=['CEO Dashboard'])
@@ -75,24 +75,111 @@ def _validate_company_payment_day(payment_day: int) -> None:
         )
 
 
-def _get_user_role_display(user_row) -> str:
+async def _get_role_display_map(session: AsyncSession) -> dict[str, str]:
+    result = await session.execute(
+        select(user_role_table.c.name, user_role_table.c.display_name)
+    )
+    return {
+        str(row.name).strip().lower(): str(row.display_name).strip()
+        for row in result.fetchall()
+        if str(row.name or "").strip()
+    }
+
+
+def _get_user_role_display(user_row, role_display_map: dict[str, str] | None = None) -> str:
     role_name = str(getattr(user_row, "role_name", "") or "").strip()
-    if role_name == UserRole.general_manager.name:
-        return UserRole.general_manager.value
+    if role_name:
+        normalized_role_name = role_name.lower()
+        if role_display_map and normalized_role_name in role_display_map:
+            return role_display_map[normalized_role_name]
+        for enum_role in UserRole:
+            if normalized_role_name == enum_role.name.lower():
+                return enum_role.value
+        return role_name.replace("_", " ").title()
 
     role = getattr(user_row, "role", None)
     role_value = getattr(role, "value", None)
     if role_value:
         return str(role_value)
-    if role_name:
-        return role_name.replace("_", " ").title()
     return ""
 
 
-def _prepare_role_payload(role: UserRole) -> dict:
+def _normalize_role_key(role_value: str) -> str:
+    return " ".join(str(role_value or "").strip().lower().split()).replace(" ", "_")
+
+
+def _match_legacy_role(role_value: str) -> UserRole | None:
+    normalized = _normalize_role_key(role_value)
+    for enum_role in UserRole:
+        if normalized in {
+            _normalize_role_key(enum_role.name),
+            _normalize_role_key(enum_role.value),
+        }:
+            return enum_role
+    return None
+
+
+async def _resolve_role_payload(session: AsyncSession, role_value: str) -> dict:
+    normalized_input = str(role_value or "").strip()
+    if not normalized_input:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="role bo'sh bo'lishi mumkin emas"
+        )
+
+    normalized_key = _normalize_role_key(normalized_input)
+    result = await session.execute(
+        select(
+            user_role_table.c.name,
+            user_role_table.c.display_name,
+            user_role_table.c.is_active,
+        ).where(
+            func.lower(user_role_table.c.name) == normalized_key
+        )
+    )
+    role_row = result.fetchone()
+
+    if role_row is None:
+        result = await session.execute(
+            select(
+                user_role_table.c.name,
+                user_role_table.c.display_name,
+                user_role_table.c.is_active,
+            ).where(
+                func.lower(func.trim(user_role_table.c.display_name)) == " ".join(str(normalized_input).strip().lower().split())
+            )
+        )
+        role_row = result.fetchone()
+
+    if role_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Role '{role_value}' topilmadi. Avval /management/roles orqali role yarating yoki mavjud role yuboring"
+        )
+
+    if not role_row.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Role '{role_row.display_name}' inactive holatda"
+        )
+
+    legacy_role = _match_legacy_role(role_row.name) or _match_legacy_role(role_row.display_name)
+    if legacy_role is not None:
+        return {
+            "role": legacy_role,
+            "role_name": str(role_row.name),
+        }
+
+    return {
+        "role": UserRole.member,
+        "role_name": str(role_row.name),
+    }
+
+
+def _prepare_role_payload(role: UserRole, role_name: str | None = None) -> dict:
     return {
         "role": role,
-        "role_name": role.name,
+        "role_name": role_name or role.name,
     }
 
 
@@ -138,6 +225,7 @@ async def ceo_dashboard(
     # Har bir user uchun permissions olish
     page_rows = await get_all_pages(session)
     page_display_map = {page.name: page.display_name for page in page_rows}
+    role_display_map = await _get_role_display_map(session)
     users_with_permissions = []
     for user_data in users:
         permissions = await get_user_permission_names(session, user_data.id)
@@ -151,7 +239,7 @@ async def ceo_dashboard(
             "company_code": user_data.company_code,
             "telegram_id": user_data.telegram_id,
             "default_salary": float(user_data.default_salary),
-            "role": _get_user_role_display(user_data),
+            "role": _get_user_role_display(user_data, role_display_map),
             "job_title": user_data.job_title,
             "profile_image": user_data.profile_image,
             "is_active": user_data.is_active,
@@ -282,17 +370,18 @@ async def create_user(
         "profile_image": user_data.profile_image,
         "is_active": user_data.is_active
     }
-    user_dict.update(_prepare_role_payload(user_data.role))
+    resolved_role_payload = await _resolve_role_payload(session, user_data.role)
+    user_dict.update(_prepare_role_payload(resolved_role_payload["role"], resolved_role_payload["role_name"]))
 
     try:
         result = await session.execute(insert(user).values(**user_dict))
         await session.commit()
     except Exception as exc:
         await session.rollback()
-        if user_data.role == UserRole.general_manager and _is_missing_db_enum_value_error(exc, user_data.role):
+        if _is_missing_db_enum_value_error(exc, resolved_role_payload["role"]):
             fallback_user_dict = dict(user_dict)
             fallback_user_dict["role"] = UserRole.member
-            fallback_user_dict["role_name"] = UserRole.general_manager.name
+            fallback_user_dict["role_name"] = resolved_role_payload["role_name"]
             result = await session.execute(insert(user).values(**fallback_user_dict))
             await session.commit()
         else:
@@ -329,11 +418,13 @@ async def update_user(
 
     # Yangilanadigan ma'lumotlarni tayyorlash
     update_data = {}
+    requested_role_payload = None
     for field, value in user_data.dict(exclude_unset=True).items():
         if field == "password" and value:
             update_data[field] = get_password_hash(value)
         elif field == "role" and value is not None:
-            update_data.update(_prepare_role_payload(value))
+            requested_role_payload = await _resolve_role_payload(session, value)
+            update_data.update(_prepare_role_payload(requested_role_payload["role"], requested_role_payload["role_name"]))
         elif field == "job_title":
             update_data[field] = value
         elif value is not None:
@@ -353,11 +444,10 @@ async def update_user(
         await session.commit()
     except Exception as exc:
         await session.rollback()
-        requested_role = user_data.role if "role" in user_data.dict(exclude_unset=True) else None
-        if requested_role == UserRole.general_manager and _is_missing_db_enum_value_error(exc, requested_role):
+        if requested_role_payload and _is_missing_db_enum_value_error(exc, requested_role_payload["role"]):
             fallback_update_data = dict(update_data)
             fallback_update_data["role"] = UserRole.member
-            fallback_update_data["role_name"] = UserRole.general_manager.name
+            fallback_update_data["role_name"] = requested_role_payload["role_name"]
             await session.execute(
                 update(user).where(user.c.id == user_id).values(**fallback_update_data)
             )
@@ -1264,6 +1354,7 @@ async def get_all_users_permissions_overview(
 
     available_pages = await get_all_pages(session)
     page_display_map = {page.name: page.display_name for page in available_pages}
+    role_display_map = await _get_role_display_map(session)
     users_permissions = []
     for user_data in users_data:
         permissions = await get_user_permission_names(session, user_data.id)
@@ -1273,7 +1364,7 @@ async def get_all_users_permissions_overview(
             "user_id": user_data.id,
             "email": user_data.email,
             "name": f"{user_data.name} {user_data.surname}",
-            "role": _get_user_role_display(user_data),
+            "role": _get_user_role_display(user_data, role_display_map),
             "job_title": user_data.job_title,
             "is_active": user_data.is_active,
             "permissions": permissions,

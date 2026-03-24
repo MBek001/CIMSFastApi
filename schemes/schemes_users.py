@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, RootModel
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, RootModel, field_validator
 from typing import Optional, List
 from datetime import datetime, date, time
 from decimal import Decimal
@@ -13,10 +13,18 @@ class UserCreateRequest(BaseModel):
     company_code: str = "oddiy"
     telegram_id: Optional[str] = None
     default_salary: Optional[Decimal] = Decimal('0.00')
-    role: UserRole = UserRole.customer
+    role: str = "Customer"
     job_title: Optional[str] = None
     profile_image: Optional[str] = None
     is_active: bool = True
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, value: str) -> str:
+        value = str(value or "").strip()
+        if not value:
+            raise ValueError("role bo'sh bo'lishi mumkin emas")
+        return value
 
 class UserUpdateRequest(BaseModel):
     email: Optional[EmailStr] = None
@@ -26,10 +34,20 @@ class UserUpdateRequest(BaseModel):
     company_code: Optional[str] = None
     telegram_id: Optional[str] = None
     default_salary: Optional[Decimal] = None
-    role: Optional[UserRole] = None
+    role: Optional[str] = None
     job_title: Optional[str] = None
     profile_image: Optional[str] = None
     is_active: Optional[bool] = None
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = str(value or "").strip()
+        if not value:
+            raise ValueError("role bo'sh bo'lishi mumkin emas")
+        return value
 
 class UserResponse(BaseModel):
     id: int

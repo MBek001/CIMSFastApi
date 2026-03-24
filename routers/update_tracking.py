@@ -38,7 +38,7 @@ from utils.update_parser import (
 )
 from utils.ai_summary import generate_update_tracking_ai_summary
 from dotenv import load_dotenv
-from utils.admin_stats import generate_admin_statistics
+from utils.admin_stats import _is_excluded_from_admin_stats, generate_admin_statistics
 from utils.workday_overrides import (
     TARGET_TYPE_ALL,
     TARGET_TYPE_MEMBER,
@@ -229,6 +229,10 @@ def is_ceo_user(current_user) -> bool:
 
 def member_only_filter():
     return user.c.role == UserRole.member
+
+
+def is_visible_update_member(name: Optional[str], surname: Optional[str]) -> bool:
+    return not _is_excluded_from_admin_stats(name, surname)
 
 
 async def get_active_member_map(session: AsyncSession, member_ids: List[int], strict: bool = True) -> Dict[int, Any]:
@@ -478,6 +482,10 @@ async def process_daily_update_notifications(
         )
     )
     users_with_chat = users_result.fetchall()
+    users_with_chat = [
+        row for row in users_with_chat
+        if is_visible_update_member(row.name, row.surname)
+    ]
 
     if not users_with_chat:
         return {
@@ -1601,6 +1609,8 @@ async def get_workday_override_member_options(
 
     items = []
     for row in result.fetchall():
+        if not is_visible_update_member(row.name, row.surname):
+            continue
         role_value = getattr(row.role, "value", None)
         if role_value is None and row.role is not None:
             role_value = str(row.role)
@@ -2390,7 +2400,7 @@ async def get_recent_updates(
         query = query.where(daily_update_log.c.user_id == user_id)
 
     result = await session.execute(query)
-    updates = result.fetchall()
+    updates = [row for row in result.fetchall() if is_visible_update_member(row.name, row.surname)]
 
     return [
         {
@@ -2442,7 +2452,10 @@ async def get_all_users_updates(
         )
         .order_by(user.c.name.asc(), user.c.surname.asc(), user.c.id.asc())
     )
-    user_rows = users_result.fetchall()
+    user_rows = [
+        row for row in users_result.fetchall()
+        if is_visible_update_member(row.name, row.surname)
+    ]
     user_ids = [row.id for row in user_rows]
 
     override_pack = await fetch_override_pack(session, month_start, month_end, user_ids=user_ids)
@@ -2717,7 +2730,10 @@ async def get_missing_updates(
             )
         )
     )
-    all_users = users_result.fetchall()
+    all_users = [
+        row for row in users_result.fetchall()
+        if is_visible_update_member(row.name, row.surname)
+    ]
     eligible_users = all_users
     if check_date.weekday() != 6 and all_users:
         override_pack = await fetch_override_pack(session, check_date, check_date, user_ids=[u.id for u in all_users])
@@ -2771,7 +2787,7 @@ async def get_company_stats(
 
     # Get all active employees
     employees_result = await session.execute(
-        select(user.c.id)
+        select(user.c.id, user.c.name, user.c.surname)
         .where(
             and_(
                 user.c.is_active == True,
@@ -2779,7 +2795,10 @@ async def get_company_stats(
             )
         )
     )
-    all_employee_ids = [row.id for row in employees_result.fetchall()]
+    all_employee_ids = [
+        row.id for row in employees_result.fetchall()
+        if is_visible_update_member(row.name, row.surname)
+    ]
     total_employees = len(all_employee_ids)
 
     # Count today's updates
