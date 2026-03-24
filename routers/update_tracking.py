@@ -227,6 +227,10 @@ def is_ceo_user(current_user) -> bool:
     )
 
 
+def member_only_filter():
+    return user.c.role == UserRole.member
+
+
 async def get_active_member_map(session: AsyncSession, member_ids: List[int], strict: bool = True) -> Dict[int, Any]:
     normalized_ids = sorted({int(member_id) for member_id in member_ids if member_id is not None})
     if not normalized_ids:
@@ -249,9 +253,7 @@ async def get_active_member_map(session: AsyncSession, member_ids: List[int], st
     for row in rows:
         if not row.is_active:
             continue
-        if row.role == UserRole.customer:
-            continue
-        if str(row.company_code or "").strip().lower() == "ceo" or row.role == UserRole.CEO:
+        if row.role != UserRole.member:
             continue
         members[row.id] = row
 
@@ -413,7 +415,8 @@ async def link_user_chat_id_by_telegram_id(
         .where(
             and_(
                 func.lower(user.c.telegram_id) == normalized_telegram_id,
-                user.c.is_active == True
+                user.c.is_active == True,
+                member_only_filter(),
             )
         )
     )
@@ -468,7 +471,7 @@ async def process_daily_update_notifications(
         .where(
             and_(
                 user.c.is_active == True,
-                or_(user.c.role.is_(None), user.c.role != UserRole.customer),
+                member_only_filter(),
                 user.c.chat_id.is_not(None),
                 user.c.chat_id != ""
             )
@@ -670,7 +673,12 @@ async def get_user_update_stats(
     # Get user info
     user_result = await session.execute(
         select(user.c.name, user.c.surname)
-        .where(user.c.id == user_id)
+        .where(
+            and_(
+                user.c.id == user_id,
+                member_only_filter(),
+            )
+        )
     )
     user_data = user_result.fetchone()
     if not user_data:
@@ -1050,7 +1058,12 @@ async def build_user_combined_report(
         select(
             user.c.id, user.c.name, user.c.surname, user.c.telegram_id,
             user.c.role, user.c.is_active
-        ).where(user.c.id == user_id)
+        ).where(
+            and_(
+                user.c.id == user_id,
+                member_only_filter(),
+            )
+        )
     )
     user_data = user_result.fetchone()
     if not user_data:
@@ -1580,8 +1593,7 @@ async def get_workday_override_member_options(
         .where(
             and_(
                 user.c.is_active == True,
-                or_(user.c.role.is_(None), user.c.role != UserRole.customer),
-                func.lower(func.coalesce(user.c.company_code, "")) != "ceo",
+                member_only_filter(),
             )
         )
         .order_by(user.c.name.asc(), user.c.surname.asc())
@@ -2368,6 +2380,8 @@ async def get_recent_updates(
         user.c.surname
     ).join(
         user, daily_update_log.c.user_id == user.c.id
+    ).where(
+        member_only_filter()
     ).order_by(
         desc(daily_update_log.c.update_date)
     ).limit(limit)
@@ -2419,17 +2433,16 @@ async def get_all_users_updates(
             user.c.surname,
             user.c.is_active,
             user.c.role,
-            user.c.company_code,
         )
-        .where(user.c.is_active == True)
+        .where(
+            and_(
+                user.c.is_active == True,
+                member_only_filter(),
+            )
+        )
         .order_by(user.c.name.asc(), user.c.surname.asc(), user.c.id.asc())
     )
-    user_rows = [
-        row for row in users_result.fetchall()
-        if row.role != UserRole.customer
-        and row.role != UserRole.CEO
-        and str(row.company_code or "").strip().lower() != "ceo"
-    ]
+    user_rows = users_result.fetchall()
     user_ids = [row.id for row in user_rows]
 
     override_pack = await fetch_override_pack(session, month_start, month_end, user_ids=user_ids)
@@ -2562,7 +2575,12 @@ async def get_employee_monthly_updates(
 
     employee_result = await session.execute(
         select(user.c.id, user.c.name, user.c.surname, user.c.is_active)
-        .where(user.c.id == employee_id)
+        .where(
+            and_(
+                user.c.id == employee_id,
+                member_only_filter(),
+            )
+        )
     )
     employee = employee_result.fetchone()
     if not employee:
@@ -2695,7 +2713,7 @@ async def get_missing_updates(
         .where(
             and_(
                 user.c.is_active == True,
-                or_(user.c.role.is_(None), user.c.role != UserRole.customer)
+                member_only_filter(),
             )
         )
     )
@@ -2756,8 +2774,8 @@ async def get_company_stats(
         select(user.c.id)
         .where(
             and_(
-                user.c.is_active == True
-
+                user.c.is_active == True,
+                member_only_filter(),
             )
         )
     )
@@ -2769,6 +2787,7 @@ async def get_company_stats(
         select(func.count()).select_from(daily_update_log)
         .where(
             and_(
+                daily_update_log.c.user_id.in_(all_employee_ids) if all_employee_ids else False,
                 daily_update_log.c.update_date == dates['today'],
                 daily_update_log.c.is_valid == True
             )
@@ -2781,6 +2800,7 @@ async def get_company_stats(
         select(func.count()).select_from(daily_update_log)
         .where(
             and_(
+                daily_update_log.c.user_id.in_(all_employee_ids) if all_employee_ids else False,
                 daily_update_log.c.update_date >= dates['week_start'],
                 daily_update_log.c.update_date <= dates['week_end'],
                 daily_update_log.c.is_valid == True

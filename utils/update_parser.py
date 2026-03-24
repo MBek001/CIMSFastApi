@@ -12,8 +12,8 @@ import re
 from datetime import datetime, date
 from typing import Optional, Dict, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from models.user_models import user
+from sqlalchemy import and_, select
+from models.user_models import UserRole, user
 
 
 def parse_update_message(message_text: str):
@@ -168,7 +168,13 @@ async def find_user_by_telegram_username(
     # Try exact match on telegram_id
     result = await session.execute(
         select(user.c.id)
-        .where(user.c.telegram_id == telegram_username)
+        .where(
+            and_(
+                user.c.telegram_id == telegram_username,
+                user.c.is_active == True,
+                user.c.role == UserRole.member,
+            )
+        )
     )
     user_row = result.fetchone()
     if user_row:
@@ -177,7 +183,12 @@ async def find_user_by_telegram_username(
     # Try fuzzy match on name/surname
     result = await session.execute(
         select(user.c.id, user.c.name, user.c.surname, user.c.email)
-        .where(user.c.is_active == True)
+        .where(
+            and_(
+                user.c.is_active == True,
+                user.c.role == UserRole.member,
+            )
+        )
     )
     users = result.fetchall()
 

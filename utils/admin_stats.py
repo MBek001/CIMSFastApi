@@ -13,7 +13,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 import io
 from models.admin_models import daily_update_log
-from models.user_models import user
+from models.user_models import UserRole, user
 from utils.workday_overrides import (
     fetch_override_pack,
     get_effective_override,
@@ -105,7 +105,12 @@ async def generate_admin_statistics(
     # Barcha active userlarni olish
     result = await session.execute(
         select(user.c.id, user.c.name, user.c.surname, user.c.telegram_id)
-        .where(user.c.is_active == True)
+        .where(
+            and_(
+                user.c.is_active == True,
+                user.c.role == UserRole.member,
+            )
+        )
         .order_by(user.c.name)
     )
     users = [
