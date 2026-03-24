@@ -6,7 +6,7 @@ from typing import List
 import calendar
 
 # Import qilinadigan modellar
-from models.user_models import user, message, user_payment, user_page_permission, UserRole, PageName
+from models.user_models import user, message, user_payment, user_page_permission, UserRole
 from schemes.schemes_users import (
     UserCreateRequest, UserUpdateRequest, UserResponse, UserListResponse, UserToggleResponse,
     MessageToAllRequest, MessageToUserRequest, MessageListResponse,
@@ -18,6 +18,12 @@ from schemes.schemes_users import (
 from auth_utils.auth_func import get_current_active_user, get_password_hash
 from database import get_async_session
 from utils.file_storage import delete_image_if_exists, save_image
+from utils.page_permissions import (
+    build_permission_display_names,
+    get_all_pages,
+    get_user_permission_names,
+    validate_page_names,
+)
 
 from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
 from models.user_models import  user_payment
@@ -130,33 +136,12 @@ async def ceo_dashboard(
     messages_count = messages_result.scalar()
 
     # Har bir user uchun permissions olish
+    page_rows = await get_all_pages(session)
+    page_display_map = {page.name: page.display_name for page in page_rows}
     users_with_permissions = []
     for user_data in users:
-        permissions_result = await session.execute(
-            select(user_page_permission.c.page_name)
-            .where(user_page_permission.c.user_id == user_data.id)
-        )
-        permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
-
-        # Permission nomlarini o'zgartirish
-        modified_permissions = []
-        for perm in permissions:
-            if perm == 'ceo':
-                modified_permissions.append('Dashboard')
-            elif perm == 'payment_list':
-                modified_permissions.append('Payment')
-            elif perm == 'project_toggle':
-                modified_permissions.append('Wordpress')
-            elif perm == 'projects':
-                modified_permissions.append('Projects')
-            elif perm == 'crm':
-                modified_permissions.append('Sales CRM')
-            elif perm == 'finance_list':
-                modified_permissions.append('Finance')
-            elif perm == 'update_list':
-                modified_permissions.append('Update')
-            else:
-                modified_permissions.append(perm)
+        permissions = await get_user_permission_names(session, user_data.id)
+        modified_permissions = build_permission_display_names(permissions, page_display_map)
 
         user_dict = {
             "id": user_data.id,
@@ -946,7 +931,7 @@ from schemes.schemes_users import (
     AllUsersPermissionsResponse,
     SuccessResponse
 )
-from models.user_models import user, user_page_permission, PageName
+from models.user_models import user, user_page_permission
 from database import get_async_session
 
 # --- 11. USER PERMISSIONS OLISH (TRUE/FALSE FORMAT) ---
@@ -973,45 +958,22 @@ async def get_user_permissions(
         )
 
     # User permissions olish
-    permissions_result = await session.execute(
-        select(user_page_permission.c.page_name)
-        .where(user_page_permission.c.user_id == user_id)
-    )
-    user_permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
+    user_permissions = set(await get_user_permission_names(session, user_id))
 
     # Barcha sahifalar uchun true/false obyekt yaratish
-    permissions_object = {}
-    for page in PageName:
-        permissions_object[page.value] = page.value in user_permissions
-
-    # Display nomlar bilan ham ko'rsatish
-    permissions_display = {}
-    for page_name, has_permission in permissions_object.items():
-        if page_name == 'ceo':
-            permissions_display['Dashboard'] = has_permission
-        elif page_name == 'payment_list':
-            permissions_display['Payment'] = has_permission
-        elif page_name == 'project_toggle':
-            permissions_display['Wordpress'] = has_permission
-        elif page_name == 'projects':
-            permissions_display['Projects'] = has_permission
-        elif page_name == 'crm':
-            permissions_display['Sales CRM'] = has_permission
-        elif page_name == 'finance_list':
-            permissions_display['Finance'] = has_permission
-        elif page_name == 'update_list':
-            permissions_display['Update'] = has_permission
-        else:
-            permissions_display[page_name] = has_permission
+    available_pages = await get_all_pages(session)
+    permissions_object = {
+        page.name: page.name in user_permissions
+        for page in available_pages
+    }
 
     return UserPermissionResponse(
         user_id=user_id,
         user_email=user_data.email,
         user_name=f"{user_data.name} {user_data.surname}",
         permissions=permissions_object,
-        # permissions_display=permissions_display,
         active_permissions_count=len(user_permissions),
-        total_available_pages=len(PageName)
+        total_available_pages=len(available_pages)
     )
 
 
@@ -1040,7 +1002,20 @@ async def update_user_permissions(
         )
 
     # Schema ni dict formatiga o'tkazish
-    permissions_dict = permissions_data.to_dict()
+    permissions_dict = {
+        key.strip().lower(): value
+        for key, value in permissions_data.to_dict().items()
+    }
+    normalized_page_names, invalid_pages = await validate_page_names(
+        session,
+        list(permissions_dict.keys()),
+        active_only=True,
+    )
+    if invalid_pages:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Noto'g'ri yoki nofaol sahifalar: {invalid_pages}"
+        )
 
     # Avvalgi barcha ruxsatlarni o'chirish
     await session.execute(
@@ -1051,11 +1026,12 @@ async def update_user_permissions(
     permissions_to_insert = []
     enabled_pages = []
 
-    for page_name, is_enabled in permissions_dict.items():
+    for page_name in normalized_page_names:
+        is_enabled = permissions_dict.get(page_name, False)
         if is_enabled:  # Faqat true bo'lganlarni qo'shamiz
             permissions_to_insert.append({
                 "user_id": user_id,
-                "page_name": PageName(page_name)
+                "page_name": page_name
             })
             enabled_pages.append(page_name)
 
@@ -1095,24 +1071,34 @@ async def add_user_permission(
         )
 
     # Schema ni dict formatiga o'tkazish
-    permissions_dict = permissions_data.to_dict()
+    permissions_dict = {
+        key.strip().lower(): value
+        for key, value in permissions_data.to_dict().items()
+    }
+    normalized_page_names, invalid_pages = await validate_page_names(
+        session,
+        list(permissions_dict.keys()),
+        active_only=True,
+    )
+    if invalid_pages:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Noto'g'ri yoki nofaol sahifalar: {invalid_pages}"
+        )
 
     # Hozirgi permissions olish
-    current_permissions_result = await session.execute(
-        select(user_page_permission.c.page_name)
-        .where(user_page_permission.c.user_id == user_id)
-    )
-    current_permissions = [perm.page_name.value for perm in current_permissions_result.fetchall()]
+    current_permissions = set(await get_user_permission_names(session, user_id))
 
     # Yangi permissions qo'shish
     added_permissions = []
-    for page_name, is_enabled in permissions_dict.items():
+    for page_name in normalized_page_names:
+        is_enabled = permissions_dict.get(page_name, False)
         if is_enabled and page_name not in current_permissions:
             # Yangi permission qo'shish
             await session.execute(
                 insert(user_page_permission).values(
                     user_id=user_id,
-                    page_name=PageName(page_name)
+                    page_name=page_name
                 )
             )
             added_permissions.append(page_name)
@@ -1154,24 +1140,34 @@ async def add_single_user_permission(
         )
 
     # Schema ni dict formatiga o'tkazish
-    permissions_dict = permissions_data.to_dict()
+    permissions_dict = {
+        key.strip().lower(): value
+        for key, value in permissions_data.to_dict().items()
+    }
+    normalized_page_names, invalid_pages = await validate_page_names(
+        session,
+        list(permissions_dict.keys()),
+        active_only=True,
+    )
+    if invalid_pages:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Noto'g'ri yoki nofaol sahifalar: {invalid_pages}"
+        )
 
     # Hozirgi permissions olish
-    current_permissions_result = await session.execute(
-        select(user_page_permission.c.page_name)
-        .where(user_page_permission.c.user_id == user_id)
-    )
-    current_permissions = [perm.page_name.value for perm in current_permissions_result.fetchall()]
+    current_permissions = set(await get_user_permission_names(session, user_id))
 
     # Yangi permissions qo'shish
     added_permissions = []
-    for page_name, is_enabled in permissions_dict.items():
+    for page_name in normalized_page_names:
+        is_enabled = permissions_dict.get(page_name, False)
         if is_enabled and page_name not in current_permissions:
             # Yangi permission qo'shish
             await session.execute(
                 insert(user_page_permission).values(
                     user_id=user_id,
-                    page_name=PageName(page_name)
+                    page_name=page_name
                 )
             )
             added_permissions.append(page_name)
@@ -1212,18 +1208,24 @@ async def remove_user_permission(
         )
 
     # Page name tekshirish
-    valid_pages = [page.value for page in PageName]
-    if page_name not in valid_pages:
+    normalized_page_name = page_name.strip().lower()
+    valid_pages, invalid_pages = await validate_page_names(
+        session,
+        [normalized_page_name],
+        active_only=False,
+    )
+    if invalid_pages:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Noto'g'ri sahifa nomi: {page_name}. Mavjud sahifalar: {valid_pages}"
+            detail=f"Noto'g'ri sahifa nomi: {page_name}"
         )
+    normalized_page_name = valid_pages[0]
 
     # Ruxsat mavjudligini tekshirish
     existing_permission = await session.execute(
         select(user_page_permission).where(
             user_page_permission.c.user_id == user_id,
-            user_page_permission.c.page_name == PageName(page_name)
+            user_page_permission.c.page_name == normalized_page_name
         )
     )
 
@@ -1237,13 +1239,13 @@ async def remove_user_permission(
     await session.execute(
         delete(user_page_permission).where(
             user_page_permission.c.user_id == user_id,
-            user_page_permission.c.page_name == PageName(page_name)
+            user_page_permission.c.page_name == normalized_page_name
         )
     )
     await session.commit()
 
     return SuccessResponse(
-        message=f"User {user_data.email} dan {page_name} sahifasi ruxsati olib tashlandi"
+        message=f"User {user_data.email} dan {normalized_page_name} sahifasi ruxsati olib tashlandi"
     )
 
 
@@ -1260,34 +1262,12 @@ async def get_all_users_permissions_overview(
     users_result = await session.execute(select(user))
     users_data = users_result.fetchall()
 
+    available_pages = await get_all_pages(session)
+    page_display_map = {page.name: page.display_name for page in available_pages}
     users_permissions = []
     for user_data in users_data:
-        # Har bir user uchun permissions olish
-        permissions_result = await session.execute(
-            select(user_page_permission.c.page_name)
-            .where(user_page_permission.c.user_id == user_data.id)
-        )
-        permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
-
-        # Permission nomlarini o'zgartirish
-        modified_permissions = []
-        for perm in permissions:
-            if perm == 'ceo':
-                modified_permissions.append('Dashboard')
-            elif perm == 'payment_list':
-                modified_permissions.append('Payment')
-            elif perm == 'project_toggle':
-                modified_permissions.append('Wordpress')
-            elif perm == 'projects':
-                modified_permissions.append('Projects')
-            elif perm == 'crm':
-                modified_permissions.append('Sales CRM')
-            elif perm == 'finance_list':
-                modified_permissions.append('Finance')
-            elif perm == 'update_list':
-                modified_permissions.append('Update')
-            else:
-                modified_permissions.append(perm)
+        permissions = await get_user_permission_names(session, user_data.id)
+        modified_permissions = build_permission_display_names(permissions, page_display_map)
 
         user_permission_data = {
             "user_id": user_data.id,
@@ -1303,7 +1283,7 @@ async def get_all_users_permissions_overview(
         users_permissions.append(user_permission_data)
 
     # Barcha mavjud sahifalar
-    all_pages = [page.value for page in PageName]
+    all_pages = [page.name for page in available_pages]
 
     return AllUsersPermissionsResponse(
         users=users_permissions,

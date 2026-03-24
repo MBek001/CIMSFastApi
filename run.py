@@ -20,6 +20,7 @@ from routers.management import router as management_router
 from routers.instagram import router as instagram_router
 from routers.recall_bot import router as recall_bot_router
 from routers.projects import router as projects_router
+from routers.ai_chat import router as ai_chat_router
 from utils.file_storage import IMAGES_ROOT, ensure_image_directories
 
 from fastapi.responses import JSONResponse
@@ -72,6 +73,7 @@ app.include_router(management_router)
 # app.include_router(instagram_router)
 app.include_router(recall_bot_router)
 app.include_router(projects_router)
+app.include_router(ai_chat_router)
 
 
 # --------------------------------------------------

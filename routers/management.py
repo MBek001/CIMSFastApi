@@ -10,12 +10,17 @@ from datetime import datetime
 from database import get_async_session
 from auth_utils.auth_func import get_current_active_user
 from models.user_models import user, UserRole
+from models.user_models import user_page_permission
 from models.admin_models import (
+    app_page_table,
     customer_status_table,
     user_role_table,
     customer
 )
 from schemes.schemes_management import (
+    AppPageCreate,
+    AppPageUpdate,
+    AppPageResponse,
     CustomerStatusCreate,
     CustomerStatusUpdate,
     CustomerStatusResponse,
@@ -23,6 +28,7 @@ from schemes.schemes_management import (
     UserRoleUpdate,
     UserRoleResponse,
 )
+from utils.page_permissions import initialize_default_pages
 
 router = APIRouter(prefix="/management", tags=["Management"])
 
@@ -81,6 +87,190 @@ async def initialize_default_roles(session: AsyncSession):
         for role_data in default_roles:
             await session.execute(insert(user_role_table).values(**role_data))
         await session.commit()
+
+
+# ========================================
+# APP PAGE ENDPOINTS
+# ========================================
+
+@router.get("/pages", response_model=list[AppPageResponse], summary="Barcha sahifalarni ko'rish")
+async def get_all_pages(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    """
+    Barcha sahifalarni olish (active va inactive)
+    """
+    await initialize_default_pages(session)
+
+    result = await session.execute(
+        select(app_page_table).order_by(app_page_table.c.order.asc(), app_page_table.c.id.asc())
+    )
+    pages = result.fetchall()
+
+    return [
+        AppPageResponse(
+            id=page.id,
+            name=page.name,
+            display_name=page.display_name,
+            description=page.description,
+            route_path=page.route_path,
+            order=page.order,
+            is_active=page.is_active,
+            is_system=page.is_system,
+            created_at=page.created_at,
+            updated_at=page.updated_at,
+        )
+        for page in pages
+    ]
+
+
+@router.post("/pages", response_model=AppPageResponse, summary="Yangi sahifa yaratish")
+async def create_page(
+    page_data: AppPageCreate,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_ceo_access)
+):
+    """
+    Yangi permission sahifasini yaratish (faqat CEO)
+    """
+    await initialize_default_pages(session)
+
+    result = await session.execute(
+        select(app_page_table).where(app_page_table.c.name == page_data.name)
+    )
+    existing = result.fetchone()
+
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Sahifa '{page_data.name}' allaqachon mavjud"
+        )
+
+    insert_stmt = insert(app_page_table).values(
+        name=page_data.name,
+        display_name=page_data.display_name,
+        description=page_data.description,
+        route_path=page_data.route_path,
+        order=page_data.order,
+        is_active=page_data.is_active,
+        is_system=page_data.is_system,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    ).returning(app_page_table)
+
+    result = await session.execute(insert_stmt)
+    await session.commit()
+    new_page = result.fetchone()
+
+    return AppPageResponse(
+        id=new_page.id,
+        name=new_page.name,
+        display_name=new_page.display_name,
+        description=new_page.description,
+        route_path=new_page.route_path,
+        order=new_page.order,
+        is_active=new_page.is_active,
+        is_system=new_page.is_system,
+        created_at=new_page.created_at,
+        updated_at=new_page.updated_at,
+    )
+
+
+@router.put("/pages/{page_id}", response_model=AppPageResponse, summary="Sahifani yangilash")
+async def update_page(
+    page_id: int,
+    page_data: AppPageUpdate,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_ceo_access)
+):
+    """
+    Mavjud permission sahifasini yangilash (faqat CEO)
+    """
+    result = await session.execute(
+        select(app_page_table).where(app_page_table.c.id == page_id)
+    )
+    existing_page = result.fetchone()
+
+    if not existing_page:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sahifa topilmadi"
+        )
+
+    update_data = {k: v for k, v in page_data.model_dump(exclude_unset=True).items() if v is not None}
+    update_data["updated_at"] = datetime.utcnow()
+
+    if len(update_data) == 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Hech qanday yangilanish ma'lumoti berilmagan"
+        )
+
+    update_stmt = (
+        update(app_page_table)
+        .where(app_page_table.c.id == page_id)
+        .values(**update_data)
+        .returning(app_page_table)
+    )
+
+    result = await session.execute(update_stmt)
+    await session.commit()
+    updated_page = result.fetchone()
+
+    return AppPageResponse(
+        id=updated_page.id,
+        name=updated_page.name,
+        display_name=updated_page.display_name,
+        description=updated_page.description,
+        route_path=updated_page.route_path,
+        order=updated_page.order,
+        is_active=updated_page.is_active,
+        is_system=updated_page.is_system,
+        created_at=updated_page.created_at,
+        updated_at=updated_page.updated_at,
+    )
+
+
+@router.delete("/pages/{page_id}", summary="Sahifani o'chirish")
+async def delete_page(
+    page_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_ceo_access)
+):
+    """
+    Permission sahifasini o'chirish (faqat CEO, system sahifalarni o'chirish mumkin emas)
+    """
+    result = await session.execute(
+        select(app_page_table).where(app_page_table.c.id == page_id)
+    )
+    existing_page = result.fetchone()
+
+    if not existing_page:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sahifa topilmadi"
+        )
+
+    usage_result = await session.execute(
+        select(func.count()).select_from(user_page_permission).where(
+            user_page_permission.c.page_name == existing_page.name
+        )
+    )
+    usage_count = usage_result.scalar() or 0
+
+    if usage_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Bu sahifa {usage_count} ta userga biriktirilgan. Avval permissionlarni olib tashlang"
+        )
+
+    await session.execute(
+        delete(app_page_table).where(app_page_table.c.id == page_id)
+    )
+    await session.commit()
+
+    return {"message": f"Sahifa '{existing_page.display_name}' muvaffaqiyatli o'chirildi"}
 
 
 # ========================================

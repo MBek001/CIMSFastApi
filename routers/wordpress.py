@@ -13,6 +13,11 @@ from schemes.wordpress_schemes import (
 )
 from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
+from utils.page_permissions import (
+    build_permission_display_names,
+    get_all_pages,
+    get_user_permission_names,
+)
 
 router = APIRouter(prefix="/wordpress", tags=['WordPress Project Management'])
 
@@ -44,7 +49,7 @@ async def wordpress_dashboard(
             select(user_page_permission.c.page_name)
             .where(
                 user_page_permission.c.user_id == current_user.id,
-                user_page_permission.c.page_name == PageName.project_toggle
+                user_page_permission.c.page_name == PageName.project_toggle.value
             )
         )
         if not permissions_result.fetchone():
@@ -66,31 +71,12 @@ async def wordpress_dashboard(
         is_site_on = site_data.is_site_on
 
     # Foydalanuvchi ruxsatlarini olish
-    permissions_result = await session.execute(
-        select(user_page_permission.c.page_name)
-        .where(user_page_permission.c.user_id == current_user.id)
-    )
-    permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
-
-    # Ruxsat nomlarini o'zgartirish
-    page_order = ['ceo', 'payment_list', 'project_toggle', 'projects', 'crm', 'finance_list']
-    modified_permissions = []
-    for page in page_order:
-        if page in permissions:
-            if page == 'ceo':
-                modified_permissions.append('Dashboard')
-            elif page == 'payment_list':
-                modified_permissions.append('Payment')
-            elif page == 'project_toggle':
-                modified_permissions.append('Wordpress')
-            elif page == 'projects':
-                modified_permissions.append('Projects')
-            elif page == 'crm':
-                modified_permissions.append('Sales CRM')
-            elif page == 'finance_list':
-                modified_permissions.append('Finance')
-            else:
-                modified_permissions.append(page)
+    permissions = await get_user_permission_names(session, current_user.id)
+    page_display_map = {
+        page.name: page.display_name
+        for page in await get_all_pages(session)
+    }
+    modified_permissions = build_permission_display_names(permissions, page_display_map)
 
     # WordPress loyihalarini olish
     projects_result = await session.execute(select(wordpress_project))

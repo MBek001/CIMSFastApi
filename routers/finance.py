@@ -20,6 +20,11 @@ from schemes.schemes_finance import (
 )
 from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
+from utils.page_permissions import (
+    build_permission_display_names,
+    get_all_pages,
+    get_user_permission_names,
+)
 
 # Valyuta util'lari
 from utils.currency import CurrencyService, get_last_rate_from_db
@@ -161,24 +166,12 @@ async def finance_dashboard(
     finances_rows = result.fetchall()
 
     # Permissions
-    permissions_result = await session.execute(
-        select(user_page_permission.c.page_name)
-        .where(user_page_permission.c.user_id == current_user.id)
-    )
-    permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
-
-    page_order = ['ceo', 'payment_list', 'project_toggle', 'projects', 'crm', 'finance_list']
-    modified_permissions = []
-    for page in page_order:
-        if page in permissions:
-            modified_permissions.append({
-                'ceo': 'Dashboard',
-                'payment_list': 'Payment',
-                'project_toggle': 'Wordpress',
-                'projects': 'Projects',
-                'crm': 'Sales CRM',
-                'finance_list': 'Finance'
-            }.get(page, page))
+    permissions = await get_user_permission_names(session, current_user.id)
+    page_display_map = {
+        page.name: page.display_name
+        for page in await get_all_pages(session)
+    }
+    modified_permissions = build_permission_display_names(permissions, page_display_map)
 
     # Balans
     balances = await calculate_card_balances(session)

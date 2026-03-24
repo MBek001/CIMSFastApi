@@ -166,7 +166,23 @@ user_role_table = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 9. Sales Manager Assignment table (NEW)
+# 9. Dynamic App Page table (NEW)
+app_page_table = Table(
+    "app_page",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(100), nullable=False, unique=True),  # e.g., "crm", "projects"
+    Column("display_name", String(255), nullable=False),  # e.g., "Sales CRM", "Projects"
+    Column("description", Text, nullable=True),
+    Column("route_path", String(255), nullable=True),  # e.g., "/crm"
+    Column("order", Integer, default=0),
+    Column("is_active", Boolean, default=True),
+    Column("is_system", Boolean, default=False),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+)
+
+# 10. Sales Manager Assignment table (NEW)
 sales_manager_assignment = Table(
     "sales_manager_assignment",
     metadata,
@@ -179,7 +195,7 @@ sales_manager_assignment = Table(
     UniqueConstraint("customer_id", name="uq_customer_assignment")  # One customer can only have one active assignment
 )
 
-# 10. Sales Manager Assignment Counter (for round-robin)
+# 11. Sales Manager Assignment Counter (for round-robin)
 sales_manager_counter = Table(
     "sales_manager_counter",
     metadata,
@@ -188,7 +204,7 @@ sales_manager_counter = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 11. Department table (NEW) - for organizing employees into departments
+# 12. Department table (NEW) - for organizing employees into departments
 department = Table(
     "department",
     metadata,
@@ -202,7 +218,7 @@ department = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 12. User Department mapping table (NEW)
+# 13. User Department mapping table (NEW)
 user_department = Table(
     "user_department",
     metadata,
@@ -214,7 +230,7 @@ user_department = Table(
     UniqueConstraint("user_id", "department_id", name="uq_user_department")
 )
 
-# 13. Daily Update Log table (NEW) - stores updates from Telegram channel
+# 14. Daily Update Log table (NEW) - stores updates from Telegram channel
 daily_update_log = Table(
     "daily_update_log",
     metadata,
@@ -229,7 +245,7 @@ daily_update_log = Table(
     Column("created_at", DateTime, default=datetime.utcnow)
 )
 
-# 14. Workday override table - holidays and shortened workdays
+# 15. Workday override table - holidays and shortened workdays
 workday_override = Table(
     "workday_override",
     metadata,
@@ -249,7 +265,7 @@ workday_override = Table(
     UniqueConstraint("special_date", "target_key", name="uq_workday_override_date_target")
 )
 
-# 15. Update Configuration table (NEW) - system-wide update tracking settings
+# 16. Update Configuration table (NEW) - system-wide update tracking settings
 update_config = Table(
     "update_config",
     metadata,
@@ -261,7 +277,7 @@ update_config = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 16. Missed Update Notification table (NEW) - tracks when notifications were sent
+# 17. Missed Update Notification table (NEW) - tracks when notifications were sent
 missed_update_notification = Table(
     "missed_update_notification",
     metadata,
@@ -273,7 +289,7 @@ missed_update_notification = Table(
     UniqueConstraint("user_id", "missed_date", name="uq_user_missed_date")
 )
 
-# 17. Recall bot admin chats
+# 18. Recall bot admin chats
 recall_bot_admin = Table(
     "recall_bot_admin",
     metadata,
@@ -286,7 +302,7 @@ recall_bot_admin = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 18. Recall bot recipients (notification subscribers)
+# 19. Recall bot recipients (notification subscribers)
 recall_bot_recipient = Table(
     "recall_bot_recipient",
     metadata,
@@ -300,7 +316,7 @@ recall_bot_recipient = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 19. Recall notifications log (dedupe + delivery status)
+# 20. Recall notifications log (dedupe + delivery status)
 recall_notification_log = Table(
     "recall_notification_log",
     metadata,
@@ -322,7 +338,7 @@ recall_notification_log = Table(
     )
 )
 
-# 20. CRM daily stats delivery log (for 22:00 digest dedupe)
+# 21. CRM daily stats delivery log (for 22:00 digest dedupe)
 crm_daily_stats_delivery_log = Table(
     "crm_daily_stats_delivery_log",
     metadata,
@@ -336,7 +352,7 @@ crm_daily_stats_delivery_log = Table(
     UniqueConstraint("report_date", "recipient_chat_id", name="uq_crm_daily_stats_delivery")
 )
 
-# 21. Company recurring payments (monthly reminder source)
+# 22. Company recurring payments (monthly reminder source)
 company_recurring_payment = Table(
     "company_recurring_payment",
     metadata,
@@ -351,7 +367,7 @@ company_recurring_payment = Table(
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 )
 
-# 22. Company payment reminder log (dedupe + delivery status)
+# 23. Company payment reminder log (dedupe + delivery status)
 company_payment_reminder_log = Table(
     "company_payment_reminder_log",
     metadata,
@@ -371,7 +387,7 @@ company_payment_reminder_log = Table(
     )
 )
 
-# 23. CRM customer status change log (for period statistics)
+# 24. CRM customer status change log (for period statistics)
 customer_status_change_log = Table(
     "customer_status_change_log",
     metadata,

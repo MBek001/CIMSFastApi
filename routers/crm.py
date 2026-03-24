@@ -26,6 +26,11 @@ from zoneinfo import ZoneInfo
 from  auth_utils.auth_func import get_current_user
 from auth_utils.auth_func import get_current_active_user
 from database import get_async_session
+from utils.page_permissions import (
+    build_permission_display_names,
+    get_all_pages,
+    get_user_permission_names,
+)
 from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram, validate_audio_file
 from utils.ai_summary import generate_customer_ai_summary, infer_recall_time_from_notes_ai
 from utils.google_calendar import sync_customer_recall_event, delete_customer_recall_event
@@ -385,7 +390,7 @@ async def crm_dashboard(
         select(user_page_permission.c.page_name)
         .where(
             user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.crm
+            user_page_permission.c.page_name == PageName.crm.value
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
@@ -497,24 +502,12 @@ async def crm_dashboard(
 
     status_choices = [{"value": s.value, "label": s.value.replace("_", " ").title()} for s in CustomerStatus]
 
-    permissions_result = await session.execute(
-        select(user_page_permission.c.page_name)
-        .where(user_page_permission.c.user_id == current_user.id)
-    )
-    permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
-    page_order = ['ceo', 'payment_list', 'project_toggle', 'projects', 'crm', 'finance_list']
-    modified_permissions = []
-    for page_name in page_order:
-        if page_name in permissions:
-            mapping = {
-                'ceo': 'Dashboard',
-                'payment_list': 'Payment',
-                'project_toggle': 'Wordpress',
-                'projects': 'Projects',
-                'crm': 'Sales CRM',
-                'finance_list': 'Finance'
-            }
-            modified_permissions.append(mapping.get(page_name, page_name))
+    permissions = await get_user_permission_names(session, current_user.id)
+    page_display_map = {
+        page.name: page.display_name
+        for page in await get_all_pages(session)
+    }
+    modified_permissions = build_permission_display_names(permissions, page_display_map)
 
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day)
@@ -659,7 +652,7 @@ async def create_customer(
         select(user_page_permission.c.page_name)
         .where(
             user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.crm
+            user_page_permission.c.page_name == PageName.crm.value
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
@@ -817,7 +810,7 @@ async def update_customer(
         select(user_page_permission.c.page_name)
         .where(
             user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.crm
+            user_page_permission.c.page_name == PageName.crm.value
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
@@ -949,7 +942,7 @@ async def patch_customer(
     permissions_result = await session.execute(
         select(user_page_permission.c.page_name).where(
             user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.crm
+            user_page_permission.c.page_name == PageName.crm.value
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
@@ -1053,7 +1046,7 @@ async def delete_customer(
         select(user_page_permission.c.page_name)
         .where(
             user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.crm
+            user_page_permission.c.page_name == PageName.crm.value
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
@@ -1126,7 +1119,7 @@ async def get_customer_stats(
         select(user_page_permission.c.page_name)
         .where(
             user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.crm
+            user_page_permission.c.page_name == PageName.crm.value
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
@@ -1195,7 +1188,7 @@ async def bulk_delete_customers(
         select(user_page_permission.c.page_name)
         .where(
             user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.crm
+            user_page_permission.c.page_name == PageName.crm.value
         )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
@@ -1405,9 +1398,9 @@ async def customers_periodic_status_summary(
         select(user_page_permission.c.page_name).where(
             and_(
                 user_page_permission.c.user_id == current_user.id,
-                user_page_permission.c.page_name == PageName.crm
+                user_page_permission.c.page_name == PageName.crm.value
             )
-        )
+    )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
         raise HTTPException(status_code=403, detail="CRM sahifasiga kirish huquqingiz yo'q")
@@ -1451,9 +1444,9 @@ async def customers_period_report(
         select(user_page_permission.c.page_name).where(
             and_(
                 user_page_permission.c.user_id == current_user.id,
-                user_page_permission.c.page_name == PageName.crm
+                user_page_permission.c.page_name == PageName.crm.value
             )
-        )
+    )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
         raise HTTPException(status_code=403, detail="CRM sahifasiga kirish huquqingiz yo'q")

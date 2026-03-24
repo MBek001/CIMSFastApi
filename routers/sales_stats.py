@@ -57,7 +57,7 @@ async def require_sales_access(
         select(user_page_permission.c.page_name)
         .where(
             (user_page_permission.c.user_id == current_user.id) &
-            (user_page_permission.c.page_name == PageName.crm)
+            (user_page_permission.c.page_name == PageName.crm.value)
         )
     )
     permissions = result.fetchall()

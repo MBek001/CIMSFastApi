@@ -9,6 +9,7 @@ from typing import Optional
 from config import VERIFICATION_CODE_EXPIRE_MINUTES, PASSWORD_RESET_EXPIRE_MINUTES
 from sqlalchemy import func
 from utils.file_storage import delete_image_if_exists, save_image
+from utils.page_permissions import get_all_pages, get_user_permission_names, normalize_page_name
 router = APIRouter(prefix="/auth",tags=['Autentifikatsiya'])
 from auth_utils.db_code_storage import db_code_storage
 
@@ -75,12 +76,14 @@ async def register(
     # Birinchi userga barcha sahifalarga ruxsat
     if is_first_user:
         permissions_to_add = [
-            {"user_id": user_id, "page_name": PageName.ceo},
-            {"user_id": user_id, "page_name": PageName.payment_list},
-            {"user_id": user_id, "page_name": PageName.project_toggle},
-            {"user_id": user_id, "page_name": PageName.projects},
-            {"user_id": user_id, "page_name": PageName.crm},
-            {"user_id": user_id, "page_name": PageName.finance_list},
+            {"user_id": user_id, "page_name": PageName.ceo.value},
+            {"user_id": user_id, "page_name": PageName.payment_list.value},
+            {"user_id": user_id, "page_name": PageName.project_toggle.value},
+            {"user_id": user_id, "page_name": PageName.projects.value},
+            {"user_id": user_id, "page_name": PageName.crm.value},
+            {"user_id": user_id, "page_name": PageName.finance_list.value},
+            {"user_id": user_id, "page_name": PageName.update_list.value},
+            {"user_id": user_id, "page_name": PageName.company_payments.value},
         ]
         for p in permissions_to_add:
             await session.execute(insert(user_page_permission).values(**p))
@@ -285,12 +288,12 @@ async def get_current_user_info(
         select(user_page_permission.c.page_name)
         .where(user_page_permission.c.user_id == current_user.id)
     )
-    user_permissions = [perm.page_name.value for perm in permissions_result.fetchall()]
+    user_permissions = {normalize_page_name(perm.page_name) for perm in permissions_result.fetchall()}
 
     # Barcha sahifalar uchun true/false obyekt yaratish
     permissions_object = {}
-    for page in PageName:
-        permissions_object[page.value] = page.value in user_permissions
+    for page in await get_all_pages(session):
+        permissions_object[page.name] = page.name in user_permissions
 
     return UserResponse(
         id=current_user.id,
@@ -428,10 +431,10 @@ async def dashboard_redirect(
         select(user_page_permission.c.page_name)
         .where(user_page_permission.c.user_id == current_user.id)
     )
-    permissions = [row.page_name for row in result.fetchall()]
+    permissions = [normalize_page_name(row.page_name) for row in result.fetchall()]
 
     if permissions:
-        first_permission = permissions[0].value
+        first_permission = permissions[0]
         redirect_map = {
             'ceo': '/ceo',
             'crm': '/crm',

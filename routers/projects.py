@@ -58,7 +58,7 @@ async def ensure_projects_page_access(session: AsyncSession, current_user) -> No
     result = await session.execute(
         select(user_page_permission.c.id).where(
             user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == PageName.projects,
+            user_page_permission.c.page_name == PageName.projects.value,
         )
     )
     if not result.fetchone():

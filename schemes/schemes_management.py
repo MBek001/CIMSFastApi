@@ -107,6 +107,78 @@ class UserRoleResponse(BaseModel):
 
 
 # ========================================
+# APP PAGE SCHEMAS
+# ========================================
+
+class AppPageCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100, description="Unique page key (e.g., 'crm')")
+    display_name: str = Field(..., min_length=1, max_length=255, description="Display name (e.g., 'Sales CRM')")
+    description: Optional[str] = Field(None, description="Page description")
+    route_path: Optional[str] = Field(None, max_length=255, description="Frontend route path (e.g., '/crm')")
+    order: int = Field(0, description="Display order")
+    is_active: bool = Field(True, description="Is this page active?")
+    is_system: bool = Field(False, description="System pages can't be deleted")
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v):
+        return v.strip().lower().replace(' ', '_')
+
+    @field_validator('display_name')
+    @classmethod
+    def validate_display_name(cls, v):
+        return v.strip()
+
+    @field_validator('route_path')
+    @classmethod
+    def validate_route_path(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        if v and not v.startswith('/'):
+            return f'/{v}'
+        return v or None
+
+
+class AppPageUpdate(BaseModel):
+    display_name: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    route_path: Optional[str] = Field(None, max_length=255)
+    order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+    @field_validator('display_name')
+    @classmethod
+    def validate_display_name(cls, v):
+        if v:
+            return v.strip()
+        return v
+
+    @field_validator('route_path')
+    @classmethod
+    def validate_route_path(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        if v and not v.startswith('/'):
+            return f'/{v}'
+        return v or None
+
+
+class AppPageResponse(BaseModel):
+    id: int
+    name: str
+    display_name: str
+    description: Optional[str]
+    route_path: Optional[str]
+    order: int
+    is_active: bool
+    is_system: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+# ========================================
 # SALES MANAGER ASSIGNMENT SCHEMAS
 # ========================================
 

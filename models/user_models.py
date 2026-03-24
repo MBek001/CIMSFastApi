@@ -57,7 +57,7 @@ user_page_permission = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
-    Column("page_name", Enum(PageName), nullable=False),
+    Column("page_name", String(100), nullable=False),
     UniqueConstraint("user_id", "page_name", name="uq_user_page_permission")
 )
 

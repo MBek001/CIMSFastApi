@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, RootModel
 from typing import Optional, List
 from datetime import datetime, date, time
 from decimal import Decimal
@@ -160,36 +160,17 @@ class DashboardResponse(BaseModel):
 
 # schemes_users.py
 
-from pydantic import BaseModel, Field, validator
-from typing import List, Dict, Optional
-from enum import Enum
+from typing import Dict
 
 
-class PageName(str, Enum):
-    ceo = "ceo"
-    payment_list = "payment_list"
-    project_toggle = "project_toggle"
-    projects = "projects"
-    crm = "crm"
-    finance_list = "finance_list"
-    update_list = "update_list"
-
-
-class UserPermissionUpdateRequest(BaseModel):
+class UserPermissionUpdateRequest(RootModel[Dict[str, bool]]):
     """
     User permissions yangilash uchun schema
-    Barcha sahifalar uchun true/false qiymatlar
+    Body to'g'ridan-to'g'ri {"crm": true, "projects": false} formatida yuboriladi
     """
-    ceo: bool = Field(default=False, description="Dashboard sahifasiga ruxsat")
-    payment_list: bool = Field(default=False, description="Payment sahifasiga ruxsat")
-    project_toggle: bool = Field(default=False, description="Wordpress sahifasiga ruxsat")
-    projects: bool = Field(default=False, description="Projects sahifasiga ruxsat")
-    crm: bool = Field(default=False, description="Sales CRM sahifasiga ruxsat")
-    finance_list: bool = Field(default=False, description="Finance sahifasiga ruxsat")
-    update_list: bool = Field(default=False, description="Update sahifasiga ruxsat")
 
-    class Config:
-        schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "ceo": True,
                 "payment_list": False,
@@ -198,59 +179,39 @@ class UserPermissionUpdateRequest(BaseModel):
                 "crm": False,
                 "finance_list": True,
                 "update_list": True,
+                "company_payments": False,
             }
         }
+    )
 
     def to_dict(self) -> Dict[str, bool]:
-        """Schema ni dict formatiga o'tkazish"""
         return {
-            "ceo": self.ceo,
-            "payment_list": self.payment_list,
-            "project_toggle": self.project_toggle,
-            "projects": self.projects,
-            "crm": self.crm,
-            "finance_list": self.finance_list,
-            "update_list": self.update_list,
+            str(key).strip(): bool(value)
+            for key, value in self.root.items()
+            if str(key).strip()
         }
 
 
-
-class UserPermissionAddRequest(BaseModel):
+class UserPermissionAddRequest(RootModel[Dict[str, bool]]):
     """
     Foydalanuvchiga ruxsat qo'shish uchun schema
-    Barcha sahifalar uchun true/false qiymatlar, faqat true bo'lganlar qo'shiladi
+    Body to'g'ridan-to'g'ri {"crm": true} formatida yuboriladi
     """
-    ceo: bool = Field(default=False, description="Dashboard sahifasiga ruxsat")
-    payment_list: bool = Field(default=False, description="Payment sahifasiga ruxsat")
-    project_toggle: bool = Field(default=False, description="Wordpress sahifasiga ruxsat")
-    projects: bool = Field(default=False, description="Projects sahifasiga ruxsat")
-    crm: bool = Field(default=False, description="Sales CRM sahifasiga ruxsat")
-    finance_list: bool = Field(default=False, description="Finance sahifasiga ruxsat")
-    update_list: bool = Field(default=False, description="Update sahifasiga ruxsat")
 
-    class Config:
-        schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
-                "ceo": True,
-                "payment_list": False,
-                "project_toggle": True,
-                "projects": True,
-                "crm": False,
-                "finance_list": True,
-                "update_list": True
+                "crm": True,
+                "projects": True
             }
         }
+    )
 
     def to_dict(self) -> Dict[str, bool]:
-        """Schema ni dict formatiga o'tkazish"""
         return {
-            "ceo": self.ceo,
-            "payment_list": self.payment_list,
-            "project_toggle": self.project_toggle,
-            "projects": self.projects,
-            "crm": self.crm,
-            "finance_list": self.finance_list,
-            "update_list": self.update_list,
+            str(key).strip(): bool(value)
+            for key, value in self.root.items()
+            if str(key).strip()
         }
 
 class UserPermissionResponse(BaseModel):
@@ -265,8 +226,8 @@ class UserPermissionResponse(BaseModel):
     active_permissions_count: int
     total_available_pages: int
 
-    class Config:
-        schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "user_id": 1,
                 "user_email": "user@example.com",
@@ -278,7 +239,8 @@ class UserPermissionResponse(BaseModel):
                     "projects": True,
                     "crm": False,
                     "finance_list": True,
-                    "update_list":True
+                    "update_list": True,
+                    "company_payments": False
                 },
                 "permissions_display": {
                     "Dashboard": True,
@@ -290,9 +252,10 @@ class UserPermissionResponse(BaseModel):
                     "Update": True
                 },
                 "active_permissions_count": 5,
-                "total_available_pages": 7
+                "total_available_pages": 8
             }
         }
+    )
 
 
 class UserPermissionsOverviewResponse(BaseModel):
@@ -326,12 +289,13 @@ class SuccessResponse(BaseModel):
     """
     message: str
 
-    class Config:
-        schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "message": "Operatsiya muvaffaqiyatli bajarildi"
             }
         }
+    )
 
 
 

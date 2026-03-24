@@ -1343,9 +1343,9 @@ async def get_recall_recipients(
         select(user_page_permission.c.page_name).where(
             and_(
                 user_page_permission.c.user_id == current_user.id,
-                user_page_permission.c.page_name == PageName.crm
+                user_page_permission.c.page_name == PageName.crm.value
             )
-        )
+    )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
         raise HTTPException(status_code=403, detail="Ruxsat yo'q")
@@ -1371,9 +1371,9 @@ async def run_recall_reminders(
         select(user_page_permission.c.page_name).where(
             and_(
                 user_page_permission.c.user_id == current_user.id,
-                user_page_permission.c.page_name == PageName.crm
+                user_page_permission.c.page_name == PageName.crm.value
             )
-        )
+    )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
         raise HTTPException(status_code=403, detail="Ruxsat yo'q")
@@ -1391,9 +1391,9 @@ async def run_company_payment_reminders(
         select(user_page_permission.c.page_name).where(
             and_(
                 user_page_permission.c.user_id == current_user.id,
-                user_page_permission.c.page_name == PageName.crm
+                user_page_permission.c.page_name == PageName.crm.value
             )
-        )
+    )
     )
     if not permissions_result.fetchone() and current_user.company_code != "ceo":
         raise HTTPException(status_code=403, detail="Ruxsat yo'q")
