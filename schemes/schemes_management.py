@@ -231,6 +231,23 @@ class ImageDeleteResponse(BaseModel):
     cleared_references: dict[str, int] = Field(default_factory=dict)
 
 
+class ImageListItemResponse(BaseModel):
+    path: str
+    file_url: str
+    filename: str
+    category: str
+    size_bytes: int
+    reference_count: int = 0
+    is_referenced: bool = False
+    updated_at: datetime
+
+
+class ImageListResponse(BaseModel):
+    total_count: int
+    category: Optional[Literal["project_images", "profil_images", "card_images"]] = None
+    images: list[ImageListItemResponse] = Field(default_factory=list)
+
+
 class ImageBulkDeleteRequest(BaseModel):
     image_paths: list[str] = Field(default_factory=list, description="Delete qilinadigan image pathlar")
     category: Optional[Literal["project_images", "profil_images", "card_images"]] = Field(

@@ -4,7 +4,7 @@ Lead tracking with date filters and customer type filtering
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_, cast, Date
+from sqlalchemy import select, func, and_, or_, cast, Date, String
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, List
 from pydantic import BaseModel
@@ -42,6 +42,46 @@ class DetailedSalesResponse(BaseModel):
     summary: SalesStatsResponse
     daily_breakdown: List[DailySalesResponse]
     date_range: str
+
+
+class DashboardPeriodResponse(BaseModel):
+    start_date: str
+    end_date: str
+    days: int
+
+
+class DashboardSummaryResponse(BaseModel):
+    total_period_leads: int
+    today: int
+    yesterday: int
+    this_week: int
+    last_week: int
+    project_started: int
+    finished: int
+    rejected: int
+    conversion_rate_percent: float
+
+
+class DashboardDistributionItem(BaseModel):
+    key: str
+    label: str
+    value: int
+    percentage: float
+
+
+class DashboardTrendPoint(BaseModel):
+    date: str
+    count: int
+
+
+class DashboardChartsResponse(BaseModel):
+    customer_type: Optional[str] = None
+    period: DashboardPeriodResponse
+    summary: DashboardSummaryResponse
+    trend: List[DashboardTrendPoint]
+    status_distribution: List[DashboardDistributionItem]
+    platform_distribution: List[DashboardDistributionItem]
+    customer_type_distribution: List[DashboardDistributionItem]
 
 
 # ========================================
@@ -92,6 +132,55 @@ def get_date_ranges():
         "last_week_start": last_week_start,
         "last_week_end": last_week_end
     }
+
+
+def build_customer_type_filter(customer_type: Optional[str]):
+    if customer_type is None:
+        return None
+
+    normalized = customer_type.strip().lower()
+    if normalized == "international":
+        return customer.c.type == CustomerType.international
+    if normalized == "local":
+        return or_(
+            customer.c.type == CustomerType.local,
+            customer.c.type == None  # noqa: E711
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail="customer_type faqat 'international' yoki 'local' bo'lishi mumkin"
+    )
+
+
+async def count_customers(
+    session: AsyncSession,
+    *conditions,
+):
+    query = select(func.count()).select_from(customer)
+    if conditions:
+        query = query.where(and_(*conditions))
+    result = await session.execute(query)
+    return int(result.scalar() or 0)
+
+
+def make_distribution_items(
+    raw_items: List[tuple[str, int]],
+    total: int,
+) -> List[DashboardDistributionItem]:
+    items: List[DashboardDistributionItem] = []
+    for key, value in raw_items:
+        normalized_key = str(key or "unknown").strip() or "unknown"
+        percentage = round((value / total) * 100, 2) if total > 0 else 0.0
+        items.append(
+            DashboardDistributionItem(
+                key=normalized_key,
+                label=normalized_key.replace("_", " ").title(),
+                value=int(value),
+                percentage=percentage,
+            )
+        )
+    return items
 
 
 # ========================================
@@ -299,6 +388,168 @@ async def get_detailed_sales_stats(
         summary=summary,
         daily_breakdown=daily_breakdown,
         date_range=f"{start_date.isoformat()} to {end_date.isoformat()}"
+    )
+
+
+@router.get("/dashboard/charts", response_model=DashboardChartsResponse, summary="Dashboard uchun chart ma'lumotlari")
+async def get_dashboard_charts(
+    days: int = Query(30, ge=7, le=365, description="Necha kunlik chart ma'lumotlari kerak"),
+    customer_type: Optional[str] = Query(None, description="Customer type filter: 'international' yoki 'local'"),
+    platform_limit: int = Query(10, ge=1, le=20, description="Platform chart uchun maksimal platform soni"),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_sales_access)
+):
+    """
+    Dashboard chart/grafiklari uchun bitta agregat endpoint.
+    Frontend shu endpoint orqali trend va distribution datasetlarni olishi mumkin.
+    """
+    end_date = date.today()
+    start_date = end_date - timedelta(days=days - 1)
+    type_filter = build_customer_type_filter(customer_type)
+
+    period_conditions = [
+        cast(customer.c.created_at, Date) >= start_date,
+        cast(customer.c.created_at, Date) <= end_date,
+    ]
+    if type_filter is not None:
+        period_conditions.append(type_filter)
+
+    trend_query = (
+        select(
+            cast(customer.c.created_at, Date).label("chart_date"),
+            func.count().label("count"),
+        )
+        .where(and_(*period_conditions))
+        .group_by(cast(customer.c.created_at, Date))
+        .order_by(cast(customer.c.created_at, Date).asc())
+    )
+    trend_result = await session.execute(trend_query)
+    trend_rows = trend_result.fetchall()
+    trend_map = {row.chart_date: int(row.count or 0) for row in trend_rows}
+
+    trend: List[DashboardTrendPoint] = []
+    current_date = start_date
+    while current_date <= end_date:
+        trend.append(
+            DashboardTrendPoint(
+                date=current_date.isoformat(),
+                count=trend_map.get(current_date, 0),
+            )
+        )
+        current_date += timedelta(days=1)
+
+    status_expr = func.coalesce(customer.c.status_name, cast(customer.c.status, String))
+    status_query = (
+        select(
+            status_expr.label("status_key"),
+            func.count().label("count"),
+        )
+        .where(and_(*period_conditions))
+        .group_by(status_expr)
+        .order_by(func.count().desc(), status_expr.asc())
+    )
+    status_result = await session.execute(status_query)
+    status_rows = [(str(row.status_key), int(row.count or 0)) for row in status_result.fetchall()]
+
+    platform_query = (
+        select(
+            customer.c.platform.label("platform_name"),
+            func.count().label("count"),
+        )
+        .where(and_(*period_conditions))
+        .group_by(customer.c.platform)
+        .order_by(func.count().desc(), customer.c.platform.asc())
+        .limit(platform_limit)
+    )
+    platform_result = await session.execute(platform_query)
+    platform_rows = [
+        (str(row.platform_name or "unknown"), int(row.count or 0))
+        for row in platform_result.fetchall()
+    ]
+
+    type_period_conditions = [
+        cast(customer.c.created_at, Date) >= start_date,
+        cast(customer.c.created_at, Date) <= end_date,
+    ]
+    if type_filter is not None:
+        type_period_conditions.append(type_filter)
+
+    local_count = await count_customers(
+        session,
+        *type_period_conditions,
+        or_(
+            customer.c.type == CustomerType.local,
+            customer.c.type == None  # noqa: E711
+        ),
+    )
+    international_count = await count_customers(
+        session,
+        *type_period_conditions,
+        customer.c.type == CustomerType.international,
+    )
+
+    total_period_leads = await count_customers(session, *period_conditions)
+    dates = get_date_ranges()
+
+    today_conditions = [cast(customer.c.created_at, Date) == dates["today"]]
+    yesterday_conditions = [cast(customer.c.created_at, Date) == dates["yesterday"]]
+    this_week_conditions = [
+        cast(customer.c.created_at, Date) >= dates["this_week_start"],
+        cast(customer.c.created_at, Date) <= dates["this_week_end"],
+    ]
+    last_week_conditions = [
+        cast(customer.c.created_at, Date) >= dates["last_week_start"],
+        cast(customer.c.created_at, Date) <= dates["last_week_end"],
+    ]
+    if type_filter is not None:
+        today_conditions.append(type_filter)
+        yesterday_conditions.append(type_filter)
+        this_week_conditions.append(type_filter)
+        last_week_conditions.append(type_filter)
+
+    today_count = await count_customers(session, *today_conditions)
+    yesterday_count = await count_customers(session, *yesterday_conditions)
+    this_week_count = await count_customers(session, *this_week_conditions)
+    last_week_count = await count_customers(session, *last_week_conditions)
+
+    status_count_map = {key: value for key, value in status_rows}
+    project_started_count = int(status_count_map.get("project_started", 0))
+    finished_count = int(status_count_map.get("finished", 0))
+    rejected_count = int(status_count_map.get("rejected", 0))
+    conversion_rate_percent = round((project_started_count / total_period_leads) * 100, 2) if total_period_leads > 0 else 0.0
+
+    status_distribution = make_distribution_items(status_rows, total_period_leads)
+    platform_distribution = make_distribution_items(platform_rows, total_period_leads)
+    customer_type_distribution = make_distribution_items(
+        [
+            ("local", local_count),
+            ("international", international_count),
+        ],
+        total_period_leads,
+    )
+
+    return DashboardChartsResponse(
+        customer_type=customer_type.strip().lower() if customer_type else None,
+        period=DashboardPeriodResponse(
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+            days=days,
+        ),
+        summary=DashboardSummaryResponse(
+            total_period_leads=total_period_leads,
+            today=today_count,
+            yesterday=yesterday_count,
+            this_week=this_week_count,
+            last_week=last_week_count,
+            project_started=project_started_count,
+            finished=finished_count,
+            rejected=rejected_count,
+            conversion_rate_percent=conversion_rate_percent,
+        ),
+        trend=trend,
+        status_distribution=status_distribution,
+        platform_distribution=platform_distribution,
+        customer_type_distribution=customer_type_distribution,
     )
 
 

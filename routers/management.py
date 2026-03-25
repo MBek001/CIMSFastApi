@@ -29,6 +29,8 @@ from schemes.schemes_management import (
     CustomerStatusResponse,
     ImageBulkDeleteRequest,
     ImageDeleteResponse,
+    ImageListItemResponse,
+    ImageListResponse,
     UserRoleCreate,
     UserRoleUpdate,
     UserRoleResponse,
@@ -199,6 +201,31 @@ async def _delete_images(
         missing_paths=missing_paths,
         skipped_items=skipped_items,
         cleared_references=dict(cleared_references),
+    )
+
+
+def _extract_image_category(normalized_path: str) -> str:
+    relative_path = normalized_path.removeprefix("/images/")
+    return relative_path.split("/", 1)[0]
+
+
+def _build_image_item(normalized_path: str, reference_counts: dict[str, int]) -> ImageListItemResponse:
+    absolute_path = resolve_image_path(normalized_path)
+    if absolute_path is None or not absolute_path.exists() or not absolute_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image topilmadi")
+
+    file_stat = absolute_path.stat()
+    reference_count = int(reference_counts.get(normalized_path, 0))
+
+    return ImageListItemResponse(
+        path=normalized_path,
+        file_url=normalized_path,
+        filename=absolute_path.name,
+        category=_extract_image_category(normalized_path),
+        size_bytes=file_stat.st_size,
+        reference_count=reference_count,
+        is_referenced=reference_count > 0,
+        updated_at=datetime.fromtimestamp(file_stat.st_mtime),
     )
 
 
@@ -389,6 +416,62 @@ async def delete_page(
 # ========================================
 # IMAGE CLEANUP ENDPOINTS
 # ========================================
+
+@router.get("/images", response_model=ImageListResponse, summary="Barcha rasmlar ro'yxati")
+async def get_images(
+    category: str | None = Query(None, description="project_images, profil_images yoki card_images"),
+    referenced_only: bool = Query(False, description="Faqat DB da ishlatilayotgan rasmlar"),
+    unreferenced_only: bool = Query(False, description="Faqat DB da ishlatilmayotgan rasmlar"),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_ceo_access)
+):
+    """
+    Barcha rasmlar yoki tanlangan category bo'yicha rasmlar ro'yxatini qaytaradi.
+    """
+    if referenced_only and unreferenced_only:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="referenced_only va unreferenced_only bir vaqtda true bo'lishi mumkin emas"
+        )
+
+    image_paths = list_image_paths(category)
+    reference_counts = await _get_image_reference_counts(session)
+    images: list[ImageListItemResponse] = []
+
+    for image_path in image_paths:
+        reference_count = int(reference_counts.get(image_path, 0))
+        if referenced_only and reference_count <= 0:
+            continue
+        if unreferenced_only and reference_count > 0:
+            continue
+        images.append(_build_image_item(image_path, reference_counts))
+
+    images.sort(key=lambda item: (item.updated_at, item.filename), reverse=True)
+
+    return ImageListResponse(
+        total_count=len(images),
+        category=category,
+        images=images,
+    )
+
+
+@router.get("/images/detail", response_model=ImageListItemResponse, summary="Bitta rasm detail")
+async def get_single_image(
+    image_path: str = Query(..., description="Masalan: /images/project_images/abc.png"),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_ceo_access)
+):
+    """
+    Bitta rasmning metadata va reference holatini qaytaradi.
+    Faylning o'zi esa `file_url` yoki `/images/...` static URL orqali olinadi.
+    """
+    normalized = normalize_image_path(image_path)
+    if not normalized:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Noto'g'ri image path")
+
+    reference_counts = await _get_image_reference_counts(session)
+    return _build_image_item(normalized, reference_counts)
+
 
 @router.delete("/images", response_model=ImageDeleteResponse, summary="Bitta rasmni o'chirish")
 async def delete_single_image(
