@@ -14,7 +14,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field, ConfigDict
-from sqlalchemy import select, and_, insert, update, func
+from sqlalchemy import select, and_, or_, insert, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton, InputFile
 
@@ -942,7 +942,12 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
             and_(
                 customer.c.recall_time.isnot(None),
                 customer.c.recall_time >= candidate_start,
-                customer.c.recall_time <= candidate_end
+                customer.c.recall_time <= candidate_end,
+                customer.c.status != CustomerStatus.rejected,
+                or_(
+                    customer.c.status_name.is_(None),
+                    func.lower(customer.c.status_name) != "rejected"
+                )
             )
         )
     )
@@ -981,6 +986,11 @@ async def process_due_recall_notifications(session: AsyncSession) -> Dict[str, i
         customer_phone = _safe_decrypt(c.phone_number)
         customer_note = _clean_note_text(c.notes) or "yo'q"
         customer_status = c.status_name or c.status
+        normalized_status = (
+            customer_status.value if hasattr(customer_status, "value") else str(customer_status or "")
+        ).strip().lower()
+        if normalized_status == "rejected":
+            continue
         target_reminder_minutes = RECALL_BOT_REMINDER_MINUTES
         target_reminder_at = recall_at - timedelta(minutes=target_reminder_minutes)
 
