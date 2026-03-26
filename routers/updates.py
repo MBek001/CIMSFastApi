@@ -516,10 +516,6 @@ async def get_member_salary_estimate(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    has_permission = await has_update_list_permission(session, current_user)
-    if user_id != current_user.id and not has_permission and not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Faqat o'zingizning bonus va penaltylaringizni ko'ra olasiz")
-
     return await build_member_salary_estimate_payload(
         session=session,
         user_id=user_id,
@@ -551,15 +547,6 @@ async def get_members_salary_estimates(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    permission_check = await session.execute(
-        select(user_page_permission).where(
-            user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == "update_list"
-        )
-    )
-    if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yoвЂq")
-
     selected_employee_ids = parse_employee_ids(employee_ids)
 
     users_query = select(
@@ -642,15 +629,6 @@ async def get_employee_monthly_update_statistics(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    permission_check = await session.execute(
-        select(user_page_permission).where(
-            user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == "update_list"
-        )
-    )
-    if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yoвЂq")
-
     selected_employee_ids = parse_employee_ids(employee_ids)
 
     filters = []
@@ -812,8 +790,8 @@ async def add_member_update(
     return {"message": f"{month}/{year} uchun update muvaffaqiyatli qoвЂshildi"}
 
 
-# рџ”№ 2. GET вЂ” Hamma foydalanuvchilar uchun barcha updateвЂ™lar (faqat update_list sahifasiga ruxsati borlar uchun)
-@router.get("/member/updates/all", summary="CEO uchun employee update/jarima/oylik statistikasi (oylar kesimida)")
+# рџ”№ 2. GET вЂ” Hamma foydalanuvchilar uchun barcha updateвЂ™lar
+@router.get("/member/updates/all", summary="Employee update/jarima/oylik statistikasi (oylar kesimida)")
 async def get_all_updates(
     year: Optional[int] = Query(default=None, ge=2020, le=2035),
     month: Optional[int] = Query(default=None, ge=1, le=12),
@@ -821,9 +799,6 @@ async def get_all_updates(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Faqat CEO bu ma'lumotni ko'ra oladi")
-
     selected_employee_ids = parse_employee_ids(employee_ids)
 
     employees_query = (
