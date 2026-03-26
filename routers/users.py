@@ -194,11 +194,6 @@ def _is_missing_db_enum_value_error(exc: Exception, role: UserRole) -> bool:
 
 # --- DECORATOR: CEO huquqini tekshirish ---
 def require_ceo_access(current_user=Depends(get_current_active_user)):
-    if current_user.company_code != "ceo":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Faqat CEO ushbu amalni bajara oladi"
-        )
     return current_user
 
 

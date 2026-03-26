@@ -48,12 +48,7 @@ router = APIRouter(prefix="/management", tags=["Management"])
 async def require_ceo_access(
     current_user=Depends(get_current_active_user)
 ):
-    """Faqat CEO kirishi mumkin"""
-    if current_user.role != UserRole.CEO:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Faqat CEO bu operatsiyani bajara oladi"
-        )
+    """Auth bo'lgan user kirishi mumkin"""
     return current_user
 
 

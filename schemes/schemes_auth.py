@@ -74,6 +74,16 @@ class PasswordResetConfirm(BaseModel):
     new_password: str
 
 
+class MyProfileUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    surname: Optional[str] = None
+
+
+class ChangeMyPasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class SuccessResponse(BaseModel):
     success: bool = True
     message: str

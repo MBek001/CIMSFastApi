@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from schemes.schemes_auth import *
 from auth_utils.auth_func import *
@@ -324,6 +324,114 @@ async def upload_my_profile_image(
     await session.commit()
 
     return SuccessResponse(message=f"Profil rasmi yuklandi: {image_path}")
+
+
+@router.patch("/me/profile-info", response_model=SuccessResponse, summary="Joriy user ism va familiyasini yangilash")
+async def update_my_profile_info(
+    payload: MyProfileUpdateRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    update_values = {}
+
+    if payload.name is not None:
+        normalized_name = payload.name.strip()
+        if not normalized_name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ism bo'sh bo'lishi mumkin emas")
+        update_values["name"] = normalized_name
+
+    if payload.surname is not None:
+        normalized_surname = payload.surname.strip()
+        if not normalized_surname:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Familiya bo'sh bo'lishi mumkin emas")
+        update_values["surname"] = normalized_surname
+
+    if not update_values:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Yangilanadigan ma'lumot topilmadi")
+
+    await session.execute(
+        update(user).where(user.c.id == current_user.id).values(**update_values)
+    )
+    await session.commit()
+    return SuccessResponse(message="Profil ma'lumotlari yangilandi")
+
+
+@router.patch("/me/password", response_model=SuccessResponse, summary="Joriy user parolini almashtirish")
+async def change_my_password(
+    payload: ChangeMyPasswordRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    if not verify_password(payload.current_password, current_user.password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Joriy parol noto'g'ri")
+
+    new_password = payload.new_password.strip()
+    if not new_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Yangi parol bo'sh bo'lishi mumkin emas")
+
+    await session.execute(
+        update(user)
+        .where(user.c.id == current_user.id)
+        .values(password=get_password_hash(new_password))
+    )
+    await session.commit()
+    return SuccessResponse(message="Parol yangilandi")
+
+
+@router.patch("/me/profile", response_model=SuccessResponse, summary="Joriy user profilini birga yangilash")
+async def update_my_profile(
+    name: Optional[str] = Form(None),
+    surname: Optional[str] = Form(None),
+    current_password: Optional[str] = Form(None),
+    new_password: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    update_values = {}
+
+    if name is not None:
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ism bo'sh bo'lishi mumkin emas")
+        update_values["name"] = normalized_name
+
+    if surname is not None:
+        normalized_surname = surname.strip()
+        if not normalized_surname:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Familiya bo'sh bo'lishi mumkin emas")
+        update_values["surname"] = normalized_surname
+
+    if current_password is not None or new_password is not None:
+        if not current_password or not new_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Parolni almashtirish uchun current_password va new_password birga yuborilishi kerak",
+            )
+        if not verify_password(current_password, current_user.password):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Joriy parol noto'g'ri")
+
+        normalized_new_password = new_password.strip()
+        if not normalized_new_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Yangi parol bo'sh bo'lishi mumkin emas",
+            )
+        update_values["password"] = get_password_hash(normalized_new_password)
+
+    if image is not None:
+        image_path = await save_image(image, "profile")
+        delete_image_if_exists(current_user.profile_image)
+        update_values["profile_image"] = image_path
+
+    if not update_values:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Yangilanadigan ma'lumot topilmadi")
+
+    await session.execute(
+        update(user).where(user.c.id == current_user.id).values(**update_values)
+    )
+    await session.commit()
+    return SuccessResponse(message="Profil muvaffaqiyatli yangilandi")
 
 # 8. REFRESH TOKEN (NEW)
 @router.post("/refresh", response_model=TokenWithRefresh, summary="Refresh token orqali yangi access token olish")
