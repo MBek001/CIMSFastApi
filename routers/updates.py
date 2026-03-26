@@ -110,6 +110,16 @@ def is_visible_update_member(name: Optional[str], surname: Optional[str]) -> boo
     return not _is_excluded_from_admin_stats(name, surname)
 
 
+async def has_update_list_permission(session: AsyncSession, current_user) -> bool:
+    permission_check = await session.execute(
+        select(user_page_permission.c.id).where(
+            user_page_permission.c.user_id == current_user.id,
+            user_page_permission.c.page_name == "update_list"
+        )
+    )
+    return permission_check.fetchone() is not None
+
+
 def calculate_salary_estimate(
     base_salary: Decimal,
     total_penalty_points: Decimal,
@@ -177,6 +187,123 @@ async def get_penalty_bonus_maps(
     bonus_map = {row.user_id: row for row in bonuses_result.fetchall()}
 
     return penalty_map, bonus_map
+
+
+async def build_member_salary_estimate_payload(
+    session: AsyncSession,
+    user_id: int,
+    year: int,
+    month: int,
+) -> dict:
+    user_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.default_salary).where(user.c.id == user_id)
+    )
+    user_data = user_result.fetchone()
+    if not user_data:
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+
+    creator_user = user.alias("creator_user")
+
+    penalties_result = await session.execute(
+        select(
+            monthly_penalty.c.id,
+            monthly_penalty.c.penalty_points,
+            monthly_penalty.c.reason,
+            monthly_penalty.c.created_by,
+            monthly_penalty.c.created_at,
+            creator_user.c.name.label("creator_name"),
+            creator_user.c.surname.label("creator_surname"),
+        )
+        .select_from(
+            monthly_penalty.outerjoin(creator_user, monthly_penalty.c.created_by == creator_user.c.id)
+        )
+        .where(
+            and_(
+                monthly_penalty.c.user_id == user_id,
+                monthly_penalty.c.year == year,
+                monthly_penalty.c.month == month
+            )
+        )
+        .order_by(monthly_penalty.c.created_at.asc(), monthly_penalty.c.id.asc())
+    )
+    penalty_rows = penalties_result.fetchall()
+
+    total_penalty_points = Decimal("0")
+    for row in penalty_rows:
+        total_penalty_points += Decimal(str(row.penalty_points or 0))
+
+    bonuses_result = await session.execute(
+        select(
+            monthly_bonus.c.id,
+            monthly_bonus.c.bonus_amount,
+            monthly_bonus.c.reason,
+            monthly_bonus.c.created_by,
+            monthly_bonus.c.created_at,
+            creator_user.c.name.label("creator_name"),
+            creator_user.c.surname.label("creator_surname"),
+        )
+        .select_from(
+            monthly_bonus.outerjoin(creator_user, monthly_bonus.c.created_by == creator_user.c.id)
+        )
+        .where(
+            and_(
+                monthly_bonus.c.user_id == user_id,
+                monthly_bonus.c.year == year,
+                monthly_bonus.c.month == month
+            )
+        )
+        .order_by(monthly_bonus.c.created_at.asc(), monthly_bonus.c.id.asc())
+    )
+    bonus_rows = bonuses_result.fetchall()
+
+    total_bonus_amount = Decimal("0")
+    for row in bonus_rows:
+        total_bonus_amount += Decimal(str(row.bonus_amount or 0))
+
+    base_salary = Decimal(str(user_data.default_salary or 0))
+    estimate = calculate_salary_estimate(base_salary, total_penalty_points, total_bonus_amount)
+
+    return {
+        "user": {
+            "id": user_data.id,
+            "full_name": f"{user_data.name} {user_data.surname}"
+        },
+        "period": {
+            "year": year,
+            "month": month
+        },
+        "penalties_count": len(penalty_rows),
+        "penalties": [
+            {
+                "id": row.id,
+                "penalty_points": float(row.penalty_points or 0),
+                "reason": row.reason,
+                "created_by": row.created_by,
+                "created_by_full_name": (
+                    f"{row.creator_name} {row.creator_surname}".strip()
+                    if row.creator_name or row.creator_surname else None
+                ),
+                "created_at": row.created_at.isoformat() if row.created_at else None
+            }
+            for row in penalty_rows
+        ],
+        "bonuses_count": len(bonus_rows),
+        "bonuses": [
+            {
+                "id": row.id,
+                "bonus_amount": float(row.bonus_amount or 0),
+                "reason": row.reason,
+                "created_by": row.created_by,
+                "created_by_full_name": (
+                    f"{row.creator_name} {row.creator_surname}".strip()
+                    if row.creator_name or row.creator_surname else None
+                ),
+                "created_at": row.created_at.isoformat() if row.created_at else None
+            }
+            for row in bonus_rows
+        ],
+        "salary_estimate": estimate
+    }
 
 
 @router.post("/member/penalties/add", summary="Employee uchun oylik jarima ball qo'shish")
@@ -389,100 +516,31 @@ async def get_member_salary_estimate(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    permission_check = await session.execute(
-        select(user_page_permission).where(
-            user_page_permission.c.user_id == current_user.id,
-            user_page_permission.c.page_name == "update_list"
-        )
+    has_permission = await has_update_list_permission(session, current_user)
+    if user_id != current_user.id and not has_permission and not is_ceo_user(current_user):
+        raise HTTPException(status_code=403, detail="Faqat o'zingizning bonus va penaltylaringizni ko'ra olasiz")
+
+    return await build_member_salary_estimate_payload(
+        session=session,
+        user_id=user_id,
+        year=year,
+        month=month,
     )
-    if not permission_check.fetchone():
-        raise HTTPException(status_code=403, detail="Bu sahifaga kirish huquqingiz yoвЂq")
 
-    user_result = await session.execute(
-        select(user.c.id, user.c.name, user.c.surname, user.c.default_salary).where(user.c.id == user_id)
+
+@router.get("/member/my-salary-estimate", summary="Login qilgan member uchun bonus va penalty detail")
+async def get_my_salary_estimate(
+    year: int = Query(..., ge=2020, le=2035),
+    month: int = Query(..., ge=1, le=12),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user)
+):
+    return await build_member_salary_estimate_payload(
+        session=session,
+        user_id=current_user.id,
+        year=year,
+        month=month,
     )
-    user_data = user_result.fetchone()
-    if not user_data:
-        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
-
-    penalties_result = await session.execute(
-        select(
-            monthly_penalty.c.id,
-            monthly_penalty.c.penalty_points,
-            monthly_penalty.c.reason,
-            monthly_penalty.c.created_at
-        )
-        .where(
-            and_(
-                monthly_penalty.c.user_id == user_id,
-                monthly_penalty.c.year == year,
-                monthly_penalty.c.month == month
-            )
-        )
-        .order_by(monthly_penalty.c.created_at.asc())
-    )
-    penalty_rows = penalties_result.fetchall()
-
-    total_penalty_points = Decimal("0")
-    for row in penalty_rows:
-        total_penalty_points += Decimal(str(row.penalty_points or 0))
-
-    bonuses_result = await session.execute(
-        select(
-            monthly_bonus.c.id,
-            monthly_bonus.c.bonus_amount,
-            monthly_bonus.c.reason,
-            monthly_bonus.c.created_at
-        )
-        .where(
-            and_(
-                monthly_bonus.c.user_id == user_id,
-                monthly_bonus.c.year == year,
-                monthly_bonus.c.month == month
-            )
-        )
-        .order_by(monthly_bonus.c.created_at.asc())
-    )
-    bonus_rows = bonuses_result.fetchall()
-
-    total_bonus_amount = Decimal("0")
-    for row in bonus_rows:
-        total_bonus_amount += Decimal(str(row.bonus_amount or 0))
-
-    base_salary = Decimal(str(user_data.default_salary or 0))
-    estimate = calculate_salary_estimate(base_salary, total_penalty_points, total_bonus_amount)
-
-    return {
-        "user": {
-            "id": user_data.id,
-            "full_name": f"{user_data.name} {user_data.surname}"
-        },
-        "period": {
-            "year": year,
-            "month": month
-        },
-        "penalties_count": len(penalty_rows),
-        "penalties": [
-            {
-                "id": row.id,
-                "penalty_points": float(row.penalty_points or 0),
-                "reason": row.reason,
-                "created_at": row.created_at.isoformat() if row.created_at else None
-            }
-            for row in penalty_rows
-        ],
-        "bonuses_count": len(bonus_rows),
-        "bonuses": [
-            {
-                "id": row.id,
-                "bonus_amount": float(row.bonus_amount or 0),
-                "reason": row.reason,
-                "created_at": row.created_at.isoformat() if row.created_at else None
-            }
-            for row in bonus_rows
-        ],
-        "salary_estimate": estimate
-    }
 
 
 @router.get("/member/salary-estimates", summary="Employee'lar bo'yicha taxminiy oyliklar (oylik)")
