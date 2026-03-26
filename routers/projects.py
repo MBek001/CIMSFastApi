@@ -1107,6 +1107,7 @@ async def get_card_detail(
 async def open_list_projects_by_user(
     user_id: int,
     session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
 ):
     await ensure_user_exists(session, user_id, "User topilmadi")
 
@@ -1158,6 +1159,7 @@ async def open_get_project_detail_by_user(
     project_id: int,
     user_id: int,
     session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
 ):
     await ensure_user_exists(session, user_id, "User topilmadi")
     project_row = await ensure_project_visible_for_user(session, project_id, user_id)
@@ -1221,6 +1223,7 @@ async def open_get_project_boards_detail_by_user(
     project_id: int,
     user_id: int,
     session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
 ):
     await ensure_user_exists(session, user_id, "User topilmadi")
     await ensure_project_visible_for_user(session, project_id, user_id)
@@ -1248,6 +1251,7 @@ async def open_list_cards_by_user(
     user_id: int,
     project_id: Optional[int] = Query(None, description="Faqat bitta project bo'yicha filter"),
     session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
 ):
     await ensure_user_exists(session, user_id, "User topilmadi")
 
@@ -1325,6 +1329,7 @@ async def open_get_card_detail_by_user(
     card_id: int,
     user_id: int,
     session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
 ):
     await ensure_user_exists(session, user_id, "User topilmadi")
 
