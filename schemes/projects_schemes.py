@@ -42,6 +42,12 @@ class CardDetailResponse(CardResponse):
     project_id: int
 
 
+class CardListItemResponse(CardDetailResponse):
+    project_name: str
+    board_name: str
+    column_name: str
+
+
 class BoardColumnResponse(BaseModel):
     id: int
     board_id: int
@@ -111,6 +117,11 @@ class ProjectDetailResponse(BaseModel):
 class ProjectBoardsDetailResponse(BaseModel):
     project_id: int
     boards: List[BoardDetailResponse] = Field(default_factory=list)
+    total_count: int
+
+
+class CardListResponse(BaseModel):
+    cards: List[CardListItemResponse]
     total_count: int
 
 

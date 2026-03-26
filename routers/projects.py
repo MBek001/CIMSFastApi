@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,8 @@ from schemes.projects_schemes import (
     BoardListResponse,
     BoardUpdateRequest,
     CardDetailResponse,
+    CardListItemResponse,
+    CardListResponse,
     CardMoveRequest,
     CardResponse,
     ColumnCreateRequest,
@@ -49,6 +51,24 @@ DEFAULT_BOARD_COLUMNS = [
     {"name": "To Test", "color": "#F59E0B"},
     {"name": "Refix", "color": "#EF4444"},
 ]
+
+
+def is_ceo_user(current_user) -> bool:
+    role = getattr(current_user, "role", None)
+    role_name = getattr(role, "name", None)
+    role_value = getattr(role, "value", None)
+    company_code = str(getattr(current_user, "company_code", "") or "").strip().lower()
+
+    role_name_normalized = str(role_name or "").strip().lower()
+    role_value_normalized = str(role_value or "").strip().lower()
+    role_plain_normalized = str(role or "").strip().lower()
+
+    return (
+        role_name_normalized == "ceo"
+        or role_value_normalized == "ceo"
+        or role_plain_normalized == "ceo"
+        or company_code == "ceo"
+    )
 
 
 async def ensure_projects_page_access(session: AsyncSession, current_user) -> None:
@@ -178,7 +198,11 @@ def parse_member_ids_form(raw_member_ids: Optional[Sequence[str]]) -> Optional[L
     return parsed_ids
 
 
-async def ensure_user_exists(session: AsyncSession, user_id: Optional[int]) -> None:
+async def ensure_user_exists(
+    session: AsyncSession,
+    user_id: Optional[int],
+    detail_message: str = "Assignee user topilmadi",
+) -> None:
     if user_id is None:
         return
 
@@ -188,8 +212,48 @@ async def ensure_user_exists(session: AsyncSession, user_id: Optional[int]) -> N
     if not result.fetchone():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Assignee user topilmadi",
+            detail=detail_message,
         )
+
+
+def build_card_user_filter(target_user_id: int):
+    return (project_board_card.c.assignee_id == target_user_id) | (
+        project_board_card.c.assignee_id.is_(None) & (project_board_card.c.created_by == target_user_id)
+    )
+
+
+async def ensure_project_visible_for_user(session: AsyncSession, project_id: int, user_id: int):
+    project_row = await get_project_or_404(session, project_id)
+
+    membership = await session.execute(
+        select(project_member.c.id).where(
+            project_member.c.project_id == project_id,
+            project_member.c.user_id == user_id,
+        )
+    )
+    if membership.fetchone():
+        return project_row
+
+    visible_card = await session.execute(
+        select(project_board_card.c.id)
+        .select_from(
+            project_board_card
+            .join(project_board_column, project_board_card.c.column_id == project_board_column.c.id)
+            .join(project_board, project_board_column.c.board_id == project_board.c.id)
+        )
+        .where(
+            project_board.c.project_id == project_id,
+            build_card_user_filter(user_id),
+        )
+        .limit(1)
+    )
+    if visible_card.fetchone():
+        return project_row
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Bu userga tegishli project topilmadi",
+    )
 
 
 async def resequence_columns(session: AsyncSession, column_ids: Sequence[int]) -> None:
@@ -308,7 +372,11 @@ def delete_card_file_paths(file_rows: Sequence) -> None:
         delete_image_if_exists(file_row.url_path)
 
 
-async def build_board_detail(session: AsyncSession, board_row) -> BoardDetailResponse:
+async def build_board_detail(
+    session: AsyncSession,
+    board_row,
+    scoped_user_id: Optional[int] = None,
+) -> BoardDetailResponse:
     columns_result = await session.execute(
         select(project_board_column)
         .where(project_board_column.c.board_id == board_row.id)
@@ -319,11 +387,14 @@ async def build_board_detail(session: AsyncSession, board_row) -> BoardDetailRes
 
     card_rows = []
     if column_ids:
-        cards_result = await session.execute(
+        cards_query = (
             select(project_board_card)
             .where(project_board_card.c.column_id.in_(column_ids))
             .order_by(project_board_card.c.column_id.asc(), project_board_card.c.order.asc())
         )
+        if scoped_user_id is not None:
+            cards_query = cards_query.where(build_card_user_filter(scoped_user_id))
+        cards_result = await session.execute(cards_query)
         card_rows = cards_result.fetchall()
 
     user_ids: Set[int] = set()
@@ -417,7 +488,6 @@ async def list_projects(
     current_user=Depends(get_current_active_user),
 ):
     await ensure_projects_page_access(session, current_user)
-
     result = await session.execute(
         select(project)
         .join(project_member, project_member.c.project_id == project.c.id)
@@ -1030,6 +1100,241 @@ async def get_card_detail(
     column_row = await get_column_or_404(session, card_row.column_id)
     board_row = await get_board_or_404(session, column_row.board_id, include_archived=True)
     await ensure_project_member_access(session, board_row.project_id, current_user)
+    return await build_card_detail(session, card_row)
+
+
+@router.get("/open/projects/user/{user_id}", response_model=ProjectListResponse, summary="Ochiq user projectlari")
+async def open_list_projects_by_user(
+    user_id: int,
+    session: AsyncSession = Depends(get_async_session),
+):
+    await ensure_user_exists(session, user_id, "User topilmadi")
+
+    result = await session.execute(
+        select(project)
+        .distinct()
+        .outerjoin(project_member, project_member.c.project_id == project.c.id)
+        .outerjoin(project_board, project_board.c.project_id == project.c.id)
+        .outerjoin(project_board_column, project_board_column.c.board_id == project_board.c.id)
+        .outerjoin(project_board_card, project_board_card.c.column_id == project_board_column.c.id)
+        .where(
+            (project_member.c.user_id == user_id)
+            | build_card_user_filter(user_id)
+        )
+        .order_by(project.c.id.desc())
+    )
+    project_rows = result.fetchall()
+    project_ids = [row.id for row in project_rows]
+    member_counts, board_counts = await get_project_counts(session, project_ids)
+    user_map = await get_user_map(
+        session, {project_row.created_by for project_row in project_rows if project_row.created_by}
+    )
+
+    projects_payload = [
+        ProjectSummaryResponse(
+            id=project_row.id,
+            project_name=project_row.project_name,
+            project_description=project_row.project_description,
+            project_url=project_row.project_url,
+            project_image=project_row.project_image,
+            created_by=project_row.created_by,
+            created_at=project_row.created_at,
+            updated_at=project_row.updated_at,
+            member_count=member_counts.get(project_row.id, 0),
+            board_count=board_counts.get(project_row.id, 0),
+            created_by_user=user_map.get(project_row.created_by),
+        )
+        for project_row in project_rows
+    ]
+    return ProjectListResponse(projects=projects_payload, total_count=len(projects_payload))
+
+
+@router.get(
+    "/open/projects/{project_id}/detail/user/{user_id}",
+    response_model=ProjectDetailResponse,
+    summary="Ochiq user project detail",
+)
+async def open_get_project_detail_by_user(
+    project_id: int,
+    user_id: int,
+    session: AsyncSession = Depends(get_async_session),
+):
+    await ensure_user_exists(session, user_id, "User topilmadi")
+    project_row = await ensure_project_visible_for_user(session, project_id, user_id)
+
+    members_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.email)
+        .join(project_member, project_member.c.user_id == user.c.id)
+        .where(project_member.c.project_id == project_id)
+        .order_by(user.c.name.asc(), user.c.surname.asc())
+    )
+    boards_result = await session.execute(
+        select(project_board)
+        .where(project_board.c.project_id == project_id, project_board.c.is_archived == False)  # noqa: E712
+        .order_by(project_board.c.id.desc())
+    )
+    board_rows = boards_result.fetchall()
+
+    user_ids = {project_row.created_by} if project_row.created_by else set()
+    user_ids.update({board_row.created_by for board_row in board_rows if board_row.created_by})
+    user_map = await get_user_map(session, user_ids)
+
+    members = [
+        UserSummaryResponse(id=row.id, name=row.name, surname=row.surname, email=row.email)
+        for row in members_result.fetchall()
+    ]
+    boards = [
+        BoardListItemResponse(
+            id=board_row.id,
+            project_id=board_row.project_id,
+            name=board_row.name,
+            description=board_row.description,
+            created_by=board_row.created_by,
+            created_at=board_row.created_at,
+            is_archived=board_row.is_archived,
+            created_by_user=user_map.get(board_row.created_by),
+        )
+        for board_row in board_rows
+    ]
+
+    return ProjectDetailResponse(
+        id=project_row.id,
+        project_name=project_row.project_name,
+        project_description=project_row.project_description,
+        project_url=project_row.project_url,
+        project_image=project_row.project_image,
+        created_by=project_row.created_by,
+        created_at=project_row.created_at,
+        updated_at=project_row.updated_at,
+        created_by_user=user_map.get(project_row.created_by),
+        members=members,
+        boards=boards,
+    )
+
+
+@router.get(
+    "/open/projects/{project_id}/boards/detail/user/{user_id}",
+    response_model=ProjectBoardsDetailResponse,
+    summary="Ochiq user board detail",
+)
+async def open_get_project_boards_detail_by_user(
+    project_id: int,
+    user_id: int,
+    session: AsyncSession = Depends(get_async_session),
+):
+    await ensure_user_exists(session, user_id, "User topilmadi")
+    await ensure_project_visible_for_user(session, project_id, user_id)
+
+    boards_result = await session.execute(
+        select(project_board)
+        .where(
+            project_board.c.project_id == project_id,
+            project_board.c.is_archived == False,  # noqa: E712
+        )
+        .order_by(project_board.c.id.desc())
+    )
+    board_rows = boards_result.fetchall()
+    board_details = [await build_board_detail(session, board_row, user_id) for board_row in board_rows]
+
+    return ProjectBoardsDetailResponse(
+        project_id=project_id,
+        boards=board_details,
+        total_count=len(board_details),
+    )
+
+
+@router.get("/open/cards/user/{user_id}", response_model=CardListResponse, summary="Ochiq user cardlari")
+async def open_list_cards_by_user(
+    user_id: int,
+    project_id: Optional[int] = Query(None, description="Faqat bitta project bo'yicha filter"),
+    session: AsyncSession = Depends(get_async_session),
+):
+    await ensure_user_exists(session, user_id, "User topilmadi")
+
+    if project_id is not None:
+        await ensure_project_visible_for_user(session, project_id, user_id)
+
+    cards_query = (
+        select(
+            project_board_card,
+            project_board_column.c.board_id.label("board_id"),
+            project_board_column.c.name.label("column_name"),
+            project_board.c.project_id.label("project_id"),
+            project_board.c.name.label("board_name"),
+            project.c.project_name.label("project_name"),
+        )
+        .select_from(
+            project_board_card
+            .join(project_board_column, project_board_card.c.column_id == project_board_column.c.id)
+            .join(project_board, project_board_column.c.board_id == project_board.c.id)
+            .join(project, project_board.c.project_id == project.c.id)
+        )
+        .where(build_card_user_filter(user_id))
+        .order_by(project_board_card.c.updated_at.desc(), project_board_card.c.id.desc())
+    )
+
+    if project_id is not None:
+        cards_query = cards_query.where(project.c.id == project_id)
+
+    result = await session.execute(cards_query)
+    card_rows = result.fetchall()
+
+    user_ids: Set[int] = set()
+    for row in card_rows:
+        if row.created_by:
+            user_ids.add(row.created_by)
+        if row.assignee_id:
+            user_ids.add(row.assignee_id)
+    user_map = await get_user_map(session, user_ids)
+    files_map = await get_card_files_map(session, [row.id for row in card_rows])
+
+    cards_payload = [
+        CardListItemResponse(
+            id=row.id,
+            board_id=row.board_id,
+            project_id=row.project_id,
+            column_id=row.column_id,
+            title=row.title,
+            description=row.description,
+            order=row.order,
+            priority=row.priority,
+            assignee_id=row.assignee_id,
+            due_date=row.due_date,
+            created_by=row.created_by,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            assignee=user_map.get(row.assignee_id),
+            created_by_user=user_map.get(row.created_by),
+            files=files_map.get(row.id, []),
+            project_name=row.project_name,
+            board_name=row.board_name,
+            column_name=row.column_name,
+        )
+        for row in card_rows
+    ]
+
+    return CardListResponse(cards=cards_payload, total_count=len(cards_payload))
+
+
+@router.get(
+    "/open/cards/{card_id}/user/{user_id}",
+    response_model=CardDetailResponse,
+    summary="Ochiq user card detail",
+)
+async def open_get_card_detail_by_user(
+    card_id: int,
+    user_id: int,
+    session: AsyncSession = Depends(get_async_session),
+):
+    await ensure_user_exists(session, user_id, "User topilmadi")
+
+    card_row = await get_card_or_404(session, card_id)
+    if not (
+        card_row.assignee_id == user_id
+        or (card_row.assignee_id is None and card_row.created_by == user_id)
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bu userga tegishli card topilmadi")
+
     return await build_card_detail(session, card_row)
 
 
