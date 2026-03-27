@@ -71,6 +71,7 @@ FREECURRENCYAPI_KEY = os.environ.get('FREECURRENCYAPI_KEY')
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+ATTENDANCE_API_KEY = os.environ.get("ATTENDANCE_API_KEY")
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:

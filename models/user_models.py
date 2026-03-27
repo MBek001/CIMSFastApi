@@ -1,8 +1,9 @@
 from sqlalchemy import (
     Table,UniqueConstraint,
-    Column, Integer, String, Boolean, DateTime, Date, DECIMAL, Text, Enum, ForeignKey, MetaData, Index
+    Column, Integer, String, Boolean, DateTime, Date, Time, DECIMAL, Text, Enum, ForeignKey, MetaData, Index
 )
 import enum
+from datetime import datetime
 
 from models.admin_models import metadata
 
@@ -15,6 +16,29 @@ class UserRole(enum.Enum):
     member = "Member"
     customer = "Customer"
     sales_manager = "Sales Manager"  # NEW: Sales Manager role
+
+
+class MistakeCategory(enum.Enum):
+    ai_integration = "AI Integration"
+    backend = "Backend"
+    frontend = "Frontend"
+    mobile = "Mobile"
+    devops = "DevOps"
+    security = "Security"
+    performance = "Performance"
+    client_impact = "Client Impact"
+
+
+class MistakeSeverity(enum.Enum):
+    minor = "Minor"
+    moderate = "Moderate"
+    major = "Major"
+    critical = "Critical"
+
+
+class CompensationBonusType(enum.Enum):
+    early_delivery = "early_delivery"
+    major_early_delivery = "major_early_delivery"
 
 # -- UserPagePermission table --
 class PageName(enum.Enum):
@@ -120,6 +144,66 @@ monthly_bonus = Table(
 )
 
 Index("idx_monthly_bonus_user_year_month", monthly_bonus.c.user_id, monthly_bonus.c.year, monthly_bonus.c.month)
+
+# -- Compensation mistake incidents table --
+compensation_mistake = Table(
+    "compensation_mistake",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("employee_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("reviewer_id", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("project_id", Integer, ForeignKey("project.id", ondelete="SET NULL"), nullable=True),
+    Column("card_id", Integer, ForeignKey("project_board_card.id", ondelete="SET NULL"), nullable=True),
+    Column("category", Enum(MistakeCategory, name="mistakecategory"), nullable=False),
+    Column("severity", Enum(MistakeSeverity, name="mistakeseverity"), nullable=False),
+    Column("title", String(255), nullable=False),
+    Column("description", Text, nullable=False),
+    Column("incident_date", Date, nullable=False),
+    Column("reached_client", Boolean, nullable=False, default=True),
+    Column("unclear_task", Boolean, nullable=False, default=False),
+    Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+)
+
+Index("idx_compensation_mistake_employee_date", compensation_mistake.c.employee_id, compensation_mistake.c.incident_date)
+Index("idx_compensation_mistake_reviewer_date", compensation_mistake.c.reviewer_id, compensation_mistake.c.incident_date)
+
+# -- Delivery bonus records table --
+compensation_bonus = Table(
+    "compensation_bonus",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("employee_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("project_id", Integer, ForeignKey("project.id", ondelete="SET NULL"), nullable=True),
+    Column("card_id", Integer, ForeignKey("project_board_card.id", ondelete="SET NULL"), nullable=True),
+    Column("bonus_type", Enum(CompensationBonusType, name="compensationbonustype"), nullable=False),
+    Column("title", String(255), nullable=False),
+    Column("description", Text, nullable=True),
+    Column("award_date", Date, nullable=False),
+    Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+)
+
+Index("idx_compensation_bonus_employee_date", compensation_bonus.c.employee_id, compensation_bonus.c.award_date)
+
+# -- Attendance log table --
+attendance_log = Table(
+    "attendance_log",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("employee_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("attendance_date", Date, nullable=False),
+    Column("check_in_time", Time, nullable=False),
+    Column("check_out_time", Time, nullable=True),
+    Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+    UniqueConstraint("employee_id", "attendance_date", name="uq_attendance_log_employee_date"),
+)
+
+Index("idx_attendance_log_employee_date", attendance_log.c.employee_id, attendance_log.c.attendance_date)
 
 # -- Message table --
 message = Table(
