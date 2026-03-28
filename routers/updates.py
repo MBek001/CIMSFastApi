@@ -252,6 +252,51 @@ async def calculate_monthly_update_coverage(
     }
 
 
+async def calculate_monthly_update_coverage_batch(
+    session: AsyncSession,
+    user_ids: List[int],
+    year: int,
+    month: int,
+) -> Dict[int, dict]:
+    if not user_ids:
+        return {}
+    first_day, last_day = get_period_bounds(year, month)
+    reporting_end = get_reporting_end_date(first_day, last_day)
+    updates_result = await session.execute(
+        select(daily_update_log.c.user_id, daily_update_log.c.update_date)
+        .distinct()
+        .where(
+            and_(
+                daily_update_log.c.user_id.in_(user_ids),
+                daily_update_log.c.update_date >= first_day,
+                daily_update_log.c.update_date <= reporting_end,
+                daily_update_log.c.is_valid == True,  # noqa: E712
+            )
+        )
+    )
+    submitted_dates_map: Dict[int, set[date]] = {user_id: set() for user_id in user_ids}
+    for row in updates_result.fetchall():
+        submitted_dates_map.setdefault(row.user_id, set()).add(row.update_date)
+
+    override_pack = await fetch_override_pack(session, first_day, last_day, user_ids=user_ids)
+    result: Dict[int, dict] = {}
+    for user_id in user_ids:
+        submitted_dates = submitted_dates_map.get(user_id, set())
+        expected_workdays = list_expected_update_days(override_pack, user_id, first_day, reporting_end)
+        expected_workdays = exclude_pending_today_from_expected_days(expected_workdays, submitted_dates)
+        expected_dates = set(expected_workdays)
+        update_days = len(submitted_dates & expected_dates)
+        working_days = len(expected_workdays)
+        percentage = round((update_days / working_days) * 100, 2) if working_days > 0 else 0.0
+        result[user_id] = {
+            "working_days": working_days,
+            "update_days": update_days,
+            "percentage": percentage,
+            "qualifies_productivity_bonus": working_days > 0 and percentage >= 100,
+        }
+    return result
+
+
 def build_policy_payload(base_salary: Decimal | float | int | None) -> dict:
     salary_base = normalize_base_salary(base_salary)
     return {
@@ -494,19 +539,117 @@ async def fetch_employee_period_delivery_bonuses(
     return result.fetchall()
 
 
-async def build_member_compensation_payload(
+async def fetch_period_incidents_for_users(
     session: AsyncSession,
+    user_ids: List[int],
+    first_day: date,
+    last_day: date,
+) -> Dict[int, List]:
+    if not user_ids:
+        return {}
+    employee_user = user.alias("employee_user")
+    reviewer_user = user.alias("reviewer_user")
+    result = await session.execute(
+        select(
+            compensation_mistake.c.id,
+            compensation_mistake.c.employee_id,
+            compensation_mistake.c.reviewer_id,
+            compensation_mistake.c.project_id,
+            compensation_mistake.c.category,
+            compensation_mistake.c.severity,
+            compensation_mistake.c.title,
+            compensation_mistake.c.description,
+            compensation_mistake.c.incident_date,
+            compensation_mistake.c.reached_client,
+            compensation_mistake.c.unclear_task,
+            employee_user.c.name.label("employee_name"),
+            employee_user.c.surname.label("employee_surname"),
+            employee_user.c.default_salary.label("employee_default_salary"),
+            reviewer_user.c.name.label("reviewer_name"),
+            reviewer_user.c.surname.label("reviewer_surname"),
+            reviewer_user.c.default_salary.label("reviewer_default_salary"),
+        )
+        .select_from(
+            compensation_mistake
+            .join(employee_user, compensation_mistake.c.employee_id == employee_user.c.id)
+            .outerjoin(reviewer_user, compensation_mistake.c.reviewer_id == reviewer_user.c.id)
+        )
+        .where(
+            and_(
+                compensation_mistake.c.incident_date >= first_day,
+                compensation_mistake.c.incident_date <= last_day,
+                or_(
+                    compensation_mistake.c.employee_id.in_(user_ids),
+                    compensation_mistake.c.reviewer_id.in_(user_ids),
+                ),
+            )
+        )
+        .order_by(compensation_mistake.c.incident_date.asc(), compensation_mistake.c.id.asc())
+    )
+    incidents_map: Dict[int, List] = {user_id: [] for user_id in user_ids}
+    for row in result.fetchall():
+        if row.employee_id in incidents_map:
+            incidents_map[row.employee_id].append(row)
+        if row.reviewer_id in incidents_map:
+            incidents_map[row.reviewer_id].append(row)
+    return incidents_map
+
+
+async def fetch_period_delivery_bonuses_for_users(
+    session: AsyncSession,
+    user_ids: List[int],
+    first_day: date,
+    last_day: date,
+) -> Dict[int, List]:
+    if not user_ids:
+        return {}
+    creator_user = user.alias("creator_user")
+    result = await session.execute(
+        select(
+            compensation_bonus.c.id,
+            compensation_bonus.c.employee_id,
+            compensation_bonus.c.project_id,
+            compensation_bonus.c.bonus_type,
+            compensation_bonus.c.title,
+            compensation_bonus.c.description,
+            compensation_bonus.c.award_date,
+            compensation_bonus.c.created_by,
+            compensation_bonus.c.created_at,
+            user.c.default_salary.label("employee_default_salary"),
+            creator_user.c.name.label("creator_name"),
+            creator_user.c.surname.label("creator_surname"),
+        )
+        .select_from(
+            compensation_bonus
+            .join(user, compensation_bonus.c.employee_id == user.c.id)
+            .outerjoin(creator_user, compensation_bonus.c.created_by == creator_user.c.id)
+        )
+        .where(
+            and_(
+                compensation_bonus.c.employee_id.in_(user_ids),
+                compensation_bonus.c.award_date >= first_day,
+                compensation_bonus.c.award_date <= last_day,
+            )
+        )
+        .order_by(compensation_bonus.c.award_date.asc(), compensation_bonus.c.id.asc())
+    )
+    bonuses_map: Dict[int, List] = {user_id: [] for user_id in user_ids}
+    for row in result.fetchall():
+        bonuses_map.setdefault(row.employee_id, []).append(row)
+    return bonuses_map
+
+
+def build_member_compensation_payload_from_prefetched(
     user_row,
     year: int,
     month: int,
+    incidents: List,
+    delivery_bonus_rows: List,
+    update_coverage: dict,
     include_details: bool = True,
 ) -> dict:
     salary_base = normalize_base_salary(getattr(user_row, "default_salary", 0))
-    first_day, last_day = get_period_bounds(year, month)
-    incidents = await fetch_user_period_incidents(session, user_row.id, first_day, last_day)
-    delivery_bonus_rows = await fetch_employee_period_delivery_bonuses(session, user_row.id, first_day, last_day)
     deduction_breakdown = build_user_deduction_breakdown(user_row.id, salary_base, incidents)
-    update_coverage = await calculate_monthly_update_coverage(session, user_row.id, year, month)
 
     employee_client_mistakes = [row for row in incidents if row.employee_id == user_row.id and row.reached_client]
     if not employee_client_mistakes:
@@ -611,6 +754,28 @@ async def build_member_compensation_payload(
         payload["mistakes"] = deduction_breakdown["items"]
         payload["delivery_bonuses"] = serialized_delivery_bonuses
     return payload
+
+
+async def build_member_compensation_payload(
+    session: AsyncSession,
+    user_row,
+    year: int,
+    month: int,
+    include_details: bool = True,
+) -> dict:
+    first_day, last_day = get_period_bounds(year, month)
+    incidents = await fetch_user_period_incidents(session, user_row.id, first_day, last_day)
+    delivery_bonus_rows = await fetch_employee_period_delivery_bonuses(session, user_row.id, first_day, last_day)
+    update_coverage = await calculate_monthly_update_coverage(session, user_row.id, year, month)
+    return build_member_compensation_payload_from_prefetched(
+        user_row=user_row,
+        year=year,
+        month=month,
+        incidents=incidents,
+        delivery_bonus_rows=delivery_bonus_rows,
+        update_coverage=update_coverage,
+        include_details=include_details,
+    )
 
 
 @router.get("/compensation/policy", summary="Compensation policy configuration")
@@ -1090,12 +1255,33 @@ async def get_employee_monthly_update_statistics(
     salary_estimate_map: Dict[int, dict] = {}
     salary_summary = None
     if year is not None and month is not None:
+        employee_id_list = [row.user_id for row in employee_rows]
+        first_day, last_day = get_period_bounds(year, month)
+        incidents_map = await fetch_period_incidents_for_users(session, employee_id_list, first_day, last_day)
+        delivery_bonuses_map = await fetch_period_delivery_bonuses_for_users(session, employee_id_list, first_day, last_day)
+        update_coverage_map = await calculate_monthly_update_coverage_batch(session, employee_id_list, year, month)
         total_base_salary = Decimal("0")
         total_applied_deduction = Decimal("0")
         total_bonus_amount = Decimal("0")
         total_final_salary = Decimal("0")
         for row in employee_rows:
-            payload = await build_member_compensation_payload(session, row, year, month, include_details=False)
+            payload = build_member_compensation_payload_from_prefetched(
+                user_row=row,
+                year=year,
+                month=month,
+                incidents=incidents_map.get(row.user_id, []),
+                delivery_bonus_rows=delivery_bonuses_map.get(row.user_id, []),
+                update_coverage=update_coverage_map.get(
+                    row.user_id,
+                    {
+                        "working_days": 0,
+                        "update_days": 0,
+                        "percentage": 0.0,
+                        "qualifies_productivity_bonus": False,
+                    },
+                ),
+                include_details=False,
+            )
             salary_estimate_map[row.user_id] = payload["salary_estimate"]
             total_base_salary += normalize_base_salary(row.default_salary)
             total_applied_deduction += Decimal(str(payload["deductions_summary"]["applied_deduction_amount"]))

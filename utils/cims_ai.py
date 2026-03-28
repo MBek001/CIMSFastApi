@@ -288,9 +288,20 @@ def _resolve_period(question: str) -> PeriodSpec:
     year_match = re.search(r"\b(20\d{2})\b", q)
     year = int(year_match.group(1)) if year_match else today.year
     for month_num, aliases in MONTH_ALIASES.items():
-        if any(re.search(rf"\b{re.escape(alias)}\b", q) for alias in aliases):
+        text_aliases = [alias for alias in aliases if not alias.isdigit()]
+        if any(re.search(rf"\b{re.escape(alias)}\b", q) for alias in text_aliases):
             start, end = _month_range(year, month_num)
             return PeriodSpec(f"{MONTH_NAMES_UZ[month_num]} {year}", start, min(end, today), "month", month_num, year)
+    numeric_month_match = re.search(
+        r"\b(0?[1-9]|1[0-2])(?:\s*[-/.]?\s*(?:oy|oyi|oyida|month)|[-/.](20\d{2}))\b",
+        q,
+    )
+    if numeric_month_match:
+        month_num = int(numeric_month_match.group(1))
+        explicit_year = numeric_month_match.group(2)
+        resolved_year = int(explicit_year) if explicit_year else year
+        start, end = _month_range(resolved_year, month_num)
+        return PeriodSpec(f"{MONTH_NAMES_UZ[month_num]} {resolved_year}", start, min(end, today), "month", month_num, resolved_year)
     if "o'tgan oy" in q or "otgan oy" in q or "last month" in q:
         month = today.month - 1 or 12
         year = today.year - 1 if today.month == 1 else today.year

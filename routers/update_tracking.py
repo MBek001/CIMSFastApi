@@ -2576,9 +2576,9 @@ async def get_all_users_updates(
 
 @router.get("/employee-monthly-updates", summary="Get employee monthly updates with message texts")
 async def get_employee_monthly_updates(
-    employee_id: int,
     year: int,
     month: int,
+    employee_id: int | None=None,
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
