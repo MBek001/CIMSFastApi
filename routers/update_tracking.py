@@ -1586,9 +1586,6 @@ async def get_workday_override_member_options(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Only CEO can access this")
-
     result = await session.execute(
         select(
             user.c.id,
@@ -1640,9 +1637,6 @@ async def get_workday_overrides(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Only CEO can access this")
-
     if month is not None or year is not None:
         selected_year, selected_month = normalize_month_year(month, year)
         start_date, end_date, _ = get_month_range(selected_year, selected_month)
@@ -1660,9 +1654,6 @@ async def create_or_update_workday_overrides(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Only CEO can access this")
-
     update_required = normalize_update_required(payload.day_type.value, payload.update_required)
     target_rows: List[Any] = []
 
@@ -1724,9 +1715,6 @@ async def update_workday_override(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Only CEO can access this")
-
     existing_result = await session.execute(
         select(workday_override).where(workday_override.c.id == override_id)
     )
@@ -1815,9 +1803,6 @@ async def delete_workday_override(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Only CEO can access this")
-
     existing_result = await session.execute(
         select(workday_override.c.id).where(workday_override.c.id == override_id)
     )
@@ -2424,9 +2409,6 @@ async def get_all_users_updates(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Only CEO can access this")
-
     if year < 2000 or year > 2100:
         raise HTTPException(status_code=400, detail="year must be between 2000 and 2100")
     if month < 1 or month > 12:
@@ -2715,9 +2697,6 @@ async def get_missing_updates(
     current_user=Depends(get_current_active_user)
 ):
     """Get list of users who haven't submitted updates for a specific date (default: today)"""
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Only CEO can access this")
-
     check_date = date_check or date.today()
 
     # Get all active users
