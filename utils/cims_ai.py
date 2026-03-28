@@ -26,9 +26,18 @@ from models.admin_models import (
     exchange_rate,
     finance,
     sales_manager_assignment,
+    workday_override,
 )
 from models.projects_models import project, project_board, project_board_card, project_board_column, project_member
-from models.user_models import UserRole, monthly_update, user, user_payment
+from models.user_models import (
+    UserRole,
+    attendance_log,
+    compensation_bonus,
+    compensation_mistake,
+    monthly_update,
+    user,
+    user_payment,
+)
 from utils.crypto import decrypt_text
 from utils.workday_overrides import fetch_override_pack, list_expected_update_days, summarize_expected_days
 
@@ -69,6 +78,10 @@ SQL_ANALYTICS_TABLES: dict[str, list[str]] = {
     "exchange_rate": ["id", "usd_to_uzs", "updated_at"],
     "user_payment": ["id", "project", "date", "summ", "payment"],
     "company_recurring_payment": ["id", "title", "amount", "payment_day", "payment_time", "note", "is_active", "created_at", "updated_at"],
+    "workday_override": ["id", "special_date", "target_type", "target_key", "user_id", "day_type", "title", "note", "workday_hours", "update_required", "created_by", "created_at", "updated_at"],
+    "attendance_log": ["id", "employee_id", "attendance_date", "check_in_time", "check_out_time", "created_by", "created_at", "updated_at"],
+    "compensation_mistake": ["id", "employee_id", "reviewer_id", "project_id", "category", "severity", "title", "incident_date", "reached_client", "unclear_task", "created_by", "created_at", "updated_at"],
+    "compensation_bonus": ["id", "employee_id", "project_id", "bonus_type", "title", "award_date", "created_by", "created_at", "updated_at"],
     "project": ["id", "project_name", "project_description", "project_url", "project_image", "created_by", "created_at", "updated_at"],
     "project_member": ["id", "project_id", "user_id", "created_at"],
     "project_board": ["id", "project_id", "name", "description", "created_by", "created_at", "is_archived"],
@@ -209,6 +222,34 @@ def _next_company_payment_occurrence(payment_day: int, payment_time: Any, base_d
             month = 1
         else:
             month += 1
+
+
+def _should_run_sql_analytics(question: str, context: dict[str, Any]) -> bool:
+    q = _n(question)
+    explicit_markers = [
+        "sql", "query", "jadval", "table", "rows", "row", "ro'yxat", "royxat", "list",
+        "eng", "top", "qaysi", "kim", "kimlar", "taqqosla", "solishtir", "trend",
+        "daily", "kunma-kun", "oyma-oy", "haftama-hafta", "group by", "filter",
+    ]
+    if any(marker in q for marker in explicit_markers):
+        return True
+    populated_sections = [
+        key
+        for key in [
+            "employee_update",
+            "lead_stats",
+            "customer_detail",
+            "finance_summary",
+            "payment_summary",
+            "recall_summary",
+            "sales_manager_stats",
+            "project_overview",
+            "company_overview",
+            "data_hub",
+        ]
+        if context.get(key)
+    ]
+    return not populated_sections
 
 
 def _extract_response_text(payload: dict) -> Optional[str]:
@@ -640,6 +681,353 @@ async def _project_overview_context(session: AsyncSession) -> dict[str, Any]:
     return {"total_projects": total_projects, "total_boards": total_boards, "total_cards": total_cards, "overdue_cards": overdue_cards, "projects": [{"id": row.id, "project_name": row.project_name, "members_count": row.members_count, "boards_count": row.boards_count, "cards_count": row.cards_count} for row in rows[:20]]}
 
 
+async def _company_data_hub_context(session: AsyncSession, period: PeriodSpec) -> dict[str, Any]:
+    today = date.today()
+
+    user_counts = (
+        await session.execute(
+            select(
+                func.count(user.c.id).label("total_users"),
+                func.count(user.c.id).filter(user.c.is_active == True).label("active_users"),  # noqa: E712
+                func.count(user.c.id).filter(and_(user.c.is_active == True, user.c.role == UserRole.member)).label("active_members"),  # noqa: E712
+                func.count(user.c.id).filter(and_(user.c.is_active == True, user.c.role == UserRole.sales_manager)).label("sales_managers"),  # noqa: E712
+            )
+        )
+    ).fetchone()
+
+    customer_counts = (
+        await session.execute(
+            select(
+                func.count(customer.c.id).label("total_customers"),
+                func.count(customer.c.id).filter(
+                    and_(
+                        cast(customer.c.created_at, Date) >= period.start_date,
+                        cast(customer.c.created_at, Date) <= period.end_date,
+                    )
+                ).label("period_customers"),
+                func.count(customer.c.id).filter(customer.c.status == CustomerStatus.need_to_call).label("need_to_call"),
+                func.count(customer.c.id).filter(customer.c.status == CustomerStatus.finished).label("finished"),
+                func.count(customer.c.id).filter(customer.c.type == CustomerType.international).label("international_customers"),
+                func.count(customer.c.id).filter(or_(customer.c.type == CustomerType.local, customer.c.type == None)).label("local_customers"),  # noqa: E711
+            )
+        )
+    ).fetchone()
+    today_leads = (
+        await session.execute(
+            select(func.count(customer.c.id)).where(cast(customer.c.created_at, Date) == today)
+        )
+    ).scalar() or 0
+    overdue_recalls = (
+        await session.execute(
+            select(func.count(customer.c.id))
+            .where(
+                and_(
+                    customer.c.recall_time.is_not(None),
+                    customer.c.recall_time < datetime.utcnow(),
+                    customer.c.status.notin_([CustomerStatus.finished, CustomerStatus.rejected]),
+                )
+            )
+        )
+    ).scalar() or 0
+
+    update_counts = (
+        await session.execute(
+            select(
+                func.count(daily_update_log.c.id).label("total_updates"),
+                func.count(daily_update_log.c.id).filter(daily_update_log.c.is_valid == True).label("valid_updates"),  # noqa: E712
+                func.count(func.distinct(daily_update_log.c.user_id)).label("unique_users"),
+                func.max(daily_update_log.c.update_date).label("latest_update_date"),
+                func.avg(func.length(daily_update_log.c.update_content)).label("avg_update_length"),
+            ).where(
+                and_(
+                    daily_update_log.c.update_date >= period.start_date,
+                    daily_update_log.c.update_date <= period.end_date,
+                )
+            )
+        )
+    ).fetchone()
+
+    monthly_update_counts = (
+        await session.execute(
+            select(
+                func.count(monthly_update.c.id).label("reports_count"),
+                func.avg(monthly_update.c.update_percentage).label("avg_update_percentage"),
+                func.sum(monthly_update.c.salary_amount).label("total_salary_amount"),
+                func.max(monthly_update.c.update_date).label("latest_report_date"),
+            ).where(
+                and_(
+                    monthly_update.c.update_date >= period.start_date,
+                    monthly_update.c.update_date <= period.end_date,
+                )
+            )
+        )
+    ).fetchone()
+
+    attendance_counts = (
+        await session.execute(
+            select(
+                func.count(attendance_log.c.id).label("records_count"),
+                func.count(func.distinct(attendance_log.c.employee_id)).label("employees_count"),
+                func.count(attendance_log.c.id).filter(attendance_log.c.check_out_time.is_not(None)).label("completed_records"),
+                func.max(attendance_log.c.attendance_date).label("latest_attendance_date"),
+            ).where(
+                and_(
+                    attendance_log.c.attendance_date >= period.start_date,
+                    attendance_log.c.attendance_date <= period.end_date,
+                )
+            )
+        )
+    ).fetchone()
+
+    scheduled_payment_counts = (
+        await session.execute(
+            select(
+                func.count(user_payment.c.id).label("scheduled_payments_count"),
+                func.sum(user_payment.c.summ).label("scheduled_payments_total"),
+                func.count(user_payment.c.id).filter(user_payment.c.payment == True).label("paid_count"),  # noqa: E712
+                func.count(user_payment.c.id).filter(user_payment.c.payment == False).label("unpaid_count"),  # noqa: E712
+            ).where(
+                and_(
+                    user_payment.c.date >= period.start_date,
+                    user_payment.c.date <= period.end_date,
+                )
+            )
+        )
+    ).fetchone()
+    due_today_unpaid_count = (
+        await session.execute(
+            select(func.count(user_payment.c.id)).where(
+                and_(
+                    user_payment.c.payment == False,  # noqa: E712
+                    user_payment.c.date == today,
+                )
+            )
+        )
+    ).scalar() or 0
+    overdue_unpaid = (
+        await session.execute(
+            select(
+                func.count(user_payment.c.id).label("count"),
+                func.sum(user_payment.c.summ).label("total"),
+            ).where(
+                and_(
+                    user_payment.c.payment == False,  # noqa: E712
+                    user_payment.c.date < today,
+                )
+            )
+        )
+    ).fetchone()
+
+    recurring_payment_counts = (
+        await session.execute(
+            select(
+                func.count(company_recurring_payment.c.id).label("active_count"),
+                func.sum(company_recurring_payment.c.amount).label("active_total"),
+            ).where(company_recurring_payment.c.is_active == True)  # noqa: E712
+        )
+    ).fetchone()
+
+    recurring_payment_rows = (
+        await session.execute(
+            select(
+                company_recurring_payment.c.id,
+                company_recurring_payment.c.title,
+                company_recurring_payment.c.amount,
+                company_recurring_payment.c.payment_day,
+                company_recurring_payment.c.payment_time,
+            )
+            .where(company_recurring_payment.c.is_active == True)  # noqa: E712
+            .order_by(company_recurring_payment.c.payment_day.asc(), company_recurring_payment.c.payment_time.asc())
+        )
+    ).fetchall()
+    recurring_payment_items = []
+    for row in recurring_payment_rows:
+        recurring_payment_items.append(
+            {
+                "id": row.id,
+                "title": row.title,
+                "amount": _money(row.amount),
+                "payment_day": row.payment_day,
+                "payment_time": row.payment_time.strftime("%H:%M:%S") if row.payment_time else None,
+                "next_occurrence": _next_company_payment_occurrence(row.payment_day, row.payment_time, today).isoformat(),
+            }
+        )
+    recurring_payment_items.sort(key=lambda item: item["next_occurrence"])
+
+    workday_override_counts = (
+        await session.execute(
+            select(
+                func.count(workday_override.c.id).label("total_overrides"),
+                func.count(workday_override.c.id).filter(workday_override.c.day_type == "holiday").label("holiday_count"),
+                func.count(workday_override.c.id).filter(workday_override.c.day_type == "short_day").label("short_day_count"),
+            ).where(
+                and_(
+                    workday_override.c.special_date >= period.start_date,
+                    workday_override.c.special_date <= period.end_date,
+                )
+            )
+        )
+    ).fetchone()
+
+    compensation_counts = (
+        await session.execute(
+            select(
+                func.count(compensation_mistake.c.id).label("mistakes_count"),
+                func.count(compensation_mistake.c.id).filter(compensation_mistake.c.reached_client == True).label("client_mistakes_count"),  # noqa: E712
+            ).where(
+                and_(
+                    compensation_mistake.c.incident_date >= period.start_date,
+                    compensation_mistake.c.incident_date <= period.end_date,
+                )
+            )
+        )
+    ).fetchone()
+    bonus_records_count = (
+        await session.execute(
+            select(func.count(compensation_bonus.c.id)).where(
+                and_(
+                    compensation_bonus.c.award_date >= period.start_date,
+                    compensation_bonus.c.award_date <= period.end_date,
+                )
+            )
+        )
+    ).scalar() or 0
+
+    severity_rows = (
+        await session.execute(
+            select(
+                compensation_mistake.c.severity,
+                func.count(compensation_mistake.c.id).label("count"),
+            )
+            .where(
+                and_(
+                    compensation_mistake.c.incident_date >= period.start_date,
+                    compensation_mistake.c.incident_date <= period.end_date,
+                )
+            )
+            .group_by(compensation_mistake.c.severity)
+            .order_by(desc("count"))
+        )
+    ).fetchall()
+
+    project_counts = (
+        await session.execute(
+            select(
+                func.count(func.distinct(project.c.id)).label("projects_count"),
+                func.count(func.distinct(project_board.c.id)).filter(project_board.c.is_archived == False).label("boards_count"),  # noqa: E712
+                func.count(func.distinct(project_board_card.c.id)).label("cards_count"),
+                func.count(func.distinct(project_board_card.c.id)).filter(
+                    and_(
+                        project_board_card.c.due_date.is_not(None),
+                        project_board_card.c.due_date < today,
+                    )
+                ).label("overdue_cards"),
+            ).select_from(
+                project.outerjoin(project_board, project.c.id == project_board.c.project_id)
+                .outerjoin(project_board_column, project_board.c.id == project_board_column.c.board_id)
+                .outerjoin(project_board_card, project_board_column.c.id == project_board_card.c.column_id)
+            )
+        )
+    ).fetchone()
+
+    recent_project_rows = (
+        await session.execute(
+            select(
+                project.c.id,
+                project.c.project_name,
+                func.count(func.distinct(project_member.c.user_id)).label("members_count"),
+                func.count(func.distinct(project_board_card.c.id)).label("cards_count"),
+            )
+            .select_from(
+                project.outerjoin(project_member, project.c.id == project_member.c.project_id)
+                .outerjoin(project_board, project.c.id == project_board.c.project_id)
+                .outerjoin(project_board_column, project_board.c.id == project_board_column.c.board_id)
+                .outerjoin(project_board_card, project_board_column.c.id == project_board_card.c.column_id)
+            )
+            .group_by(project.c.id, project.c.project_name)
+            .order_by(project.c.project_name.asc())
+            .limit(10)
+        )
+    ).fetchall()
+
+    return {
+        "period": period.as_dict(),
+        "company_overview": {
+            "active_users": int(user_counts.active_users or 0),
+            "total_users": int(user_counts.total_users or 0),
+            "active_members": int(user_counts.active_members or 0),
+            "sales_managers": int(user_counts.sales_managers or 0),
+            "total_customers_all_time": int(customer_counts.total_customers or 0),
+            "leads_in_period": int(customer_counts.period_customers or 0),
+            "today_leads": int(today_leads or 0),
+            "need_to_call_count": int(customer_counts.need_to_call or 0),
+            "finished_customers": int(customer_counts.finished or 0),
+            "local_customers": int(customer_counts.local_customers or 0),
+            "international_customers": int(customer_counts.international_customers or 0),
+            "due_payments_today": int(due_today_unpaid_count or 0),
+            "overdue_recalls_count": int(overdue_recalls or 0),
+        },
+        "updates_overview": {
+            "valid_updates_in_period": int(update_counts.valid_updates or 0),
+            "all_updates_in_period": int(update_counts.total_updates or 0),
+            "unique_users_with_updates": int(update_counts.unique_users or 0),
+            "latest_update_date": update_counts.latest_update_date.isoformat() if update_counts.latest_update_date else None,
+            "average_update_length": round(float(update_counts.avg_update_length or 0), 2),
+            "monthly_reports_count": int(monthly_update_counts.reports_count or 0),
+            "monthly_reports_average_percentage": round(float(monthly_update_counts.avg_update_percentage or 0), 2),
+            "monthly_reports_total_salary_amount": _money(monthly_update_counts.total_salary_amount),
+            "latest_monthly_report_date": monthly_update_counts.latest_report_date.isoformat() if monthly_update_counts.latest_report_date else None,
+        },
+        "attendance_overview": {
+            "records_count": int(attendance_counts.records_count or 0),
+            "employees_count": int(attendance_counts.employees_count or 0),
+            "completed_records_count": int(attendance_counts.completed_records or 0),
+            "latest_attendance_date": attendance_counts.latest_attendance_date.isoformat() if attendance_counts.latest_attendance_date else None,
+        },
+        "payments_overview": {
+            "scheduled_payments_count": int(scheduled_payment_counts.scheduled_payments_count or 0),
+            "scheduled_payments_total": _money(scheduled_payment_counts.scheduled_payments_total),
+            "paid_count": int(scheduled_payment_counts.paid_count or 0),
+            "unpaid_count": int(scheduled_payment_counts.unpaid_count or 0),
+            "overdue_unpaid_count": int(overdue_unpaid.count or 0),
+            "overdue_unpaid_total": _money(overdue_unpaid.total),
+            "due_today_unpaid_count": int(due_today_unpaid_count or 0),
+            "active_company_payments_count": int(recurring_payment_counts.active_count or 0),
+            "active_company_payments_total": _money(recurring_payment_counts.active_total),
+            "upcoming_company_payments": recurring_payment_items[:7],
+        },
+        "workday_overrides_overview": {
+            "total_overrides": int(workday_override_counts.total_overrides or 0),
+            "holiday_count": int(workday_override_counts.holiday_count or 0),
+            "short_day_count": int(workday_override_counts.short_day_count or 0),
+        },
+        "compensation_overview": {
+            "mistakes_count": int(compensation_counts.mistakes_count or 0),
+            "client_mistakes_count": int(compensation_counts.client_mistakes_count or 0),
+            "bonus_records_count": int(bonus_records_count or 0),
+            "severity_breakdown": [
+                {"severity": _enum(row.severity), "count": int(row.count or 0)}
+                for row in severity_rows
+            ],
+        },
+        "projects_overview": {
+            "projects_count": int(project_counts.projects_count or 0),
+            "boards_count": int(project_counts.boards_count or 0),
+            "cards_count": int(project_counts.cards_count or 0),
+            "overdue_cards": int(project_counts.overdue_cards or 0),
+            "projects": [
+                {
+                    "id": row.id,
+                    "project_name": row.project_name,
+                    "members_count": int(row.members_count or 0),
+                    "cards_count": int(row.cards_count or 0),
+                }
+                for row in recent_project_rows
+            ],
+        },
+    }
+
+
 async def _company_overview_context(session: AsyncSession, period: PeriodSpec) -> dict[str, Any]:
     active_users = (await session.execute(select(func.count(user.c.id)).where(user.c.is_active == True))).scalar() or 0
     total_users = (await session.execute(select(func.count(user.c.id)))).scalar() or 0
@@ -681,6 +1069,7 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
     customer_match = await _match_customer(session, question) or (await _match_customer(session, resolution_text) if resolution_text != question else None)
     customer_type = _detect_customer_type(question) or _detect_customer_type(resolution_text)
     intents = _detect_actions(resolution_text, employee, sales_manager, customer_match)
+    data_hub = await _company_data_hub_context(session, period)
     context: dict[str, Any] = {
         "question": question.strip(),
         "resolved_question": resolution_text,
@@ -690,6 +1079,7 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
         "sales_manager": sales_manager,
         "customer_match": customer_match,
         "customer_type_filter": customer_type,
+        "data_hub": data_hub,
     }
     if "employee_update" in intents and employee:
         context["employee_update"] = await _employee_update_context(session, employee, period)
@@ -700,7 +1090,10 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
     if "finance_summary" in intents:
         context["finance_summary"] = await _finance_summary_context(session, period)
     if "payment_summary" in intents:
-        context["payment_summary"] = await _payment_summary_context(session, period)
+        context["payment_summary"] = {
+            "period": period.as_dict(),
+            **data_hub.get("payments_overview", {}),
+        }
     if "recall_summary" in intents:
         context["recall_summary"] = await _recall_summary_context(session, period)
     if "sales_manager_stats" in intents and sales_manager:
@@ -708,7 +1101,10 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
     if "project_overview" in intents:
         context["project_overview"] = await _project_overview_context(session)
     if "company_overview" in intents:
-        context["company_overview"] = await _company_overview_context(session, period)
+        context["company_overview"] = {
+            "period": period.as_dict(),
+            **data_hub.get("company_overview", {}),
+        }
     return context
 
 
@@ -767,6 +1163,25 @@ def build_cims_ai_fallback_answer(context: dict[str, Any]) -> str:
             f"{company_overview['period']['label']} davrida {company_overview['leads_in_period']} ta lead kelgan, "
             f"bugun {company_overview['today_leads']} ta lead, need_to_call {company_overview['need_to_call_count']} ta, "
             f"due payment bugun {company_overview['due_payments_today']} ta."
+        )
+    data_hub = context.get("data_hub")
+    if data_hub and not out:
+        company = data_hub.get("company_overview", {})
+        updates = data_hub.get("updates_overview", {})
+        payments = data_hub.get("payments_overview", {})
+        projects = data_hub.get("projects_overview", {})
+        out.append(
+            f"CIMS umumiy ko'rsatkichlari: active userlar {company.get('active_users', 0)} ta, "
+            f"jami customerlar {company.get('total_customers_all_time', 0)} ta, "
+            f"davr bo'yicha valid update lar {updates.get('valid_updates_in_period', 0)} ta."
+        )
+        out.append(
+            f"Active company paymentlar {payments.get('active_company_payments_count', 0)} ta, "
+            f"ularning umumiy summasi {payments.get('active_company_payments_total', 0)}."
+        )
+        out.append(
+            f"Projectlar {projects.get('projects_count', 0)} ta, cardlar {projects.get('cards_count', 0)} ta, "
+            f"overdue cardlar {projects.get('overdue_cards', 0)} ta."
         )
     sql_analytics = context.get("sql_analytics")
     if sql_analytics and sql_analytics.get("rows_preview"):
@@ -849,15 +1264,17 @@ async def generate_cims_ai_answer(
     fallback = build_cims_ai_fallback_answer(context)
     if not api_key:
         return fallback, False
-    sql_analytics = await _generate_sql_analytics(
-        session,
-        question,
-        context,
-        history,
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-    )
+    sql_analytics = None
+    if _should_run_sql_analytics(question, context):
+        sql_analytics = await _generate_sql_analytics(
+            session,
+            question,
+            context,
+            history,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+        )
     if sql_analytics:
         context["sql_analytics"] = sql_analytics
     history_text = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in (history or [])[-6:] if item.get("content")) or "yoq"
