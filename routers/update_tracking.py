@@ -2560,9 +2560,6 @@ async def get_employee_monthly_updates(
     current_user=Depends(get_current_active_user)
 ):
     """CEO endpoint: get all update messages for an employee in a given year/month."""
-    if not is_ceo_user(current_user):
-        raise HTTPException(status_code=403, detail="Only CEO can access this")
-
     if year < 2000 or year > 2100:
         raise HTTPException(status_code=400, detail="year must be between 2000 and 2100")
     if month < 1 or month > 12:
