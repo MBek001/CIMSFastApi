@@ -898,7 +898,12 @@ async def get_company_payments(
     result = await session.execute(
         select(company_recurring_payment).order_by(company_recurring_payment.c.payment_day.asc(), company_recurring_payment.c.payment_time.asc())
     )
-    return {"payments": [_serialize_company_payment(row) for row in result.fetchall()]}
+    rows = result.fetchall()
+    total_amount = sum(float(row.amount or 0) for row in rows)
+    return {
+        "payments": [_serialize_company_payment(row) for row in rows],
+        "total_amount": total_amount,
+    }
 
 
 @router.post("/company-payments", response_model=CreateResponse, summary="Company recurring payment reminder yaratish")
