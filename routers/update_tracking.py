@@ -21,7 +21,7 @@ from models.admin_models import (
     daily_update_log, department, user_department,
     missed_update_notification, workday_override
 )
-from models.user_models import user, UserRole
+from models.user_models import user, UserRole, attendance_log
 from schemes.schemes_update_tracking import (
     WorkdayOverrideBulkResponse,
     WorkdayOverrideCreateRequest,
@@ -2218,6 +2218,27 @@ async def get_my_daily_calendar(
     )
     updates = {row.update_date: {"content": row.update_content, "valid": row.is_valid}
                for row in updates_result.fetchall()}
+    attendance_result = await session.execute(
+        select(
+            attendance_log.c.attendance_date,
+            attendance_log.c.check_in_time,
+            attendance_log.c.check_out_time,
+        )
+        .where(
+            and_(
+                attendance_log.c.employee_id == current_user.id,
+                attendance_log.c.attendance_date >= first_day,
+                attendance_log.c.attendance_date <= last_day,
+            )
+        )
+    )
+    attendance_by_date = {
+        row.attendance_date: {
+            "check_in_time": row.check_in_time.isoformat() if row.check_in_time else None,
+            "check_out_time": row.check_out_time.isoformat() if row.check_out_time else None,
+        }
+        for row in attendance_result.fetchall()
+    }
     stats_expected_dates = set(
         exclude_pending_today_from_expected_days(expected_workdays, set(updates.keys()))
     )
@@ -2242,7 +2263,9 @@ async def get_my_daily_calendar(
             "is_sunday": weekday == 6,
             "is_day_off": current_date.weekday() != 6 and current_date not in full_month_expected_dates,
             "update_expected": current_date in expected_dates,
-            "has_update": current_date in updates
+            "has_update": current_date in updates,
+            "check_in_time": attendance_by_date.get(current_date, {}).get("check_in_time"),
+            "check_out_time": attendance_by_date.get(current_date, {}).get("check_out_time"),
         }
 
         effective_override = get_effective_override(override_pack, current_user.id, current_date)
@@ -2612,6 +2635,27 @@ async def get_employee_monthly_updates(
         }
         for row in rows
     }
+    attendance_result = await session.execute(
+        select(
+            attendance_log.c.attendance_date,
+            attendance_log.c.check_in_time,
+            attendance_log.c.check_out_time,
+        )
+        .where(
+            and_(
+                attendance_log.c.employee_id == employee_id,
+                attendance_log.c.attendance_date >= month_start,
+                attendance_log.c.attendance_date <= month_end,
+            )
+        )
+    )
+    attendance_by_date = {
+        row.attendance_date: {
+            "check_in_time": row.check_in_time.isoformat() if row.check_in_time else None,
+            "check_out_time": row.check_out_time.isoformat() if row.check_out_time else None,
+        }
+        for row in attendance_result.fetchall()
+    }
     stats_expected_dates = set(
         exclude_pending_today_from_expected_days(expected_workdays, set(updates_by_date.keys()))
     )
@@ -2644,6 +2688,8 @@ async def get_employee_monthly_updates(
             "workday_override": _serialize_effective_override(effective_override),
             "update_content": updates_by_date.get(current_date, {}).get("content"),
             "is_valid": updates_by_date.get(current_date, {}).get("valid"),
+            "check_in_time": attendance_by_date.get(current_date, {}).get("check_in_time"),
+            "check_out_time": attendance_by_date.get(current_date, {}).get("check_out_time"),
         }
         calendar_days.append(day_info)
 

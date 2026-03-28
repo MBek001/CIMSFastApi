@@ -2,6 +2,7 @@ import json
 import os
 import re
 from calendar import monthrange
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -87,6 +88,14 @@ SQL_ANALYTICS_TABLES: dict[str, list[str]] = {
     "project_board": ["id", "project_id", "name", "description", "created_by", "created_at", "is_archived"],
     "project_board_column": ["id", "board_id", "name", "order", "color", "created_at"],
     "project_board_card": ["id", "column_id", "title", "description", "order", "priority", "assignee_id", "due_date", "created_by", "created_at", "updated_at"],
+}
+
+SALES_NOTE_STOPWORDS = {
+    "mijoz", "lead", "customer", "client", "crm", "aloqa", "boglandi", "bog'landi",
+    "yozildi", "gaplashildi", "telefon", "tel", "note", "izoh", "status", "qayta",
+    "call", "manager", "sales", "savdo", "sotuv", "clint", "bilan", "uchun", "ham",
+    "yana", "lekin", "yoki", "bor", "yoq", "va", "bu", "shu", "bugun", "kecha",
+    "erta", "task", "the", "and", "for", "with", "from", "that", "this",
 }
 
 
@@ -386,6 +395,8 @@ def _detect_actions(question: str, employee: Optional[dict[str, Any]], sales_man
         actions.append("employee_update")
     if any(x in q for x in ["lead", "mijoz", "customer", "crm", "status", "konversiya", "kelgan"]):
         actions.append("lead_stats")
+    if any(x in q for x in ["savdo", "sotuv", "sales advice", "maslahat", "tavsiya", "conversion", "yaxshilash"]):
+        actions.append("lead_stats")
     if customer_match:
         actions.append("customer_detail")
     if any(x in q for x in ["finance", "balans", "balance", "kirim", "chiqim", "karta", "card", "donation", "uzs", "usd", "pul"]):
@@ -401,6 +412,70 @@ def _detect_actions(question: str, employee: Optional[dict[str, Any]], sales_man
     if any(x in q for x in ["company", "kompaniya", "umumiy", "overview", "dashboard", "xulosa"]) or not actions:
         actions.append("company_overview")
     return list(dict.fromkeys(actions))
+
+
+def _extract_note_topics(texts: list[str], limit: int = 8) -> list[dict[str, Any]]:
+    words: list[str] = []
+    for text in texts:
+        if not text:
+            continue
+        tokens = re.findall(r"[a-zA-Z0-9']+", text.lower())
+        for token in tokens:
+            if token.isdigit() or len(token) < 3 or token in SALES_NOTE_STOPWORDS:
+                continue
+            words.append(token)
+    counts = Counter(words)
+    return [{"keyword": word, "count": count} for word, count in counts.most_common(limit)]
+
+
+def _build_note_signal_breakdown(texts: list[str]) -> dict[str, int]:
+    joined = " \n ".join(_n(text) for text in texts if text)
+    signal_keywords = {
+        "price_objection": ["narx", "qimmat", "budjet", "budget", "summa", "to'lov", "tolov"],
+        "timing_delay": ["keyin", "kechroq", "vaqt", "busy", "band", "haftadan", "oydan"],
+        "trust_objection": ["ishonch", "garantiya", "portfolio", "case", "tajriba", "review"],
+        "feature_gap": ["funksiya", "feature", "integratsiya", "integration", "api", "bot", "crm", "sayt"],
+        "follow_up_needed": ["qayta", "eslat", "call", "aloqa", "bog'lan", "boglan", "yozish", "javob"],
+    }
+    return {
+        key: sum(joined.count(keyword) for keyword in keywords)
+        for key, keywords in signal_keywords.items()
+    }
+
+
+def _build_sales_recommendations(
+    *,
+    total_leads: int,
+    status_breakdown: list[dict[str, Any]],
+    note_signal_breakdown: dict[str, int],
+    notes_count: int,
+) -> list[str]:
+    recommendations: list[str] = []
+    status_map = {_n(str(item.get("status") or "")): int(item.get("count") or 0) for item in status_breakdown}
+    need_to_call = status_map.get("need_to_call", 0)
+    contacted = status_map.get("contacted", 0)
+    project_started = status_map.get("project_started", 0)
+    rejected = status_map.get("rejected", 0)
+
+    if need_to_call > 0:
+        recommendations.append(f"`need_to_call` dagi {need_to_call} ta lead bilan qayta aloqa qilishni birinchi prioritet qiling.")
+    if total_leads > 0 and project_started == 0:
+        recommendations.append("Lead kelmoqda, lekin `project_started` yo'q. Birinchi call skripti va offerni qayta ko'rib chiqing.")
+    elif contacted > 0 and project_started / max(contacted, 1) < 0.35:
+        recommendations.append("`contacted` dan `project_started` ga o'tish past. Demo, case study va aniq taklifni kuchaytiring.")
+    if rejected > max(total_leads // 4, 2):
+        recommendations.append("`rejected` soni yuqori. Lead qualification va birinchi suhbatdagi ehtiyoj aniqlashni yaxshilang.")
+    if note_signal_breakdown.get("price_objection", 0) > 0:
+        recommendations.append("Note larda narx/budjet e'tirozi ko'p. Paketlar yoki bosqichma-bosqich to'lov variantini tayyorlang.")
+    if note_signal_breakdown.get("timing_delay", 0) > 0:
+        recommendations.append("Ko'p lead keyinroq qaytishini yozgan. Qayta follow-up sanasini qat'iy yuriting.")
+    if note_signal_breakdown.get("trust_objection", 0) > 0:
+        recommendations.append("Ishonchni oshirish uchun portfolio, case va natija misollarini birinchi suhbatdayoq yuboring.")
+    if note_signal_breakdown.get("feature_gap", 0) > 0:
+        recommendations.append("Funksiya va integratsiya savollari ko'p. Tayyor capability list va FAQ ishlating.")
+    if note_signal_breakdown.get("follow_up_needed", 0) > 0 and notes_count > 0:
+        recommendations.append("Har bir lead uchun note ichida keyingi aniq qadam va sana bo'lishi kerak.")
+    return recommendations[:5]
 
 
 async def _employee_update_context(session: AsyncSession, employee: dict[str, Any], period: PeriodSpec) -> dict[str, Any]:
@@ -470,6 +545,30 @@ async def _lead_stats_context(session: AsyncSession, period: PeriodSpec, custome
             intl_count += row.count
         else:
             local_count += row.count
+    note_rows = (await session.execute(
+        select(
+            customer.c.id,
+            customer.c.notes,
+            customer.c.status_name,
+            customer.c.status,
+            customer.c.platform,
+            customer.c.assistant_name,
+            customer.c.created_at,
+        )
+        .where(and_(*filters))
+        .order_by(desc(customer.c.created_at))
+        .limit(300)
+    )).fetchall()
+    note_texts = [str(row.notes).strip() for row in note_rows if str(row.notes or "").strip()]
+    status_breakdown = [{"status": row.status_name or _enum(row.status) or "unknown", "count": row.count} for row in status_rows]
+    note_topics = _extract_note_topics(note_texts, limit=10)
+    note_signal_breakdown = _build_note_signal_breakdown(note_texts)
+    sales_recommendations = _build_sales_recommendations(
+        total_leads=int(total or 0),
+        status_breakdown=status_breakdown,
+        note_signal_breakdown=note_signal_breakdown,
+        notes_count=len(note_texts),
+    )
     return {
         "period": period.as_dict(),
         "customer_type_filter": customer_type,
@@ -477,7 +576,24 @@ async def _lead_stats_context(session: AsyncSession, period: PeriodSpec, custome
         "local_leads": local_count,
         "international_leads": intl_count,
         "platform_breakdown": [{"platform": row.platform or "unknown", "count": row.count} for row in platform_rows],
-        "status_breakdown": [{"status": row.status_name or _enum(row.status) or "unknown", "count": row.count} for row in status_rows],
+        "status_breakdown": status_breakdown,
+        "notes_count": len(note_texts),
+        "notes_coverage_percent": round((len(note_texts) / total) * 100, 2) if total else 0.0,
+        "top_note_topics": note_topics,
+        "note_signal_breakdown": note_signal_breakdown,
+        "recent_note_previews": [
+            {
+                "id": row.id,
+                "status": row.status_name or _enum(row.status) or "unknown",
+                "platform": row.platform,
+                "assistant_name": row.assistant_name,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "note": _clip(row.notes or "", 220),
+            }
+            for row in note_rows
+            if str(row.notes or "").strip()
+        ][:6],
+        "sales_recommendations": sales_recommendations,
     }
 
 
@@ -488,7 +604,11 @@ async def _customer_detail_context(session: AsyncSession, customer_match: dict[s
         .where(and_(sales_manager_assignment.c.customer_id == customer_match["id"], sales_manager_assignment.c.is_active == True))
         .order_by(sales_manager_assignment.c.assigned_at.desc()).limit(1)
     )).fetchone()
-    return {"customer": customer_match, "sales_manager": {"id": row.sales_manager_id, "full_name": f"{row.name} {row.surname}".strip(), "email": row.email} if row else None}
+    return {
+        "customer": customer_match,
+        "sales_manager": {"id": row.sales_manager_id, "full_name": f"{row.name} {row.surname}".strip(), "email": row.email} if row else None,
+        "notes_preview": _clip(customer_match.get("notes") or "", 260) if customer_match.get("notes") else None,
+    }
 
 
 async def _finance_summary_context(session: AsyncSession, period: PeriodSpec) -> dict[str, Any]:
@@ -1119,10 +1239,20 @@ def build_cims_ai_fallback_answer(context: dict[str, Any]) -> str:
     lead_stats = context.get("lead_stats")
     if lead_stats:
         out.append(f"{lead_stats['period']['label']} davrida jami {lead_stats['total_leads']} ta lead kelgan. Local {lead_stats['local_leads']} ta, international {lead_stats['international_leads']} ta.")
+        if lead_stats.get("notes_count"):
+            out.append(
+                f"Leadlardan {lead_stats['notes_count']} tasida note bor ({lead_stats['notes_coverage_percent']}%). "
+                f"Note lardagi asosiy mavzular: {', '.join(item['keyword'] for item in lead_stats.get('top_note_topics', [])[:5]) or 'aniq signal yoq'}."
+            )
+        if lead_stats.get("sales_recommendations"):
+            out.append("Savdo bo'yicha tavsiyalar:")
+            out.extend(lead_stats["sales_recommendations"][:4])
     customer_detail = context.get("customer_detail")
     if customer_detail:
         item = customer_detail["customer"]
         out.append(f"Mijoz: {item['full_name']} | status: {item['status']} | platforma: {item['platform']} | telefon: {item['phone_number']}.")
+        if customer_detail.get("notes_preview"):
+            out.append(f"Oxirgi muhim note: {customer_detail['notes_preview']}")
     finance_summary = context.get("finance_summary")
     if finance_summary:
         out.append(f"{finance_summary['period']['label']} davrida kirim {finance_summary['total_income_uzs']} UZS, chiqim {finance_summary['total_outcome_uzs']} UZS, net flow {finance_summary['net_flow_uzs']} UZS.")
@@ -1147,7 +1277,7 @@ def build_cims_ai_fallback_answer(context: dict[str, Any]) -> str:
     if sales_manager_stats:
         out.append(
             f"{sales_manager_stats['sales_manager']['full_name']} uchun {sales_manager_stats['period']['label']} davrida "
-            f"{sales_manager_stats['total_status_changes']} ta status o'zgarishi va {sales_manager_stats['changed_customers']} ta unique customer bor. "
+            f"{sales_manager_stats['total_status_changes']} ta status o'zgarishi va {sales_manager_stats['changed_customers']} ta mijozda harakat bo'lgan. "
             f"Project started conversion {sales_manager_stats['conversion_to_project_started_percent']}%."
         )
     project_overview = context.get("project_overview")
@@ -1278,8 +1408,19 @@ async def generate_cims_ai_answer(
     if sql_analytics:
         context["sql_analytics"] = sql_analytics
     history_text = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in (history or [])[-6:] if item.get("content")) or "yoq"
-    system_prompt = "Siz CIMS AI analytics agent siz. Faqat berilgan CIMS context asosida javob bering. O'zbek tilida aniq raqamlar bilan yozing. Bir nechta savol bo'lsa, hammasiga javob bering. Ma'lumot yetmasa buni aniq ayting. Agar sql_analytics bo'lsa, o'sha natijani ham ishlating."
-    user_prompt = f"Savol: {question}\n\nOldingi chat:\n{history_text}\n\nCIMS context:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\nEndi foydalanuvchiga ishonchli, qisqa va tahlilli javob yozing."
+    system_prompt = (
+        "Siz CIMS AI analytics agent siz. Faqat berilgan CIMS context asosida javob bering. "
+        "O'zbek tilida aniq raqamlar bilan yozing. Bir nechta savol bo'lsa, hammasiga javob bering. "
+        "Ma'lumot yetmasa buni aniq ayting. Agar contextda customer notes bo'lsa, ularni o'qib amaliy xulosa va sotuv bo'yicha tavsiya bering. "
+        "Faqat statistikani sanab chiqish bilan cheklanib qolmang: kerak bo'lsa 2-5 ta aniq action point bering. "
+        "Xom DB iboralarini ishlatmang, masalan `unique customer` o'rniga oddiy biznes tilida yozing."
+    )
+    user_prompt = (
+        f"Savol: {question}\n\n"
+        f"Oldingi chat:\n{history_text}\n\n"
+        f"CIMS context:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
+        "Endi foydalanuvchiga ishonchli, qisqa, tahlilli va kerak bo'lsa amaliy tavsiyali javob yozing."
+    )
     payload = {"model": model, "temperature": 0.2, "max_output_tokens": 700, "input": [{"role": "system", "content": [{"type": "input_text", "text": system_prompt}]}, {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}]}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
