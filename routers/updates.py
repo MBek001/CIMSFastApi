@@ -338,6 +338,11 @@ def build_policy_payload(base_salary: Decimal | float | int | None) -> dict:
     }
 
 
+def format_money_uzs(value: Decimal | float | int | None) -> str:
+    amount = int(round(float(value or 0)))
+    return f"{amount:,}".replace(",", " ")
+
+
 def build_incident_role_preview(row) -> dict:
     employee_salary = normalize_base_salary(getattr(row, "employee_default_salary", 0))
     reviewer_salary = normalize_base_salary(getattr(row, "reviewer_default_salary", 0))
@@ -420,6 +425,14 @@ def build_user_deduction_breakdown(user_id: int, user_base_salary: Decimal | flo
                 "project_id": row.project_id,
                 "reached_client": bool(row.reached_client),
                 "unclear_task": bool(row.unclear_task),
+                "created_by": getattr(row, "created_by", None),
+                "created_by_full_name": (
+                    f"{getattr(row, 'creator_name', '')} {getattr(row, 'creator_surname', '')}".strip()
+                    if getattr(row, "creator_name", None) or getattr(row, "creator_surname", None)
+                    else None
+                ),
+                "created_at": row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+                "updated_at": row.updated_at.isoformat() if getattr(row, "updated_at", None) else None,
                 "share_percent": as_money(share_percent),
                 "total_incident_deduction_amount": as_money(total_incident_amount),
                 "raw_deduction_amount_decimal": raw_deduction_amount,
@@ -463,6 +476,7 @@ async def fetch_user_period_incidents(
 ) -> List:
     employee_user = user.alias("employee_user")
     reviewer_user = user.alias("reviewer_user")
+    creator_user = user.alias("creator_user")
     result = await session.execute(
         select(
             compensation_mistake.c.id,
@@ -476,17 +490,23 @@ async def fetch_user_period_incidents(
             compensation_mistake.c.incident_date,
             compensation_mistake.c.reached_client,
             compensation_mistake.c.unclear_task,
+            compensation_mistake.c.created_by,
+            compensation_mistake.c.created_at,
+            compensation_mistake.c.updated_at,
             employee_user.c.name.label("employee_name"),
             employee_user.c.surname.label("employee_surname"),
             employee_user.c.default_salary.label("employee_default_salary"),
             reviewer_user.c.name.label("reviewer_name"),
             reviewer_user.c.surname.label("reviewer_surname"),
             reviewer_user.c.default_salary.label("reviewer_default_salary"),
+            creator_user.c.name.label("creator_name"),
+            creator_user.c.surname.label("creator_surname"),
         )
         .select_from(
             compensation_mistake
             .join(employee_user, compensation_mistake.c.employee_id == employee_user.c.id)
             .outerjoin(reviewer_user, compensation_mistake.c.reviewer_id == reviewer_user.c.id)
+            .outerjoin(creator_user, compensation_mistake.c.created_by == creator_user.c.id)
         )
         .where(
             and_(
@@ -518,6 +538,7 @@ async def fetch_employee_period_delivery_bonuses(
             compensation_bonus.c.award_date,
             compensation_bonus.c.created_by,
             compensation_bonus.c.created_at,
+            compensation_bonus.c.updated_at,
             user.c.default_salary.label("employee_default_salary"),
             creator_user.c.name.label("creator_name"),
             creator_user.c.surname.label("creator_surname"),
@@ -549,6 +570,7 @@ async def fetch_period_incidents_for_users(
         return {}
     employee_user = user.alias("employee_user")
     reviewer_user = user.alias("reviewer_user")
+    creator_user = user.alias("creator_user")
     result = await session.execute(
         select(
             compensation_mistake.c.id,
@@ -562,17 +584,23 @@ async def fetch_period_incidents_for_users(
             compensation_mistake.c.incident_date,
             compensation_mistake.c.reached_client,
             compensation_mistake.c.unclear_task,
+            compensation_mistake.c.created_by,
+            compensation_mistake.c.created_at,
+            compensation_mistake.c.updated_at,
             employee_user.c.name.label("employee_name"),
             employee_user.c.surname.label("employee_surname"),
             employee_user.c.default_salary.label("employee_default_salary"),
             reviewer_user.c.name.label("reviewer_name"),
             reviewer_user.c.surname.label("reviewer_surname"),
             reviewer_user.c.default_salary.label("reviewer_default_salary"),
+            creator_user.c.name.label("creator_name"),
+            creator_user.c.surname.label("creator_surname"),
         )
         .select_from(
             compensation_mistake
             .join(employee_user, compensation_mistake.c.employee_id == employee_user.c.id)
             .outerjoin(reviewer_user, compensation_mistake.c.reviewer_id == reviewer_user.c.id)
+            .outerjoin(creator_user, compensation_mistake.c.created_by == creator_user.c.id)
         )
         .where(
             and_(
@@ -615,6 +643,7 @@ async def fetch_period_delivery_bonuses_for_users(
             compensation_bonus.c.award_date,
             compensation_bonus.c.created_by,
             compensation_bonus.c.created_at,
+            compensation_bonus.c.updated_at,
             user.c.default_salary.label("employee_default_salary"),
             creator_user.c.name.label("creator_name"),
             creator_user.c.surname.label("creator_surname"),
@@ -655,15 +684,23 @@ def build_member_compensation_payload_from_prefetched(
     if not employee_client_mistakes:
         quality_percent = QUALITY_BONUS_NO_CLIENT_MISTAKES
         quality_label = "No client-reported mistakes during the month"
+        quality_reason = "Bu oy clientga chiqqan mistake yo'q."
     elif all(row.severity not in {MistakeSeverity.major, MistakeSeverity.critical} for row in employee_client_mistakes):
         quality_percent = QUALITY_BONUS_NO_MAJOR_CRITICAL
         quality_label = "No Major or Critical client-reported mistakes"
+        quality_reason = "Client mistake bor, lekin Major yoki Critical emas."
     else:
         quality_percent = Decimal("0")
         quality_label = "Quality bonus not applicable"
+        quality_reason = "Clientga chiqqan Major yoki Critical mistake mavjud."
 
     productivity_percent = (
         PRODUCTIVITY_BONUS_FULL_UPDATES if update_coverage["qualifies_productivity_bonus"] else Decimal("0")
+    )
+    productivity_reason = (
+        "Ish kunlari bo'yicha update 100% topshirilgan."
+        if productivity_percent > 0
+        else "Update coverage 100% ga yetmagan."
     )
     delivery_percent = Decimal("0")
     selected_delivery_bonus = None
@@ -683,6 +720,8 @@ def build_member_compensation_payload_from_prefetched(
                 if row.creator_name or row.creator_surname
                 else None
             ),
+            "created_at": row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+            "updated_at": row.updated_at.isoformat() if getattr(row, "updated_at", None) else None,
             "bonus_percent": as_money(bonus_percent),
             "bonus_amount": as_money(bonus_amount_from_percent(salary_base, bonus_percent)),
         }
@@ -694,6 +733,62 @@ def build_member_compensation_payload_from_prefetched(
     total_bonus_percent = productivity_percent + quality_percent + delivery_percent
     total_bonus_amount = bonus_amount_from_percent(salary_base, total_bonus_percent)
     final_salary = quantize_money(salary_base - deduction_breakdown["applied_total"] + total_bonus_amount)
+    bonus_lines = [
+        {
+            "type": "productivity",
+            "label": "100% updates completed",
+            "applied": bool(productivity_percent > 0),
+            "percent": as_money(productivity_percent),
+            "amount": as_money(bonus_amount_from_percent(salary_base, productivity_percent)),
+            "reason": productivity_reason,
+        },
+        {
+            "type": "quality",
+            "label": quality_label,
+            "applied": bool(quality_percent > 0),
+            "percent": as_money(quality_percent),
+            "amount": as_money(bonus_amount_from_percent(salary_base, quality_percent)),
+            "reason": quality_reason,
+        },
+        {
+            "type": "delivery",
+            "label": selected_delivery_bonus["title"] if selected_delivery_bonus else "No delivery bonus selected",
+            "applied": bool(delivery_percent > 0),
+            "percent": as_money(delivery_percent),
+            "amount": as_money(bonus_amount_from_percent(salary_base, delivery_percent)),
+            "reason": (
+                f"Tanlangan delivery bonus: {selected_delivery_bonus['title']}"
+                if selected_delivery_bonus
+                else "Bu oy delivery bonus tanlanmagan."
+            ),
+        },
+    ]
+    deduction_lines = [
+        {
+            "type": "mistake",
+            "label": item["title"],
+            "applied": bool(item["applied_deduction_amount"] > 0),
+            "amount": item["applied_deduction_amount"],
+            "reason": (
+                f"{item['severity']} mistake bo'yicha {item['share_percent']}% ulush."
+                if item["applied_deduction_amount"] > 0
+                else "Bu incident uchun deduction qo'llanmadi."
+            ),
+            "severity": item["severity"],
+            "share_percent": item["share_percent"],
+        }
+        for item in deduction_breakdown["items"]
+    ]
+    formula_parts = [format_money_uzs(salary_base)]
+    for bonus_line in bonus_lines:
+        formula_parts.append(
+            f"+ {format_money_uzs(bonus_line['amount'])} ({bonus_line['percent']}% {bonus_line['type']})"
+        )
+    for deduction_line in deduction_lines:
+        formula_parts.append(
+            f"- {format_money_uzs(deduction_line['amount'])} ({deduction_line['share_percent']}% of {deduction_line['severity']} mistake)"
+        )
+    formula_parts.append(f"= {format_money_uzs(final_salary)}")
 
     payload = {
         "user": {
@@ -709,26 +804,14 @@ def build_member_compensation_payload_from_prefetched(
         "bonuses_summary": {
             "automatic_components": [
                 {
-                    "type": "productivity",
-                    "label": "100% updates completed",
-                    "applied": bool(productivity_percent > 0),
-                    "bonus_percent": as_money(productivity_percent),
-                    "bonus_amount": as_money(bonus_amount_from_percent(salary_base, productivity_percent)),
-                },
-                {
-                    "type": "quality",
-                    "label": quality_label,
-                    "applied": bool(quality_percent > 0),
-                    "bonus_percent": as_money(quality_percent),
-                    "bonus_amount": as_money(bonus_amount_from_percent(salary_base, quality_percent)),
-                },
-                {
-                    "type": "delivery",
-                    "label": selected_delivery_bonus["title"] if selected_delivery_bonus else "No delivery bonus selected",
-                    "applied": bool(delivery_percent > 0),
-                    "bonus_percent": as_money(delivery_percent),
-                    "bonus_amount": as_money(bonus_amount_from_percent(salary_base, delivery_percent)),
-                },
+                    "type": item["type"],
+                    "label": item["label"],
+                    "applied": item["applied"],
+                    "bonus_percent": item["percent"],
+                    "bonus_amount": item["amount"],
+                    "reason": item["reason"],
+                }
+                for item in bonus_lines
             ],
             "selected_delivery_bonus": selected_delivery_bonus,
             "total_bonus_percent": as_money(total_bonus_percent),
@@ -748,6 +831,12 @@ def build_member_compensation_payload_from_prefetched(
             "total_bonus_amount": as_money(total_bonus_amount),
             "final_salary": as_money(final_salary),
             "estimated_salary": as_money(final_salary),
+            "calculation_breakdown": {
+                "base_salary": as_money(salary_base),
+                "bonus_lines": bonus_lines,
+                "deduction_lines": deduction_lines,
+                "formula_text": " ".join(formula_parts),
+            },
         },
     }
     if include_details:
@@ -822,6 +911,7 @@ async def list_compensation_mistakes(
     await ensure_compensation_access(session, current_user)
     employee_user = user.alias("employee_user")
     reviewer_user = user.alias("reviewer_user")
+    creator_user = user.alias("creator_user")
     conditions = []
     if employee_id is not None:
         conditions.append(compensation_mistake.c.employee_id == employee_id)
@@ -847,17 +937,21 @@ async def list_compensation_mistakes(
             compensation_mistake.c.unclear_task,
             compensation_mistake.c.created_by,
             compensation_mistake.c.created_at,
+            compensation_mistake.c.updated_at,
             employee_user.c.name.label("employee_name"),
             employee_user.c.surname.label("employee_surname"),
             employee_user.c.default_salary.label("employee_default_salary"),
             reviewer_user.c.name.label("reviewer_name"),
             reviewer_user.c.surname.label("reviewer_surname"),
             reviewer_user.c.default_salary.label("reviewer_default_salary"),
+            creator_user.c.name.label("creator_name"),
+            creator_user.c.surname.label("creator_surname"),
         )
         .select_from(
             compensation_mistake
             .join(employee_user, compensation_mistake.c.employee_id == employee_user.c.id)
             .outerjoin(reviewer_user, compensation_mistake.c.reviewer_id == reviewer_user.c.id)
+            .outerjoin(creator_user, compensation_mistake.c.created_by == creator_user.c.id)
         )
         .order_by(compensation_mistake.c.incident_date.desc(), compensation_mistake.c.id.desc())
     )
@@ -886,7 +980,13 @@ async def list_compensation_mistakes(
                 "reached_client": bool(row.reached_client),
                 "unclear_task": bool(row.unclear_task),
                 "created_by": row.created_by,
+                "created_by_full_name": (
+                    f"{row.creator_name} {row.creator_surname}".strip()
+                    if row.creator_name or row.creator_surname
+                    else None
+                ),
                 "created_at": row.created_at.isoformat() if row.created_at else None,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
                 "deduction_preview": build_incident_role_preview(row),
             }
             for row in rows
@@ -1014,6 +1114,7 @@ async def list_delivery_bonuses(
             compensation_bonus.c.award_date,
             compensation_bonus.c.created_by,
             compensation_bonus.c.created_at,
+            compensation_bonus.c.updated_at,
             creator_user.c.name.label("creator_name"),
             creator_user.c.surname.label("creator_surname"),
         )
@@ -1045,6 +1146,7 @@ async def list_delivery_bonuses(
                     else None
                 ),
                 "created_at": row.created_at.isoformat() if row.created_at else None,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             }
             for row in rows
         ],
