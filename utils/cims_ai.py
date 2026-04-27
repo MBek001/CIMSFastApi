@@ -331,25 +331,56 @@ def _resolve_period(question: str) -> PeriodSpec:
 
 async def _match_user(session: AsyncSession, question: str, role: Optional[UserRole] = None) -> Optional[dict[str, Any]]:
     q = _n(question)
-    query = select(user.c.id, user.c.name, user.c.surname, user.c.email, user.c.role, user.c.is_active).order_by(user.c.name, user.c.surname)
+    query = select(
+        user.c.id, user.c.name, user.c.surname, user.c.email,
+        user.c.role, user.c.role_name, user.c.job_title, user.c.is_active,
+    ).order_by(user.c.name, user.c.surname)
     if role is not None:
         query = query.where(user.c.role == role)
     rows = (await session.execute(query)).fetchall()
     best, best_score = None, 0
     for row in rows:
-        aliases = {_n(f"{row.name} {row.surname}"), _n(row.name or ""), _n(row.surname or ""), _n(row.email or "")}
+        name = _n(row.name or "")
+        surname = _n(row.surname or "")
+        full = _n(f"{row.name} {row.surname}")
+        email_local = _n((row.email or "").split("@")[0])
+        aliases = {full, name, surname, email_local, _n(row.email or "")}
+        if row.role_name:
+            aliases.add(_n(row.role_name))
+        if row.job_title:
+            aliases.add(_n(row.job_title))
+        aliases.discard("")
         for alias in aliases:
-            if alias and alias in q and len(alias) > best_score:
-                best_score = len(alias)
-                best = {
-                    "id": row.id,
-                    "name": row.name,
-                    "surname": row.surname,
-                    "full_name": f"{row.name} {row.surname}".strip(),
-                    "email": row.email,
-                    "role": _enum(row.role),
-                    "is_active": bool(row.is_active),
-                }
+            if len(alias) < 2:
+                continue
+            if alias in q:
+                score = len(alias)
+                if score > best_score:
+                    best_score = score
+                    best = {
+                        "id": row.id,
+                        "name": row.name,
+                        "surname": row.surname,
+                        "full_name": f"{row.name} {row.surname}".strip(),
+                        "email": row.email,
+                        "role": _enum(row.role),
+                        "is_active": bool(row.is_active),
+                    }
+            # Partial: individual tokens of alias (min 3 chars) anywhere in q
+            elif best_score == 0:
+                for token in alias.split():
+                    if len(token) >= 3 and token in q:
+                        best_score = len(token)
+                        best = {
+                            "id": row.id,
+                            "name": row.name,
+                            "surname": row.surname,
+                            "full_name": f"{row.name} {row.surname}".strip(),
+                            "email": row.email,
+                            "role": _enum(row.role),
+                            "is_active": bool(row.is_active),
+                        }
+                        break
     return best
 
 
@@ -400,28 +431,92 @@ def _detect_customer_type(question: str) -> Optional[str]:
 def _detect_actions(question: str, employee: Optional[dict[str, Any]], sales_manager: Optional[dict[str, Any]], customer_match: Optional[dict[str, Any]]) -> list[str]:
     q = _n(question)
     actions: list[str] = []
-    if employee and any(x in q for x in ["update", "foiz", "hisobot", "performance", "statistika", "oylik"]):
-        actions.append("employee_update")
-    elif employee and not any(x in q for x in ["lead", "mijoz", "customer", "finance", "balans", "project"]):
-        actions.append("employee_update")
-    if any(x in q for x in ["lead", "mijoz", "customer", "crm", "status", "konversiya", "kelgan"]):
+
+    EMPLOYEE_KEYWORDS = [
+        "xodim", "hodim", "xodimlar", "hodimlar", "ishchi", "dasturchi",
+        "jamoa", "team", "member", "backend", "frontend", "designer",
+        "update", "foiz", "hisobot", "performance", "statistika",
+    ]
+    ALL_EMPLOYEES_KEYWORDS = [
+        "barcha xodim", "hamma xodim", "barcha hodim", "hamma hodim",
+        "barcha member", "hamma member", "jamoa statistika", "team statistika",
+        "hammaning", "barchasining",
+    ]
+    EMPLOYEE_EXCLUDE = ["lead", "mijoz", "customer", "finance", "balans", "project"]
+    ATTENDANCE_KEYWORDS = [
+        "davomat", "attendance", "check-in", "check in", "check out",
+        "check_in", "check_out", "keldi", "ketdi", "ish vaqti", "ofis",
+    ]
+    COMPENSATION_KEYWORDS = [
+        "jarima", "bonus", "mukofot", "penalty", "mistake", "xato",
+        "kompensatsiya", "reward", "rag'bat",
+    ]
+    CRM_KEYWORDS = [
+        "lead", "leadlar", "mijoz", "mijozlar", "customer", "crm",
+        "status", "konversiya", "kelgan", "yangi lead", "qancha lead",
+        "nechta lead", "qo'shilgan", "qoshilgan",
+    ]
+    SALARY_KEYWORDS = [
+        "maosh", "ish haqi", "oylik maosh", "salary", "to'lanadigan",
+    ]
+
+    # All-employees context
+    if any(kw in q for kw in ALL_EMPLOYEES_KEYWORDS):
+        actions.append("all_employees_update")
+
+    # Individual employee context
+    if employee:
+        if any(x in q for x in EMPLOYEE_KEYWORDS + SALARY_KEYWORDS):
+            actions.append("employee_update")
+        elif not any(x in q for x in EMPLOYEE_EXCLUDE):
+            actions.append("employee_update")
+
+    # Attendance (standalone or with employee)
+    if any(x in q for x in ATTENDANCE_KEYWORDS):
+        actions.append("attendance_detail")
+
+    # Compensation/bonus/penalty
+    if any(x in q for x in COMPENSATION_KEYWORDS):
+        actions.append("compensation_detail")
+
+    # CRM / lead stats
+    if any(x in q for x in CRM_KEYWORDS):
         actions.append("lead_stats")
     if any(x in q for x in ["savdo", "sotuv", "sales advice", "maslahat", "tavsiya", "conversion", "yaxshilash"]):
         actions.append("lead_stats")
     if customer_match:
         actions.append("customer_detail")
+
+    # Finance
     if any(x in q for x in ["finance", "balans", "balance", "kirim", "chiqim", "karta", "card", "donation", "uzs", "usd", "pul"]):
         actions.append("finance_summary")
+
+    # Payment
     if any(x in q for x in ["payment", "to'lov", "tolov", "due", "qarzdor", "reminder", "oylik to'lov"]):
         actions.append("payment_summary")
+
+    # Salary (payment_summary covers this)
+    if any(x in q for x in SALARY_KEYWORDS) and not employee:
+        actions.append("payment_summary")
+
+    # Recall
     if any(x in q for x in ["recall", "call", "qayta aloqa", "eslatma", "need_to_call", "bog'lan", "boglan"]):
         actions.append("recall_summary")
+
+    # Sales manager
     if sales_manager and any(x in q for x in ["manager", "sales", "assign", "biriktirilgan", "konversiya", "status"]):
         actions.append("sales_manager_stats")
+
+    # Projects
     if any(x in q for x in ["project", "loyiha", "board", "kanban", "task", "card"]):
         actions.append("project_overview")
-    if any(x in q for x in ["company", "kompaniya", "umumiy", "overview", "dashboard", "xulosa"]) or not actions:
+
+    # Company overview — only as fallback
+    if any(x in q for x in ["company", "kompaniya", "umumiy", "overview", "dashboard", "xulosa"]):
         actions.append("company_overview")
+    elif not actions:
+        actions.append("company_overview")
+
     return list(dict.fromkeys(actions))
 
 
@@ -537,6 +632,173 @@ async def _employee_update_context(session: AsyncSession, employee: dict[str, An
         "recent_updates": [{"date": item.update_date.isoformat(), "content": _clip(item.update_content or "", 220)} for item in sorted(rows, key=lambda x: (x.update_date, x.created_at or datetime.min), reverse=True)[:5]],
         "monthly_report_summary": report_summary,
         "monthly_report_items": report_items,
+    }
+
+
+async def _all_employees_update_context(session: AsyncSession, period: PeriodSpec) -> dict[str, Any]:
+    rows = (await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.role, user.c.is_active)
+        .where(user.c.is_active == True)
+        .order_by(user.c.name, user.c.surname)
+    )).fetchall()
+    override_pack = await fetch_override_pack(session, period.start_date, period.end_date)
+    expected_days_cache: dict[int, list] = {}
+    for row in rows:
+        expected_days_cache[row.id] = list_expected_update_days(override_pack, row.id, period.start_date, period.end_date)
+
+    update_rows = (await session.execute(
+        select(daily_update_log.c.user_id, daily_update_log.c.update_date)
+        .where(and_(
+            daily_update_log.c.update_date >= period.start_date,
+            daily_update_log.c.update_date <= period.end_date,
+            daily_update_log.c.is_valid == True,
+        ))
+    )).fetchall()
+    submitted_per_user: dict[int, set] = {}
+    for r in update_rows:
+        submitted_per_user.setdefault(r.user_id, set()).add(r.update_date)
+
+    today = date.today()
+    employees_stats = []
+    for row in rows:
+        expected = [d for d in expected_days_cache.get(row.id, []) if d != today or row.id in submitted_per_user]
+        submitted = submitted_per_user.get(row.id, set())
+        working_days = len(expected)
+        update_days = len(submitted & set(expected))
+        pct = round((update_days / working_days) * 100, 1) if working_days else 0.0
+        employees_stats.append({
+            "id": row.id,
+            "full_name": f"{row.name} {row.surname}".strip(),
+            "role": _enum(row.role),
+            "working_days": working_days,
+            "update_days": update_days,
+            "update_percentage": pct,
+        })
+    employees_stats.sort(key=lambda x: x["update_percentage"])
+    total = len(employees_stats)
+    avg_pct = round(sum(e["update_percentage"] for e in employees_stats) / total, 1) if total else 0.0
+    return {
+        "period": period.as_dict(),
+        "total_employees": total,
+        "average_update_percentage": avg_pct,
+        "employees": employees_stats,
+        "lowest_3": employees_stats[:3],
+        "highest_3": employees_stats[-3:][::-1],
+    }
+
+
+async def _attendance_detail_context(session: AsyncSession, period: PeriodSpec, employee: Optional[dict[str, Any]]) -> dict[str, Any]:
+    cond = and_(
+        attendance_log.c.attendance_date >= period.start_date,
+        attendance_log.c.attendance_date <= period.end_date,
+    )
+    if employee:
+        cond = and_(cond, attendance_log.c.employee_id == employee["id"])
+    rows = (await session.execute(
+        select(
+            attendance_log.c.employee_id,
+            attendance_log.c.attendance_date,
+            attendance_log.c.check_in_time,
+            attendance_log.c.check_out_time,
+            user.c.name,
+            user.c.surname,
+        )
+        .select_from(attendance_log.outerjoin(user, attendance_log.c.employee_id == user.c.id))
+        .where(cond)
+        .order_by(attendance_log.c.attendance_date.desc(), attendance_log.c.check_in_time.desc())
+        .limit(100)
+    )).fetchall()
+    records = [
+        {
+            "employee_id": r.employee_id,
+            "full_name": f"{r.name or ''} {r.surname or ''}".strip(),
+            "date": r.attendance_date.isoformat() if r.attendance_date else None,
+            "check_in": r.check_in_time.isoformat() if r.check_in_time else None,
+            "check_out": r.check_out_time.isoformat() if r.check_out_time else None,
+            "completed": r.check_out_time is not None,
+        }
+        for r in rows
+    ]
+    return {
+        "period": period.as_dict(),
+        "employee": employee,
+        "total_records": len(records),
+        "completed_records": sum(1 for r in records if r["completed"]),
+        "records": records[:20],
+    }
+
+
+async def _compensation_detail_context(session: AsyncSession, period: PeriodSpec, employee: Optional[dict[str, Any]]) -> dict[str, Any]:
+    mistake_cond = and_(
+        compensation_mistake.c.incident_date >= period.start_date,
+        compensation_mistake.c.incident_date <= period.end_date,
+    )
+    bonus_cond = and_(
+        compensation_bonus.c.award_date >= period.start_date,
+        compensation_bonus.c.award_date <= period.end_date,
+    )
+    if employee:
+        mistake_cond = and_(mistake_cond, compensation_mistake.c.employee_id == employee["id"])
+        bonus_cond = and_(bonus_cond, compensation_bonus.c.employee_id == employee["id"])
+    mistake_rows = (await session.execute(
+        select(
+            compensation_mistake.c.id,
+            compensation_mistake.c.employee_id,
+            compensation_mistake.c.category,
+            compensation_mistake.c.severity,
+            compensation_mistake.c.title,
+            compensation_mistake.c.incident_date,
+            compensation_mistake.c.reached_client,
+            user.c.name,
+            user.c.surname,
+        )
+        .select_from(compensation_mistake.outerjoin(user, compensation_mistake.c.employee_id == user.c.id))
+        .where(mistake_cond)
+        .order_by(compensation_mistake.c.incident_date.desc())
+        .limit(20)
+    )).fetchall()
+    bonus_rows = (await session.execute(
+        select(
+            compensation_bonus.c.id,
+            compensation_bonus.c.employee_id,
+            compensation_bonus.c.bonus_type,
+            compensation_bonus.c.title,
+            compensation_bonus.c.award_date,
+            user.c.name,
+            user.c.surname,
+        )
+        .select_from(compensation_bonus.outerjoin(user, compensation_bonus.c.employee_id == user.c.id))
+        .where(bonus_cond)
+        .order_by(compensation_bonus.c.award_date.desc())
+        .limit(20)
+    )).fetchall()
+    return {
+        "period": period.as_dict(),
+        "employee": employee,
+        "mistakes_count": len(mistake_rows),
+        "bonuses_count": len(bonus_rows),
+        "mistakes": [
+            {
+                "id": r.id,
+                "employee": f"{r.name or ''} {r.surname or ''}".strip(),
+                "category": _enum(r.category),
+                "severity": _enum(r.severity),
+                "title": r.title,
+                "date": r.incident_date.isoformat() if r.incident_date else None,
+                "reached_client": bool(r.reached_client),
+            }
+            for r in mistake_rows
+        ],
+        "bonuses": [
+            {
+                "id": r.id,
+                "employee": f"{r.name or ''} {r.surname or ''}".strip(),
+                "bonus_type": _enum(r.bonus_type),
+                "title": r.title,
+                "date": r.award_date.isoformat() if r.award_date else None,
+            }
+            for r in bonus_rows
+        ],
     }
 
 
@@ -1212,8 +1474,14 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
         "customer_type_filter": customer_type,
         "data_hub": data_hub,
     }
+    if "all_employees_update" in intents:
+        context["all_employees_update"] = await _all_employees_update_context(session, period)
     if "employee_update" in intents and employee:
         context["employee_update"] = await _employee_update_context(session, employee, period)
+    if "attendance_detail" in intents:
+        context["attendance_detail"] = await _attendance_detail_context(session, period, employee)
+    if "compensation_detail" in intents:
+        context["compensation_detail"] = await _compensation_detail_context(session, period, employee)
     if "lead_stats" in intents:
         context["lead_stats"] = await _lead_stats_context(session, period, customer_type)
     if "customer_detail" in intents and customer_match:
@@ -1241,6 +1509,41 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
 
 def build_cims_ai_fallback_answer(context: dict[str, Any]) -> str:
     out: list[str] = []
+
+    all_employees = context.get("all_employees_update")
+    if all_employees:
+        out.append(
+            f"{all_employees['period']['label']} davrida {all_employees['total_employees']} ta xodim bo'yicha "
+            f"o'rtacha update foizi: {all_employees['average_update_percentage']}%."
+        )
+        if all_employees.get("lowest_3"):
+            names = ", ".join(e["full_name"] for e in all_employees["lowest_3"])
+            pcts = ", ".join(f"{e['update_percentage']}%" for e in all_employees["lowest_3"])
+            out.append(f"Eng past update foizli xodimlar: {names} ({pcts}).")
+        if all_employees.get("highest_3"):
+            names = ", ".join(e["full_name"] for e in all_employees["highest_3"])
+            pcts = ", ".join(f"{e['update_percentage']}%" for e in all_employees["highest_3"])
+            out.append(f"Eng yuqori update foizli xodimlar: {names} ({pcts}).")
+
+    attendance = context.get("attendance_detail")
+    if attendance:
+        out.append(
+            f"{attendance['period']['label']} davrida {attendance['total_records']} ta davomat yozuvi, "
+            f"shundan {attendance['completed_records']} tasi to'liq (check-in + check-out)."
+        )
+
+    compensation = context.get("compensation_detail")
+    if compensation:
+        out.append(
+            f"{compensation['period']['label']} davrida {compensation['mistakes_count']} ta xato "
+            f"va {compensation['bonuses_count']} ta bonus yozuvi mavjud."
+        )
+        if compensation["mistakes"]:
+            out.append(
+                "So'nggi xatolar: " +
+                "; ".join(f"{m['employee']} — {m['title']} ({m['severity']})" for m in compensation["mistakes"][:3])
+            )
+
     employee_update = context.get("employee_update")
     if employee_update:
         report = employee_update.get("monthly_report_summary")
@@ -1334,6 +1637,88 @@ def build_cims_ai_fallback_answer(context: dict[str, Any]) -> str:
     return "\n".join(out) if out else "Savol bo'yicha yetarli analytics context topilmadi."
 
 
+def _chat_completions_text(payload: dict) -> Optional[str]:
+    """Standard OpenAI chat/completions formatidan javob matnini olish."""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    msg = choices[0].get("message") or {}
+    content = msg.get("content")
+    return content.strip() if isinstance(content, str) and content.strip() else None
+
+
+def _extract_any_response_text(payload: dict) -> Optional[str]:
+    """Responses API va Chat Completions API ikkalasini ham qo'llab-quvvatlaydi."""
+    return _extract_response_text(payload) or _chat_completions_text(payload)
+
+
+async def _call_llm(
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+    system: str,
+    user: str,
+    temperature: float = 0.2,
+    max_tokens: int = 700,
+    timeout: float = 35.0,
+) -> Optional[str]:
+    """
+    Standard OpenAI chat/completions formatida so'rov yuboradi.
+    Responses API (`/responses`) emas, `/chat/completions` ishlatiladi —
+    bu barcha OpenAI-compatible provayderlar bilan ishlaydi.
+    """
+    payload = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            if response.status_code != 200:
+                print(f"[cims-ai] LLM API xato {response.status_code}: {response.text[:300]}", flush=True)
+                return None
+            return _extract_any_response_text(response.json())
+    except Exception as exc:
+        print(f"[cims-ai] LLM chaqirishda xato: {exc}", flush=True)
+        return None
+
+
+def _trim_context_for_llm(context: dict[str, Any], max_chars: int = 8000) -> str:
+    """
+    Context JSON ni LLM ga yuborishdan oldin hajmini cheklaydi.
+    Katta listlarni qisqartiradi (employees, cards, notes...).
+    """
+    trimmed = {}
+    for key, value in context.items():
+        if key == "data_hub":
+            continue  # data_hub allaqachon boshqa contextlarda aks etgan
+        if isinstance(value, dict):
+            inner = {}
+            for k, v in value.items():
+                if isinstance(v, list) and len(v) > 10:
+                    inner[k] = v[:10]
+                    inner[f"{k}__truncated"] = True
+                else:
+                    inner[k] = v
+            trimmed[key] = inner
+        elif isinstance(value, list) and len(value) > 10:
+            trimmed[key] = value[:10]
+        else:
+            trimmed[key] = value
+    serialized = json.dumps(trimmed, ensure_ascii=False, default=str)
+    if len(serialized) > max_chars:
+        serialized = serialized[:max_chars] + "\n... [context qisqartirildi]"
+    return serialized
+
+
 async def _generate_sql_analytics(
     session: AsyncSession,
     question: str,
@@ -1349,37 +1734,44 @@ async def _generate_sql_analytics(
         for item in (history or [])[-4:]
         if item.get("content")
     ) or "yoq"
-    prompt = (
+
+    ENCRYPTED_NOTE = (
+        "MUHIM: customer jadvalidagi full_name va phone_number ustunlari SHIFRLANGAN (encrypt qilingan). "
+        "Bu ustunlarni WHERE yoki SELECT da ishlatma — ular foydasiz qiymat qaytaradi. "
+        "Faqat platform, username, status, status_name, assistant_name, created_at, type, recall_time kabi "
+        "encrypt qilinmagan ustunlardan foydalanish mumkin."
+    )
+
+    system_prompt = (
         "Siz CIMS analytics SQL generator siz. Faqat PostgreSQL uchun bitta xavfsiz SELECT yoki WITH query yozing. "
         "Hech qachon INSERT/UPDATE/DELETE/DDL yozmang. Faqat quyidagi jadvallar va ustunlardan foydalaning.\n"
         f"{_schema_brief()}\n\n"
-        f"Savol: {question}\n"
-        f"Oldingi chat: {history_text}\n"
-        f"Oldindan yig'ilgan context: {json.dumps(context, ensure_ascii=False, default=str)}\n\n"
+        f"{ENCRYPTED_NOTE}\n\n"
         "JSON formatda javob bering: "
         '{"sql":"...","reason":"qisqa sabab","should_run":true}. '
-        "Agar SQL kerak bo'lmasa should_run false qiling."
+        "Agar SQL kerak bo'lmasa yoki savol allaqachon contextda javob bo'lsa should_run=false qiling."
     )
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "max_output_tokens": 500,
-        "input": [
-            {"role": "user", "content": [{"type": "input_text", "text": prompt}]}
-        ],
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    user_text = (
+        f"Savol: {question}\n"
+        f"Oldingi chat: {history_text}\n"
+        f"Oldindan yig'ilgan context (qisqa): {_trim_context_for_llm(context, max_chars=3000)}"
+    )
+
+    raw = await _call_llm(
+        api_key=api_key, model=model, base_url=base_url,
+        system=system_prompt, user=user_text,
+        temperature=0, max_tokens=400, timeout=25.0,
+    )
+    if not raw:
+        return None
+    parsed = _extract_json_object(raw)
+    if not parsed or not parsed.get("should_run"):
+        return None
+    sql = str(parsed.get("sql") or "").strip()
+    if not _is_safe_select_sql(sql):
+        print(f"[cims-ai] Xavfli SQL rad etildi: {sql[:200]}", flush=True)
+        return None
     try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            response = await client.post(f"{base_url.rstrip('/')}/responses", json=payload, headers=headers)
-            response.raise_for_status()
-            raw = _extract_response_text(response.json())
-        parsed = _extract_json_object(raw or "")
-        if not parsed or not parsed.get("should_run"):
-            return None
-        sql = str(parsed.get("sql") or "").strip()
-        if not _is_safe_select_sql(sql):
-            return None
         result = await session.execute(text(sql))
         rows = result.mappings().all()
         preview = [dict(row) for row in rows[:50]]
@@ -1389,7 +1781,8 @@ async def _generate_sql_analytics(
             "row_count": len(rows),
             "rows_preview": preview,
         }
-    except Exception:
+    except Exception as exc:
+        print(f"[cims-ai] SQL ijro xatosi: {exc}", flush=True)
         return None
 
 
@@ -1404,43 +1797,44 @@ async def generate_cims_ai_answer(
     base_url = os.getenv("OPENAI_BASE_URL", OPENAI_BASE_URL)
     fallback = build_cims_ai_fallback_answer(context)
     if not api_key:
+        print("[cims-ai] OPENAI_API_KEY sozlanmagan, fallback qaytarilmoqda", flush=True)
         return fallback, False
+
     sql_analytics = None
     if _should_run_sql_analytics(question, context):
         sql_analytics = await _generate_sql_analytics(
-            session,
-            question,
-            context,
-            history,
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
+            session, question, context, history,
+            api_key=api_key, model=model, base_url=base_url,
         )
     if sql_analytics:
         context["sql_analytics"] = sql_analytics
-    history_text = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in (history or [])[-6:] if item.get("content")) or "yoq"
+
+    history_text = "\n".join(
+        f"{item.get('role', 'user')}: {item.get('content', '')}"
+        for item in (history or [])[-6:]
+        if item.get("content")
+    ) or "yoq"
+
     system_prompt = (
         "Siz CIMS AI analytics agent siz. Faqat berilgan CIMS context asosida javob bering. "
         "O'zbek tilida aniq raqamlar bilan yozing. Bir nechta savol bo'lsa, hammasiga javob bering. "
-        "Ma'lumot yetmasa buni aniq ayting. Agar contextda customer notes bo'lsa, ularni o'qib amaliy xulosa va sotuv bo'yicha tavsiya bering. "
-        "Faqat statistikani sanab chiqish bilan cheklanib qolmang: kerak bo'lsa 2-5 ta aniq action point bering. "
-        "Xom DB iboralarini ishlatmang, masalan `unique customer` o'rniga oddiy biznes tilida yozing."
+        "Ma'lumot yetmasa buni aniq ayting. Agar contextda customer notes bo'lsa, ularni o'qib amaliy "
+        "xulosa va sotuv bo'yicha tavsiya bering. "
+        "Faqat statistikani sanab chiqish bilan cheklanib qolmang — kerak bo'lsa 2-5 ta aniq action point bering. "
+        "Xom DB iboralarini ishlatmang: masalan 'unique customer' o'rniga 'alohida mijoz' deb yozing."
     )
     user_prompt = (
         f"Savol: {question}\n\n"
         f"Oldingi chat:\n{history_text}\n\n"
-        f"CIMS context:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
-        "Endi foydalanuvchiga ishonchli, qisqa, tahlilli va kerak bo'lsa amaliy tavsiyali javob yozing."
+        f"CIMS context:\n{_trim_context_for_llm(context, max_chars=8000)}\n\n"
+        "Foydalanuvchiga ishonchli, qisqa, tahlilli va amaliy tavsiyali javob yozing."
     )
-    payload = {"model": model, "temperature": 0.2, "max_output_tokens": 700, "input": [{"role": "system", "content": [{"type": "input_text", "text": system_prompt}]}, {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}]}
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    try:
-        async with httpx.AsyncClient(timeout=35.0) as client:
-            response = await client.post(f"{base_url.rstrip('/')}/responses", json=payload, headers=headers)
-            response.raise_for_status()
-            text = _extract_response_text(response.json())
-            if text:
-                return text.strip(), True
-    except Exception:
-        pass
+
+    answer_text = await _call_llm(
+        api_key=api_key, model=model, base_url=base_url,
+        system=system_prompt, user=user_prompt,
+        temperature=0.2, max_tokens=700, timeout=35.0,
+    )
+    if answer_text:
+        return answer_text, True
     return fallback, False

@@ -22,7 +22,9 @@ from routers.recall_bot import router as recall_bot_router
 from routers.projects import router as projects_router
 from routers.ai_chat import router as ai_chat_router
 from routers.attendance import router as attendance_router
+from routers.audit import router as audit_router
 from utils.file_storage import IMAGES_ROOT, ensure_image_directories
+from uuid import uuid4
 
 from fastapi.responses import JSONResponse
 
@@ -56,6 +58,14 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def attach_request_id(request: Request, call_next):
+    request.state.request_id = str(uuid4())
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
+
+
 # --------------------------------------------------
 # ROUTERS
 # --------------------------------------------------
@@ -76,6 +86,7 @@ app.include_router(recall_bot_router)
 app.include_router(projects_router)
 app.include_router(ai_chat_router)
 app.include_router(attendance_router)
+app.include_router(audit_router)
 
 
 # --------------------------------------------------

@@ -2,7 +2,7 @@
 CRM Sales Manager Extension
 Sales Manager assignment and conversion rate tracking
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, insert, update, delete, func, desc, and_, or_
 from datetime import datetime, date, timezone, timedelta
@@ -25,6 +25,7 @@ from schemes.schemes_management import (
     SalesManagerInfo,
     ConversionRateResponse
 )
+from utils.audit import log_audit_event
 
 router = APIRouter(prefix="/crm", tags=["CRM - Sales Manager"])
 UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
@@ -106,14 +107,30 @@ async def auto_assign_sales_manager(customer_id: int, session: AsyncSession) -> 
     sales_manager_id = await get_next_sales_manager(session)
 
     # Create assignment
-    await session.execute(
+    result = await session.execute(
         insert(sales_manager_assignment).values(
             customer_id=customer_id,
             sales_manager_id=sales_manager_id,
             assigned_at=datetime.utcnow(),
             assigned_by=None,  # Auto-assigned
             is_active=True
-        )
+        ).returning(sales_manager_assignment.c.id)
+    )
+    assignment_id = result.scalar_one()
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="sales_manager_assignment",
+        entity_type="sales_manager_assignment",
+        entity_id=assignment_id,
+        action="auto_assign",
+        summary=f"Customer {customer_id} auto-assign qilindi sales manager {sales_manager_id} ga",
+        after_data={
+            "customer_id": customer_id,
+            "sales_manager_id": sales_manager_id,
+            "assigned_by": None,
+        },
+        is_system_action=True,
     )
     await session.commit()
 
@@ -171,6 +188,7 @@ async def get_sales_managers(
 @router.post("/assign-sales-manager", response_model=SalesManagerAssignmentResponse, summary="Sales Manager assign qilish")
 async def assign_sales_manager_to_customer(
     assignment_data: SalesManagerAssignmentCreate,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
@@ -213,6 +231,13 @@ async def assign_sales_manager_to_customer(
 
     if existing_assignment:
         # Update existing assignment
+        before_data = {
+            "id": existing_assignment.id,
+            "customer_id": existing_assignment.customer_id,
+            "sales_manager_id": existing_assignment.sales_manager_id,
+            "assigned_by": existing_assignment.assigned_by,
+            "is_active": existing_assignment.is_active,
+        }
         await session.execute(
             update(sales_manager_assignment)
             .where(sales_manager_assignment.c.id == existing_assignment.id)
@@ -221,6 +246,25 @@ async def assign_sales_manager_to_customer(
                 assigned_by=current_user.id,
                 assigned_at=datetime.utcnow()
             )
+        )
+        await log_audit_event(
+            session,
+            module="crm",
+            table_name="sales_manager_assignment",
+            entity_type="sales_manager_assignment",
+            entity_id=existing_assignment.id,
+            action="reassign",
+            summary=f"Customer {assignment_data.customer_id} boshqa sales managerga o'tkazildi",
+            actor_user=current_user,
+            request=request,
+            before_data=before_data,
+            after_data={
+                "id": existing_assignment.id,
+                "customer_id": assignment_data.customer_id,
+                "sales_manager_id": assignment_data.sales_manager_id,
+                "assigned_by": current_user.id,
+                "is_active": True,
+            },
         )
         await session.commit()
 
@@ -243,8 +287,26 @@ async def assign_sales_manager_to_customer(
         ).returning(sales_manager_assignment)
 
         result = await session.execute(insert_stmt)
-        await session.commit()
         new_assignment = result.fetchone()
+        await log_audit_event(
+            session,
+            module="crm",
+            table_name="sales_manager_assignment",
+            entity_type="sales_manager_assignment",
+            entity_id=new_assignment.id,
+            action="assign",
+            summary=f"Customer {assignment_data.customer_id} sales managerga assign qilindi",
+            actor_user=current_user,
+            request=request,
+            after_data={
+                "id": new_assignment.id,
+                "customer_id": new_assignment.customer_id,
+                "sales_manager_id": new_assignment.sales_manager_id,
+                "assigned_by": new_assignment.assigned_by,
+                "is_active": new_assignment.is_active,
+            },
+        )
+        await session.commit()
 
         return SalesManagerAssignmentResponse(
             id=new_assignment.id,

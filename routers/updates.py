@@ -34,6 +34,9 @@ from utils.compensation_policy import (
     DEVELOPER_SHARE_PERCENT,
     DELIVERY_BONUS_RATE_BY_TYPE,
     MAX_MONTHLY_DEDUCTION_PERCENT,
+    PRODUCTIVITY_MISSED_UPDATE_STEP_PERCENT,
+    PRODUCTIVITY_PENALTY_PERCENT,
+    PRODUCTIVITY_PENALTY_THRESHOLD_MISSED_UPDATES,
     PRODUCTIVITY_BONUS_FULL_UPDATES,
     QUALITY_BONUS_NO_CLIENT_MISTAKES,
     QUALITY_BONUS_NO_MAJOR_CRITICAL,
@@ -216,6 +219,36 @@ def exclude_pending_today_from_expected_days(expected_days: List[date], submitte
     return [day for day in expected_days if day != today]
 
 
+def calculate_productivity_percent(working_days: int, update_days: int) -> Decimal:
+    if working_days <= 0:
+        return Decimal("0")
+    missed_days = max(working_days - update_days, 0)
+    if missed_days >= PRODUCTIVITY_PENALTY_THRESHOLD_MISSED_UPDATES:
+        return PRODUCTIVITY_PENALTY_PERCENT
+    return max(
+        Decimal("0"),
+        PRODUCTIVITY_BONUS_FULL_UPDATES - (PRODUCTIVITY_MISSED_UPDATE_STEP_PERCENT * Decimal(missed_days)),
+    )
+
+
+def build_productivity_reason(working_days: int, update_days: int, missed_days: int, productivity_percent: Decimal) -> str:
+    if working_days <= 0:
+        return "Bu oy uchun expected ish kunlari topilmadi."
+    if missed_days == 0:
+        return "Barcha expected ish kunlari uchun update topshirilgan."
+    if missed_days >= PRODUCTIVITY_PENALTY_THRESHOLD_MISSED_UPDATES:
+        return (
+            f"{working_days} ish kunidan {update_days} tasi yopilgan, {missed_days} ta update qolgan. "
+            f"{PRODUCTIVITY_PENALTY_THRESHOLD_MISSED_UPDATES} ta yoki undan ko'p missed update uchun "
+            f"{as_money(PRODUCTIVITY_PENALTY_PERCENT)}% penalty qo'llanadi."
+        )
+    return (
+        f"{working_days} ish kunidan {update_days} tasi yopilgan, {missed_days} ta update qolgan. "
+        f"Har missed update uchun {as_money(PRODUCTIVITY_MISSED_UPDATE_STEP_PERCENT)}% kamayadi, "
+        f"yakuniy productivity {as_money(productivity_percent)}%."
+    )
+
+
 async def calculate_monthly_update_coverage(
     session: AsyncSession,
     user_id: int,
@@ -244,11 +277,15 @@ async def calculate_monthly_update_coverage(
     update_days = len(submitted_dates & expected_dates)
     working_days = len(expected_workdays)
     percentage = round((update_days / working_days) * 100, 2) if working_days > 0 else 0.0
+    missed_days = max(working_days - update_days, 0)
+    productivity_percent = calculate_productivity_percent(working_days, update_days)
     return {
         "working_days": working_days,
         "update_days": update_days,
+        "missed_days": missed_days,
         "percentage": percentage,
         "qualifies_productivity_bonus": working_days > 0 and percentage >= 100,
+        "productivity_percent": as_money(productivity_percent),
     }
 
 
@@ -288,11 +325,15 @@ async def calculate_monthly_update_coverage_batch(
         update_days = len(submitted_dates & expected_dates)
         working_days = len(expected_workdays)
         percentage = round((update_days / working_days) * 100, 2) if working_days > 0 else 0.0
+        missed_days = max(working_days - update_days, 0)
+        productivity_percent = calculate_productivity_percent(working_days, update_days)
         result[user_id] = {
             "working_days": working_days,
             "update_days": update_days,
+            "missed_days": missed_days,
             "percentage": percentage,
             "qualifies_productivity_bonus": working_days > 0 and percentage >= 100,
+            "productivity_percent": as_money(productivity_percent),
         }
     return result
 
@@ -322,6 +363,9 @@ def build_policy_payload(base_salary: Decimal | float | int | None) -> dict:
         ],
         "bonus_rates": {
             "productivity_full_updates_percent": as_money(PRODUCTIVITY_BONUS_FULL_UPDATES),
+            "productivity_step_percent_per_missed_update": as_money(PRODUCTIVITY_MISSED_UPDATE_STEP_PERCENT),
+            "productivity_penalty_threshold_missed_updates": PRODUCTIVITY_PENALTY_THRESHOLD_MISSED_UPDATES,
+            "productivity_penalty_percent": as_money(PRODUCTIVITY_PENALTY_PERCENT),
             "quality_no_client_mistakes_percent": as_money(QUALITY_BONUS_NO_CLIENT_MISTAKES),
             "quality_no_major_critical_percent": as_money(QUALITY_BONUS_NO_MAJOR_CRITICAL),
             "early_delivery_percent": as_money(DELIVERY_BONUS_RATE_BY_TYPE[CompensationBonusType.early_delivery]),
@@ -329,6 +373,30 @@ def build_policy_payload(base_salary: Decimal | float | int | None) -> dict:
                 DELIVERY_BONUS_RATE_BY_TYPE[CompensationBonusType.major_early_delivery]
             ),
         },
+        "productivity_examples": [
+            {"missed_updates": 0, "percent": as_money(PRODUCTIVITY_BONUS_FULL_UPDATES)},
+            {
+                "missed_updates": 1,
+                "percent": as_money(PRODUCTIVITY_BONUS_FULL_UPDATES - PRODUCTIVITY_MISSED_UPDATE_STEP_PERCENT),
+            },
+            {
+                "missed_updates": 2,
+                "percent": as_money(PRODUCTIVITY_BONUS_FULL_UPDATES - (PRODUCTIVITY_MISSED_UPDATE_STEP_PERCENT * 2)),
+            },
+            {
+                "missed_updates": 3,
+                "percent": as_money(PRODUCTIVITY_BONUS_FULL_UPDATES - (PRODUCTIVITY_MISSED_UPDATE_STEP_PERCENT * 3)),
+            },
+            {
+                "missed_updates": 4,
+                "percent": as_money(PRODUCTIVITY_BONUS_FULL_UPDATES - (PRODUCTIVITY_MISSED_UPDATE_STEP_PERCENT * 4)),
+            },
+            {
+                "missed_updates": PRODUCTIVITY_PENALTY_THRESHOLD_MISSED_UPDATES,
+                "percent": as_money(PRODUCTIVITY_PENALTY_PERCENT),
+                "applies_to": "and above",
+            },
+        ],
         "mistake_categories": [
             {"key": category.name, "value": category.value, "label": CATEGORY_LABELS.get(category, category.value)}
             for category in MistakeCategory
@@ -694,13 +762,25 @@ def build_member_compensation_payload_from_prefetched(
         quality_label = "Quality bonus not applicable"
         quality_reason = "Clientga chiqqan Major yoki Critical mistake mavjud."
 
-    productivity_percent = (
-        PRODUCTIVITY_BONUS_FULL_UPDATES if update_coverage["qualifies_productivity_bonus"] else Decimal("0")
+    productivity_percent = Decimal(
+        str(
+            update_coverage.get(
+                "productivity_percent",
+                as_money(
+                    calculate_productivity_percent(
+                        int(update_coverage.get("working_days", 0)),
+                        int(update_coverage.get("update_days", 0)),
+                    )
+                ),
+            )
+        )
     )
-    productivity_reason = (
-        "Ish kunlari bo'yicha update 100% topshirilgan."
-        if productivity_percent > 0
-        else "Update coverage 100% ga yetmagan."
+    productivity_label = "Update coverage adjustment"
+    productivity_reason = build_productivity_reason(
+        int(update_coverage.get("working_days", 0)),
+        int(update_coverage.get("update_days", 0)),
+        int(update_coverage.get("missed_days", 0)),
+        productivity_percent,
     )
     delivery_percent = Decimal("0")
     selected_delivery_bonus = None
@@ -736,8 +816,8 @@ def build_member_compensation_payload_from_prefetched(
     bonus_lines = [
         {
             "type": "productivity",
-            "label": "100% updates completed",
-            "applied": bool(productivity_percent > 0),
+            "label": productivity_label,
+            "applied": bool(productivity_percent != 0),
             "percent": as_money(productivity_percent),
             "amount": as_money(bonus_amount_from_percent(salary_base, productivity_percent)),
             "reason": productivity_reason,
@@ -781,8 +861,10 @@ def build_member_compensation_payload_from_prefetched(
     ]
     formula_parts = [format_money_uzs(salary_base)]
     for bonus_line in bonus_lines:
+        amount = float(bonus_line["amount"])
+        sign = "+" if amount >= 0 else "-"
         formula_parts.append(
-            f"+ {format_money_uzs(bonus_line['amount'])} ({bonus_line['percent']}% {bonus_line['type']})"
+            f"{sign} {format_money_uzs(abs(amount))} ({bonus_line['percent']}% {bonus_line['type']})"
         )
     for deduction_line in deduction_lines:
         formula_parts.append(
@@ -1378,8 +1460,10 @@ async def get_employee_monthly_update_statistics(
                     {
                         "working_days": 0,
                         "update_days": 0,
+                        "missed_days": 0,
                         "percentage": 0.0,
                         "qualifies_productivity_bonus": False,
+                        "productivity_percent": 0.0,
                     },
                 ),
                 include_details=False,

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks, Header, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from schemes.schemes_auth import *
 from auth_utils.auth_func import *
@@ -10,6 +10,7 @@ from config import VERIFICATION_CODE_EXPIRE_MINUTES, PASSWORD_RESET_EXPIRE_MINUT
 from sqlalchemy import func
 from utils.file_storage import delete_image_if_exists, save_image
 from utils.page_permissions import get_all_pages, get_user_permission_names, normalize_page_name
+from utils.audit import log_audit_event
 router = APIRouter(prefix="/auth",tags=['Autentifikatsiya'])
 from auth_utils.db_code_storage import db_code_storage
 
@@ -186,6 +187,7 @@ async def resend_verification_code(
 @router.post("/login", response_model=TokenWithRefresh, summary="Tizimga kirish")
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
+    request: Request = None,
     session: AsyncSession = Depends(get_async_session),
 ):
     result = await session.execute(select(user).where(user.c.email == form_data.username))
@@ -210,6 +212,19 @@ async def login(
     # Refresh Token (NEW)
     refresh_token_str, refresh_expires_at = create_refresh_token(user_data.id)
     await store_refresh_token(session, user_data.id, refresh_token_str, refresh_expires_at)
+    await log_audit_event(
+        session,
+        module="auth",
+        table_name="user",
+        entity_type="user",
+        entity_id=user_data.id,
+        action="login",
+        summary=f"User tizimga kirdi: {user_data.email}",
+        actor_user=user_data,
+        request=request,
+        after_data={"email": user_data.email},
+    )
+    await session.commit()
 
     return TokenWithRefresh(
         access_token=access_token,
@@ -329,6 +344,7 @@ async def upload_my_profile_image(
 @router.patch("/me/profile-info", response_model=SuccessResponse, summary="Joriy user ism va familiyasini yangilash")
 async def update_my_profile_info(
     payload: MyProfileUpdateRequest,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
@@ -352,6 +368,22 @@ async def update_my_profile_info(
     await session.execute(
         update(user).where(user.c.id == current_user.id).values(**update_values)
     )
+    await log_audit_event(
+        session,
+        module="auth",
+        table_name="user",
+        entity_type="user",
+        entity_id=current_user.id,
+        action="profile_update",
+        summary=f"User profil ma'lumotlari yangilandi: {current_user.email}",
+        actor_user=current_user,
+        request=request,
+        before_data={"name": current_user.name, "surname": current_user.surname},
+        after_data={
+            "name": update_values.get("name", current_user.name),
+            "surname": update_values.get("surname", current_user.surname),
+        },
+    )
     await session.commit()
     return SuccessResponse(message="Profil ma'lumotlari yangilandi")
 
@@ -359,6 +391,7 @@ async def update_my_profile_info(
 @router.patch("/me/password", response_model=SuccessResponse, summary="Joriy user parolini almashtirish")
 async def change_my_password(
     payload: ChangeMyPasswordRequest,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
@@ -374,6 +407,17 @@ async def change_my_password(
         .where(user.c.id == current_user.id)
         .values(password=get_password_hash(new_password))
     )
+    await log_audit_event(
+        session,
+        module="auth",
+        table_name="user",
+        entity_type="user",
+        entity_id=current_user.id,
+        action="password_change",
+        summary=f"User parolini almashtirdi: {current_user.email}",
+        actor_user=current_user,
+        request=request,
+    )
     await session.commit()
     return SuccessResponse(message="Parol yangilandi")
 
@@ -385,6 +429,7 @@ async def update_my_profile(
     current_password: Optional[str] = Form(None),
     new_password: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None),
+    request: Request = None,
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
@@ -429,6 +474,30 @@ async def update_my_profile(
 
     await session.execute(
         update(user).where(user.c.id == current_user.id).values(**update_values)
+    )
+    after_data = {
+        "name": update_values.get("name", current_user.name),
+        "surname": update_values.get("surname", current_user.surname),
+        "profile_image": update_values.get("profile_image", current_user.profile_image),
+    }
+    if "password" in update_values:
+        after_data["password_changed"] = True
+    await log_audit_event(
+        session,
+        module="auth",
+        table_name="user",
+        entity_type="user",
+        entity_id=current_user.id,
+        action="profile_update",
+        summary=f"User profili yangilandi: {current_user.email}",
+        actor_user=current_user,
+        request=request,
+        before_data={
+            "name": current_user.name,
+            "surname": current_user.surname,
+            "profile_image": current_user.profile_image,
+        },
+        after_data=after_data,
     )
     await session.commit()
     return SuccessResponse(message="Profil muvaffaqiyatli yangilandi")
@@ -488,6 +557,7 @@ async def refresh_access_token(
 @router.post("/logout", response_model=SuccessResponse, summary="Logout - refresh tokenni bekor qilish")
 async def logout(
     refresh_request: RefreshTokenRequest,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
@@ -495,12 +565,25 @@ async def logout(
     Logout - refresh tokenni bekor qilish
     """
     await revoke_refresh_token(session, refresh_request.refresh_token)
+    await log_audit_event(
+        session,
+        module="auth",
+        table_name="user",
+        entity_type="user",
+        entity_id=current_user.id,
+        action="logout",
+        summary=f"User tizimdan chiqdi: {current_user.email}",
+        actor_user=current_user,
+        request=request,
+    )
+    await session.commit()
     return SuccessResponse(message="Muvaffaqiyatli chiqildi")
 
 
 # 10. LOGOUT ALL DEVICES (NEW)
 @router.post("/logout-all", response_model=SuccessResponse, summary="Barcha qurilmalardan chiqish")
 async def logout_all_devices(
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user)
 ):
@@ -508,6 +591,18 @@ async def logout_all_devices(
     Barcha qurilmalardan chiqish - barcha refresh tokenlarni bekor qilish
     """
     await revoke_all_user_tokens(session, current_user.id)
+    await log_audit_event(
+        session,
+        module="auth",
+        table_name="user",
+        entity_type="user",
+        entity_id=current_user.id,
+        action="logout_all",
+        summary=f"User barcha qurilmalardan chiqdi: {current_user.email}",
+        actor_user=current_user,
+        request=request,
+    )
+    await session.commit()
     return SuccessResponse(message="Barcha qurilmalardan muvaffaqiyatli chiqildi")
 
 

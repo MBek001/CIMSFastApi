@@ -35,12 +35,25 @@ def calendar_sync_enabled() -> bool:
     return GOOGLE_CALENDAR_SYNC_ENABLED
 
 
+def _strip_wrapping_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
 def _load_service_account_credentials() -> dict[str, Any]:
+    errors: list[str] = []
+
     if GOOGLE_SERVICE_ACCOUNT_JSON:
-        return json.loads(GOOGLE_SERVICE_ACCOUNT_JSON.replace("\\n", "\n"))
+        try:
+            raw_json = _strip_wrapping_quotes(GOOGLE_SERVICE_ACCOUNT_JSON)
+            return json.loads(raw_json.replace("\\n", "\n"))
+        except Exception as exc:
+            errors.append(f"GOOGLE_SERVICE_ACCOUNT_JSON parse error: {exc}")
 
     if GOOGLE_SERVICE_ACCOUNT_FILE:
-        raw_path = GOOGLE_SERVICE_ACCOUNT_FILE.strip()
+        raw_path = _strip_wrapping_quotes(GOOGLE_SERVICE_ACCOUNT_FILE)
         path_candidates = [
             Path(raw_path),
             Path.cwd() / raw_path,
@@ -57,12 +70,23 @@ def _load_service_account_credentials() -> dict[str, Any]:
             if candidate_str not in checked_paths:
                 checked_paths.append(candidate_str)
             if candidate.exists():
-                return json.loads(candidate.read_text(encoding="utf-8"))
+                try:
+                    return json.loads(candidate.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    errors.append(
+                        "GOOGLE_SERVICE_ACCOUNT_FILE JSON parse error: "
+                        f"path={candidate_str!r}, error={exc}"
+                    )
+                    break
 
-        raise RuntimeError(
-            "Google service account credentials topilmadi. "
-            f"GOOGLE_SERVICE_ACCOUNT_FILE={raw_path!r}, checked_paths={checked_paths}"
-        )
+        if not errors or not any("GOOGLE_SERVICE_ACCOUNT_FILE" in error for error in errors):
+            errors.append(
+                "Google service account credentials topilmadi. "
+                f"GOOGLE_SERVICE_ACCOUNT_FILE={raw_path!r}, checked_paths={checked_paths}"
+            )
+
+    if errors:
+        raise RuntimeError("; ".join(errors))
 
     raise RuntimeError("Google service account credentials sozlanmagan")
 

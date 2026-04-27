@@ -90,13 +90,49 @@ customer = Table(
     Column("status_name", String(100), nullable=True),  # NEW: Dynamic status from customer_status table (optional, for custom statuses)
     Column("type", Enum(CustomerType), nullable=True, default=None),  # NEW: Customer type (local/international)
     Column("assistant_name", String(255), nullable=True),
+    Column("chat_url", String(1000), nullable=True),
     Column("notes", Text, nullable=True),
     Column("aisummary", Text, nullable=True),
     Column("audio_file_id", String(500), nullable=True),  # Telegram file ID
     Column("audio_url", String(1000), nullable=True),     # (agar kerak bo'lsa)
     Column("recall_time", DateTime, nullable=True),       # Follow-up eslatma vaqti
     Column("conversation_language", Enum(ConversationLanguage), nullable=True, default=ConversationLanguage.UZ),
-    Column("created_at", DateTime, nullable=False)
+    Column("created_at", DateTime, nullable=False),
+    Column("is_archived", Boolean, nullable=True, default=None),
+)
+
+customer_note = Table(
+    "customer_note",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("customer_id", Integer, ForeignKey("customer.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("note", Text, nullable=False),
+    Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+)
+
+audit_log = Table(
+    "audit_log",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow, index=True),
+    Column("actor_user_id", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True),
+    Column("actor_email", String(255), nullable=True),
+    Column("actor_name", String(255), nullable=True),
+    Column("module", String(100), nullable=False, index=True),
+    Column("table_name", String(100), nullable=False),
+    Column("entity_type", String(100), nullable=False, index=True),
+    Column("entity_id", String(100), nullable=True, index=True),
+    Column("action", String(100), nullable=False, index=True),
+    Column("summary", Text, nullable=True),
+    Column("before_data", Text, nullable=True),
+    Column("after_data", Text, nullable=True),
+    Column("changed_fields", Text, nullable=True),
+    Column("request_id", String(100), nullable=True),
+    Column("ip_address", String(100), nullable=True),
+    Column("user_agent", String(1000), nullable=True),
+    Column("is_system_action", Boolean, nullable=False, default=False),
 )
 
 # 4. Finance table
@@ -133,7 +169,7 @@ exchange_rate = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("usd_to_uzs", DECIMAL(15, 2), default=12700.00),
-    Column("updated_at", DateTime, nullable=False)
+    Column("ated_at", DateTime, nullable=False)
 )
 
 # 7. Dynamic Customer Status table (NEW)

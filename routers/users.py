@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File
 from sqlalchemy import select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, date, time
@@ -24,6 +24,7 @@ from utils.page_permissions import (
     get_user_permission_names,
     validate_page_names,
 )
+from utils.audit import log_audit_event
 
 from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
 from models.user_models import  user_payment
@@ -31,6 +32,26 @@ from  models.admin_models import customer,CustomerStatus, company_recurring_paym
 from routers.finance import  get_db_exchange_rate,calculate_card_balances
 
 router = APIRouter(prefix="/ceo", tags=['CEO Dashboard'])
+
+
+def _serialize_user_for_audit(row) -> dict:
+    return {
+        "id": row.id,
+        "email": row.email,
+        "name": row.name,
+        "surname": row.surname,
+        "company_code": row.company_code,
+        "telegram_id": row.telegram_id,
+        "default_salary": float(row.default_salary or 0),
+        "role": getattr(getattr(row, "role", None), "value", getattr(row, "role", None)),
+        "role_name": getattr(row, "role_name", None),
+        "job_title": row.job_title,
+        "profile_image": row.profile_image,
+        "is_active": bool(row.is_active),
+        "is_admin": bool(getattr(row, "is_admin", False)),
+        "is_staff": bool(getattr(row, "is_staff", False)),
+        "is_superuser": bool(getattr(row, "is_superuser", False)),
+    }
 
 
 def _resolve_next_company_payment_occurrence(payment_day: int, payment_time: time) -> datetime:
@@ -333,6 +354,7 @@ session: AsyncSession = Depends(get_async_session),
 @router.post("/users", response_model=CreateResponse, summary="Yangi user yaratish")
 async def create_user(
         user_data: UserCreateRequest,
+        request: Request,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
@@ -382,6 +404,23 @@ async def create_user(
         else:
             raise
 
+    created_user_result = await session.execute(select(user).where(user.c.id == result.inserted_primary_key[0]))
+    created_user = created_user_result.fetchone()
+    if created_user:
+        await log_audit_event(
+            session,
+            module="users",
+            table_name="user",
+            entity_type="user",
+            entity_id=created_user.id,
+            action="create",
+            summary=f"User yaratildi: {created_user.email}",
+            actor_user=current_user,
+            request=request,
+            after_data=_serialize_user_for_audit(created_user),
+        )
+        await session.commit()
+
     return CreateResponse(
         message="Foydalanuvchi muvaffaqiyatli yaratildi",
         id=result.inserted_primary_key[0]
@@ -393,6 +432,7 @@ async def create_user(
 async def update_user(
         user_id: int,
         user_data: UserUpdateRequest,
+        request: Request,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
@@ -410,6 +450,7 @@ async def update_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Foydalanuvchi topilmadi"
         )
+    before_snapshot = _serialize_user_for_audit(existing_user)
 
     # Yangilanadigan ma'lumotlarni tayyorlash
     update_data = {}
@@ -450,6 +491,24 @@ async def update_user(
         else:
             raise
 
+    updated_user_result = await session.execute(select(user).where(user.c.id == user_id))
+    updated_user = updated_user_result.fetchone()
+    if updated_user:
+        await log_audit_event(
+            session,
+            module="users",
+            table_name="user",
+            entity_type="user",
+            entity_id=user_id,
+            action="update",
+            summary=f"User yangilandi: {updated_user.email}",
+            actor_user=current_user,
+            request=request,
+            before_data=before_snapshot,
+            after_data=_serialize_user_for_audit(updated_user),
+        )
+        await session.commit()
+
     return SuccessResponse(message="Foydalanuvchi muvaffaqiyatli yangilandi")
 
 
@@ -486,6 +545,7 @@ async def upload_user_profile_image(
 @router.delete("/users/{user_id}", response_model=SuccessResponse, summary="User o'chirish")
 async def delete_user(
         user_id: int,
+        request: Request,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
@@ -503,9 +563,22 @@ async def delete_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Foydalanuvchi topilmadi"
         )
+    before_snapshot = _serialize_user_for_audit(existing_user)
 
     # User o'chirish
     await session.execute(delete(user).where(user.c.id == user_id))
+    await log_audit_event(
+        session,
+        module="users",
+        table_name="user",
+        entity_type="user",
+        entity_id=user_id,
+        action="delete",
+        summary=f"User o'chirildi: {existing_user.email}",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+    )
     await session.commit()
 
     return SuccessResponse(message=f"Foydalanuvchi {existing_user.email} muvaffaqiyatli o'chirildi")
@@ -516,6 +589,7 @@ async def delete_user(
               summary="User active/inactive toggle")
 async def toggle_user_active(
         user_id: int,
+        request: Request,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
@@ -533,11 +607,27 @@ async def toggle_user_active(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Foydalanuvchi topilmadi"
         )
+    before_snapshot = _serialize_user_for_audit(user_data)
 
     # Active holatini o'zgartirish
     new_active_status = not user_data.is_active
     await session.execute(
         update(user).where(user.c.id == user_id).values(is_active=new_active_status)
+    )
+    after_snapshot = dict(before_snapshot)
+    after_snapshot["is_active"] = bool(new_active_status)
+    await log_audit_event(
+        session,
+        module="users",
+        table_name="user",
+        entity_type="user",
+        entity_id=user_id,
+        action="toggle_active",
+        summary=f"User active holati o'zgardi: {user_data.email} -> {new_active_status}",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+        after_data=after_snapshot,
     )
     await session.commit()
 

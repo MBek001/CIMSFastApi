@@ -3,18 +3,21 @@ from sqlalchemy import select, insert, update, delete, func, desc, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone, date
 from typing import List, Optional
+import traceback
 from sqlalchemy.sql.expression import cast
 from sqlalchemy.sql.sqltypes import String
 from utils.crypto import decrypt_text
+from fastapi import Request
 from fastapi.responses import RedirectResponse
 from telegram.error import TelegramError
 # Import qilinadigan modellar
-from models.admin_models import customer, CustomerStatus, CustomerType, customer_status_change_log
-from models.user_models import user_page_permission, PageName
+from models.admin_models import customer, customer_note, CustomerStatus, CustomerType, customer_status_change_log
+from models.user_models import user, user_page_permission, PageName
 from schemes.crm_schemes import (
 CustomerResponse,
     CustomerListResponse, CustomerStatsResponse, SuccessResponse,
     CreateResponse, CustomerDeleteRequest, ConversationLanguageEnum,
+    CustomerNoteCreateRequest, CustomerNoteListResponse, CustomerNoteResponse, CustomerNoteUpdateRequest,
     CustomerPeriodReportResponse, CRMPeriodStatusStats, CRMPeriodicStatusSummaryResponse
 )
 from datetime import timedelta
@@ -31,6 +34,7 @@ from utils.page_permissions import (
     get_all_pages,
     get_user_permission_names,
 )
+from utils.audit import log_audit_event
 from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram, validate_audio_file
 from utils.ai_summary import generate_customer_ai_summary, infer_recall_time_from_notes_ai
 from utils.google_calendar import sync_customer_recall_event, delete_customer_recall_event
@@ -149,6 +153,7 @@ async def _sync_customer_calendar_best_effort(customer_data: dict) -> None:
             f"[google-calendar-sync] customer_id={customer_data.get('id')} sync error: {exc}",
             flush=True,
         )
+        print(traceback.format_exc(), flush=True)
 
 
 async def _delete_customer_calendar_best_effort(customer_id: int) -> None:
@@ -156,6 +161,7 @@ async def _delete_customer_calendar_best_effort(customer_id: int) -> None:
         await delete_customer_recall_event(customer_id)
     except Exception as exc:
         print(f"[google-calendar-sync] customer_id={customer_id} delete error: {exc}", flush=True)
+        print(traceback.format_exc(), flush=True)
 
 
 async def _log_customer_status_change(
@@ -184,6 +190,107 @@ async def _log_customer_status_change(
         pass
 
 
+async def _ensure_crm_page_access(session: AsyncSession, current_user, detail: str) -> None:
+    permissions_result = await session.execute(
+        select(user_page_permission.c.page_name).where(
+            user_page_permission.c.user_id == current_user.id,
+            user_page_permission.c.page_name == PageName.crm.value,
+        )
+    )
+    if not permissions_result.fetchone() and current_user.company_code != "ceo":
+        raise HTTPException(status_code=403, detail=detail)
+
+
+async def _ensure_customer_exists(session: AsyncSession, customer_id: int, current_user=None):
+    result = await session.execute(select(customer).where(customer.c.id == customer_id))
+    existing_customer = result.fetchone()
+    if not existing_customer:
+        raise HTTPException(status_code=404, detail="Mijoz topilmadi")
+    if current_user is not None and getattr(existing_customer, "is_archived", None):
+        if current_user.company_code != "ceo":
+            raise HTTPException(status_code=404, detail="Mijoz topilmadi")
+    return existing_customer
+
+
+def _serialize_customer_for_audit(row) -> dict:
+    status_value = None
+    if getattr(row, "status_name", None):
+        status_value = row.status_name
+    elif getattr(row, "status", None) is not None:
+        status_value = getattr(row.status, "value", row.status)
+    customer_type = getattr(row, "type", None)
+    return {
+        "id": row.id,
+        "full_name": _safe_decrypt(row.full_name),
+        "platform": row.platform,
+        "username": row.username,
+        "phone_number": _safe_decrypt(row.phone_number),
+        "status": status_value,
+        "assistant_name": row.assistant_name,
+        "chat_url": getattr(row, "chat_url", None),
+        "notes": row.notes,
+        "aisummary": row.aisummary,
+        "audio_file_id": row.audio_file_id,
+        "recall_time": _from_utc_naive_to_uz_iso(row.recall_time),
+        "conversation_language": getattr(row, "conversation_language", None),
+        "customer_type": getattr(customer_type, "value", customer_type),
+        "created_at": row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+        "is_archived": getattr(row, "is_archived", None),
+    }
+
+
+def _serialize_customer_note(row) -> CustomerNoteResponse:
+    return CustomerNoteResponse(
+        id=row.id,
+        customer_id=row.customer_id,
+        note=row.note,
+        created_by=row.created_by,
+        created_by_full_name=(
+            f"{row.author_name} {row.author_surname}".strip()
+            if getattr(row, "author_name", None) or getattr(row, "author_surname", None)
+            else None
+        ),
+        created_at=row.created_at.isoformat(),
+        updated_at=row.updated_at.isoformat(),
+    )
+
+
+def _serialize_customer_note_for_audit(row) -> dict:
+    return {
+        "id": row.id,
+        "customer_id": row.customer_id,
+        "note": row.note,
+        "created_by": row.created_by,
+        "created_by_full_name": (
+            f"{row.author_name} {row.author_surname}".strip()
+            if getattr(row, "author_name", None) or getattr(row, "author_surname", None)
+            else None
+        ),
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+async def _fetch_customer_note_rows(session: AsyncSession, customer_id: int) -> list:
+    author_user = user.alias("author_user")
+    result = await session.execute(
+        select(
+            customer_note.c.id,
+            customer_note.c.customer_id,
+            customer_note.c.note,
+            customer_note.c.created_by,
+            customer_note.c.created_at,
+            customer_note.c.updated_at,
+            author_user.c.name.label("author_name"),
+            author_user.c.surname.label("author_surname"),
+        )
+        .select_from(customer_note.outerjoin(author_user, customer_note.c.created_by == author_user.c.id))
+        .where(customer_note.c.customer_id == customer_id)
+        .order_by(customer_note.c.created_at.asc(), customer_note.c.id.asc())
+    )
+    return result.fetchall()
+
+
 async def _get_status_stats_for_date_range(
     session: AsyncSession,
     start_date: date,
@@ -203,7 +310,8 @@ async def _get_status_stats_for_date_range(
         ).where(
             and_(
                 customer.c.created_at >= start_utc_naive,
-                customer.c.created_at < end_utc_naive
+                customer.c.created_at < end_utc_naive,
+                customer.c.is_archived.is_not(True)
             )
         )
     )
@@ -247,6 +355,7 @@ async def get_latest_customers(
     """Eng soРІР‚Вnggi qoРІР‚Вshilgan mijozlarni (deshifrlanib) qaytaradi"""
     result = await session.execute(
         select(customer)
+        .where(customer.c.is_archived.is_not(True))
         .order_by(desc(customer.c.created_at))
         .limit(limit)
     )
@@ -270,6 +379,7 @@ async def get_latest_customers(
             phone_number=decrypt_text(c.phone_number),  # СЂСџСџСћ deshifrlanadi
             status=c.status.value,
             assistant_name=c.assistant_name,
+            chat_url=c.chat_url,
             notes=c.notes,
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
@@ -294,17 +404,13 @@ async def get_customer_detail(
     Agar mijoz topilmasa yoki boshqa metod chaqirilsa РІР‚вЂќ hech qachon 405 chiqmaydi.
     """
     try:
-        result = await session.execute(select(customer).where(customer.c.id == customer_id))
-        c = result.fetchone()
-
-        # СЂСџВ§В© Agar mijoz topilmasa
-        if not c:
-            raise HTTPException(status_code=404, detail="Mijoz topilmadi")
+        c = await _ensure_customer_exists(session, customer_id, current_user)
 
         # СЂСџР‹В§ Audio URL (agar mavjud boРІР‚Вlsa)
         audio_url = None
         if c.audio_file_id:
             audio_url = f"https://api.project.cims.cognilabs.org/crm/customers/audio/{c.audio_file_id}"
+        additional_notes = [_serialize_customer_note(row) for row in await _fetch_customer_note_rows(session, customer_id)]
 
         # СЂСџВ§В  Deshifrlangan maРІР‚в„ўlumotlar
         return CustomerResponse(
@@ -315,13 +421,16 @@ async def get_customer_detail(
             phone_number=decrypt_text(c.phone_number),
             status=c.status.value if hasattr(c.status, "value") else c.status,
             assistant_name=c.assistant_name,
+            chat_url=c.chat_url,
             notes=c.notes,
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
             audio_url=audio_url,
             conversation_language=c.conversation_language,
             recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
-            created_at=c.created_at.isoformat()
+            created_at=c.created_at.isoformat(),
+            is_archived=getattr(c, "is_archived", None),
+            additional_notes=additional_notes,
         )
 
     except HTTPException as e:
@@ -334,6 +443,156 @@ async def get_customer_detail(
             detail=f"Server xatosi: {str(e)}"
         )
 
+
+@router.get("/customers/{customer_id}/notes", response_model=CustomerNoteListResponse, summary="Mijozning qo'shimcha note'lari")
+async def list_customer_notes(
+    customer_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access),
+):
+    await _ensure_crm_page_access(session, current_user, "Customer note'larni ko'rish huquqingiz yo'q")
+    await _ensure_customer_exists(session, customer_id, current_user)
+    rows = await _fetch_customer_note_rows(session, customer_id)
+    items = [_serialize_customer_note(row) for row in rows]
+    return CustomerNoteListResponse(customer_id=customer_id, items=items, total_count=len(items))
+
+
+@router.post("/customers/{customer_id}/notes", response_model=CustomerNoteResponse, summary="Mijozga qo'shimcha note qo'shish")
+async def create_customer_note(
+    customer_id: int,
+    payload: CustomerNoteCreateRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access),
+):
+    await _ensure_crm_page_access(session, current_user, "Customer note qo'shish huquqingiz yo'q")
+    await _ensure_customer_exists(session, customer_id, current_user)
+    created_at = _utc_now_naive()
+    result = await session.execute(
+        insert(customer_note)
+        .values(
+            customer_id=customer_id,
+            note=payload.note,
+            created_by=current_user.id,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        .returning(customer_note.c.id)
+    )
+    note_id = result.scalar_one()
+    rows = await _fetch_customer_note_rows(session, customer_id)
+    created_row = next((row for row in rows if row.id == note_id), None)
+    if created_row is None:
+        raise HTTPException(status_code=500, detail="Customer note yaratildi, lekin qayta o'qib bo'lmadi")
+    after_snapshot = _serialize_customer_note_for_audit(created_row)
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer_note",
+        entity_type="customer_note",
+        entity_id=note_id,
+        action="create",
+        summary=f"Customer {customer_id} uchun qo'shimcha note yaratildi",
+        actor_user=current_user,
+        request=request,
+        after_data=after_snapshot,
+    )
+    await session.commit()
+    return _serialize_customer_note(created_row)
+
+
+@router.put("/customers/{customer_id}/notes/{note_id}", response_model=CustomerNoteResponse, summary="Customer note'ni yangilash")
+async def update_customer_note(
+    customer_id: int,
+    note_id: int,
+    payload: CustomerNoteUpdateRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access),
+):
+    await _ensure_crm_page_access(session, current_user, "Customer note'ni yangilash huquqingiz yo'q")
+    await _ensure_customer_exists(session, customer_id, current_user)
+    existing_result = await session.execute(
+        select(customer_note).where(
+            customer_note.c.id == note_id,
+            customer_note.c.customer_id == customer_id,
+        )
+    )
+    existing_note = existing_result.fetchone()
+    if not existing_note:
+        raise HTTPException(status_code=404, detail="Customer note topilmadi")
+    if current_user.company_code != "ceo" and existing_note.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="Siz faqat o'zingiz yozgan notelarni o'zgartira olasiz")
+    existing_rows = await _fetch_customer_note_rows(session, customer_id)
+    existing_note_row = next((row for row in existing_rows if row.id == note_id), None)
+    before_snapshot = _serialize_customer_note_for_audit(existing_note_row) if existing_note_row else None
+    await session.execute(
+        update(customer_note)
+        .where(customer_note.c.id == note_id)
+        .values(note=payload.note, updated_at=_utc_now_naive())
+    )
+    rows = await _fetch_customer_note_rows(session, customer_id)
+    updated_row = next((row for row in rows if row.id == note_id), None)
+    if updated_row is None:
+        raise HTTPException(status_code=500, detail="Customer note yangilandi, lekin qayta o'qib bo'lmadi")
+    after_snapshot = _serialize_customer_note_for_audit(updated_row)
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer_note",
+        entity_type="customer_note",
+        entity_id=note_id,
+        action="update",
+        summary=f"Customer {customer_id} note yangilandi",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+        after_data=after_snapshot,
+    )
+    await session.commit()
+    return _serialize_customer_note(updated_row)
+
+
+@router.delete("/customers/{customer_id}/notes/{note_id}", response_model=SuccessResponse, summary="Customer note'ni o'chirish")
+async def delete_customer_note(
+    customer_id: int,
+    note_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access),
+):
+    await _ensure_crm_page_access(session, current_user, "Customer note'ni o'chirish huquqingiz yo'q")
+    await _ensure_customer_exists(session, customer_id, current_user)
+    existing_rows = await _fetch_customer_note_rows(session, customer_id)
+    existing_note_row = next((row for row in existing_rows if row.id == note_id), None)
+    if existing_note_row is None:
+        raise HTTPException(status_code=404, detail="Customer note topilmadi")
+    if current_user.company_code != "ceo" and existing_note_row.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="Siz faqat o'zingiz yozgan notelarni o'chira olasiz")
+    before_snapshot = _serialize_customer_note_for_audit(existing_note_row)
+    result = await session.execute(
+        delete(customer_note).where(
+            customer_note.c.id == note_id,
+            customer_note.c.customer_id == customer_id,
+        )
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Customer note topilmadi")
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer_note",
+        entity_type="customer_note",
+        entity_id=note_id,
+        action="delete",
+        summary=f"Customer {customer_id} note o'chirildi",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+    )
+    await session.commit()
+    return SuccessResponse(message="Customer note muvaffaqiyatli o'chirildi")
+
 @router.get("/customers/bazakorinish", response_model=List[CustomerResponse], summary="Eng soРІР‚Вnggi mijozlarni olish")
 async def get_latest_customers(
     limit: int = Query(50, ge=1, le=500, description="Qaytariladigan mijozlar soni (default: 50)"),
@@ -343,6 +602,7 @@ async def get_latest_customers(
     """Eng soРІР‚Вnggi qoРІР‚Вshilgan mijozlarni (deshifrlanib) qaytaradi"""
     result = await session.execute(
         select(customer)
+        .where(customer.c.is_archived.is_not(True))
         .order_by(desc(customer.c.created_at))
         .limit(limit)
     )
@@ -359,6 +619,7 @@ async def get_latest_customers(
             phone_number=c.phone_number,  # СЂСџСџСћ deshifrlanadi
             status=c.status.value,
             assistant_name=c.assistant_name,
+            chat_url=c.chat_url,
             notes=c.notes,
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
@@ -400,7 +661,7 @@ async def crm_dashboard(
         )
 
     # СЂСџвЂќв„– Database-dan barcha customerlarni olish (encrypt holda)
-    base_query = select(customer).order_by(desc(customer.c.created_at))
+    base_query = select(customer).where(customer.c.is_archived.is_not(True)).order_by(desc(customer.c.created_at))
     
     # Default holatda rejected customerlar chiqmasin.
     # Faqat status_filter orqali rejected tanlanganda ko'rsatiladi.
@@ -457,13 +718,15 @@ async def crm_dashboard(
             "phone_number": decrypted_phone,
             "status": c.status.value,
             "assistant_name": c.assistant_name,
+            "chat_url": c.chat_url,
             "notes": c.notes,
             "aisummary": c.aisummary,
             "audio_file_id": c.audio_file_id,
             "audio_url": audio_url,
             "conversation_language": c.conversation_language,
             "recall_time": _from_utc_naive_to_uz_iso(c.recall_time),
-            "created_at": c.created_at.isoformat()
+            "created_at": c.created_at.isoformat(),
+            "is_archived": getattr(c, "is_archived", None),
         })
 
     total_items = len(filtered_customers)
@@ -482,12 +745,13 @@ async def crm_dashboard(
             func.count(customer.c.id).filter(customer.c.status == CustomerStatus.continuing).label('continuing'),
             func.count(customer.c.id).filter(customer.c.status == CustomerStatus.finished).label('finished'),
             func.count(customer.c.id).filter(customer.c.status == CustomerStatus.rejected).label('rejected')
-        )
+        ).where(customer.c.is_archived.is_not(True))
     )
     stats = status_stats_result.fetchone()
 
     status_counts_result = await session.execute(
         select(customer.c.status, func.count(customer.c.status).label('count'))
+        .where(customer.c.is_archived.is_not(True))
         .group_by(customer.c.status)
         .order_by(customer.c.status)
     )
@@ -525,7 +789,7 @@ async def crm_dashboard(
             func.count(customer.c.id).filter(customer.c.created_at >= three_months_ago).label("last_3_months"),
             func.count(customer.c.id).filter(customer.c.created_at >= six_months_ago).label("last_6_months"),
             func.count(customer.c.id).filter(customer.c.created_at >= one_year_ago).label("last_year"),
-        )
+        ).where(customer.c.is_archived.is_not(True))
     )
     period_stats = period_stats_result.fetchone()
 
@@ -594,7 +858,7 @@ async def get_periodic_customer_stats(
         func.count(customer.c.id).filter(customer.c.created_at >= three_months_ago).label("last_3_months"),
         func.count(customer.c.id).filter(customer.c.created_at >= six_months_ago).label("last_6_months"),
         func.count(customer.c.id).filter(customer.c.created_at >= one_year_ago).label("last_year")
-    )
+    ).where(customer.c.is_archived.is_not(True))
 
     result = await session.execute(query)
     stats = result.fetchone()
@@ -625,6 +889,7 @@ async def create_customer(
         status: str = Form(...),  # Changed: now accepts string (dynamic status name)
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
+        chat_url: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
         recall_time: Optional[datetime] = Form(
             None,
@@ -634,6 +899,7 @@ async def create_customer(
         customer_type: Optional[str] = Form(None),  # NEW: Customer type (local/international)
         conversation_language: Optional[ConversationLanguageEnum] = Form(ConversationLanguageEnum.UZ),
         audio: Optional[UploadFile] = File(None),
+        request: Request = None,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
@@ -714,6 +980,7 @@ async def create_customer(
             parsed_type = CustomerType.local
 
     ai_summary = await generate_customer_ai_summary(notes)
+    normalized_chat_url = chat_url.strip() if chat_url and chat_url.strip() else None
     created_at_uz = datetime.now(UZBEKISTAN_TZ)
     created_at = created_at_uz.replace(tzinfo=None)
     resolved_recall_time = recall_time
@@ -737,6 +1004,7 @@ async def create_customer(
         "status_name": status_name,  # NEW: Dynamic status name
         "type": parsed_type,  # NEW: Customer type (local/international)
         "assistant_name": assistant_name,
+        "chat_url": normalized_chat_url,
         "notes": notes,
         "aisummary": ai_summary,
         "audio_file_id": audio_file_id,
@@ -746,13 +1014,27 @@ async def create_customer(
     }
 
     result = await session.execute(insert(customer).values(**customer_dict))
-    await session.commit()
     _debug_customer_create(
         "form",
         f"customer inserted id={result.inserted_primary_key[0]} recall_time_saved={customer_dict['recall_time']}"
     )
 
     new_customer_id = result.inserted_primary_key[0]
+    created_customer = await _ensure_customer_exists(session, new_customer_id)
+    after_snapshot = _serialize_customer_for_audit(created_customer)
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer",
+        entity_id=new_customer_id,
+        action="create",
+        summary=f"Lead yaratildi: {after_snapshot['full_name']}",
+        actor_user=current_user,
+        request=request,
+        after_data=after_snapshot,
+    )
+    await session.commit()
 
     # Auto-assign sales manager
     from routers.crm_sales_manager import maybe_auto_assign_sales_manager
@@ -790,6 +1072,7 @@ async def update_customer(
         customer_status: Optional[CustomerStatus] = Form(None),
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
+        chat_url: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
         recall_time: Optional[datetime] = Form(
             None,
@@ -799,6 +1082,7 @@ async def update_customer(
         clear_recall_time: bool = Form(False),
         conversation_language: Optional[ConversationLanguageEnum] = Form(None),
         audio: Optional[UploadFile] = File(None),
+        request: Request = None,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
@@ -830,12 +1114,16 @@ async def update_customer(
             status_code=404,
             detail="Mijoz topilmadi"
         )
+    if getattr(existing_customer, "is_archived", None) and current_user.company_code != "ceo":
+        raise HTTPException(status_code=404, detail="Mijoz topilmadi")
     previous_status = existing_customer.status
     current_full_name = _safe_decrypt(existing_customer.full_name)
     current_phone_number = _safe_decrypt(existing_customer.phone_number)
+    before_snapshot = _serialize_customer_for_audit(existing_customer)
 
     # --- 3. Yangilanadigan ma'lumotlarni tayyorlash ---
     update_data = {}
+    normalized_chat_url = chat_url.strip() if chat_url and chat_url.strip() else None
 
     if full_name is not None:
         update_data["full_name"] = encrypt_text(full_name)
@@ -847,8 +1135,11 @@ async def update_customer(
         update_data["phone_number"] = encrypt_text(phone_number)
     if customer_status is not None:
         update_data["status"] = customer_status
+        update_data["status_name"] = customer_status.value
     if assistant_name is not None:
         update_data["assistant_name"] = assistant_name
+    if chat_url is not None:
+        update_data["chat_url"] = normalized_chat_url
     if notes is not None:
         update_data["notes"] = notes
         update_data["aisummary"] = await generate_customer_ai_summary(notes)
@@ -882,12 +1173,40 @@ async def update_customer(
     await session.execute(
         update(customer).where(customer.c.id == customer_id).values(**update_data)
     )
+    updated_customer = await _ensure_customer_exists(session, customer_id)
+    after_snapshot = _serialize_customer_for_audit(updated_customer)
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer",
+        entity_id=customer_id,
+        action="update",
+        summary=f"Lead yangilandi: {after_snapshot['full_name']}",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+        after_data=after_snapshot,
+    )
     if customer_status is not None:
         await _log_customer_status_change(
             session=session,
             customer_id=customer_id,
             from_status=previous_status,
             to_status=customer_status
+        )
+        await log_audit_event(
+            session,
+            module="crm",
+            table_name="customer",
+            entity_type="customer",
+            entity_id=customer_id,
+            action="status_change",
+            summary=f"Lead status o'zgardi: {before_snapshot['status']} -> {after_snapshot['status']}",
+            actor_user=current_user,
+            request=request,
+            before_data={"status": before_snapshot["status"]},
+            after_data={"status": after_snapshot["status"]},
         )
     await session.commit()
 
@@ -922,6 +1241,7 @@ async def patch_customer(
         customer_status: Optional[CustomerStatus] = Form(None),
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
+        chat_url: Optional[str] = Form(None),
         notes: Optional[str] = Form(None),
         recall_time: Optional[datetime] = Form(
             None,
@@ -931,6 +1251,7 @@ async def patch_customer(
         clear_recall_time: bool = Form(False),
         conversation_language: Optional[ConversationLanguageEnum] = Form(None),
         audio: Optional[UploadFile] = File(None),
+        request: Request = None,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
@@ -953,11 +1274,15 @@ async def patch_customer(
     existing = result.fetchone()
     if not existing:
         raise HTTPException(status_code=404, detail="Mijoz topilmadi")
+    if getattr(existing, "is_archived", None) and current_user.company_code != "ceo":
+        raise HTTPException(status_code=404, detail="Mijoz topilmadi")
     previous_status = existing.status
     current_full_name = _safe_decrypt(existing.full_name)
     current_phone_number = _safe_decrypt(existing.phone_number)
+    before_snapshot = _serialize_customer_for_audit(existing)
 
     update_data = {}
+    normalized_chat_url = chat_url.strip() if chat_url and chat_url.strip() else None
 
     if full_name:
         update_data["full_name"] = encrypt_text(full_name)
@@ -967,10 +1292,13 @@ async def patch_customer(
         update_data["phone_number"] = encrypt_text(phone_number)
     if customer_status:
         update_data["status"] = customer_status
+        update_data["status_name"] = customer_status.value
     if username:
         update_data["username"] = username
     if assistant_name:
         update_data["assistant_name"] = assistant_name
+    if chat_url is not None:
+        update_data["chat_url"] = normalized_chat_url
     if notes is not None:
         update_data["notes"] = notes
         update_data["aisummary"] = await generate_customer_ai_summary(notes)
@@ -998,12 +1326,40 @@ async def patch_customer(
         raise HTTPException(status_code=400, detail="Hech qanday maydon yuborilmadi")
 
     await session.execute(update(customer).where(customer.c.id == customer_id).values(**update_data))
+    updated_customer = await _ensure_customer_exists(session, customer_id)
+    after_snapshot = _serialize_customer_for_audit(updated_customer)
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer",
+        entity_id=customer_id,
+        action="update",
+        summary=f"Lead qisman yangilandi: {after_snapshot['full_name']}",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+        after_data=after_snapshot,
+    )
     if customer_status is not None:
         await _log_customer_status_change(
             session=session,
             customer_id=customer_id,
             from_status=previous_status,
             to_status=customer_status
+        )
+        await log_audit_event(
+            session,
+            module="crm",
+            table_name="customer",
+            entity_type="customer",
+            entity_id=customer_id,
+            action="status_change",
+            summary=f"Lead status o'zgardi: {before_snapshot['status']} -> {after_snapshot['status']}",
+            actor_user=current_user,
+            request=request,
+            before_data={"status": before_snapshot["status"]},
+            after_data={"status": after_snapshot["status"]},
         )
     await session.commit()
 
@@ -1035,6 +1391,7 @@ async def patch_customer(
 @router.delete("/customers/{customer_id}", response_model=SuccessResponse, summary="Mijozni o'chirish")
 async def delete_customer(
         customer_id: int,
+        request: Request,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
@@ -1066,13 +1423,28 @@ async def delete_customer(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Mijoz topilmadi"
         )
+    before_snapshot = _serialize_customer_for_audit(existing_customer)
 
-    # Mijozni o'chirish
-    await session.execute(delete(customer).where(customer.c.id == customer_id))
+    # Soft delete - archive
+    await session.execute(
+        update(customer).where(customer.c.id == customer_id).values(is_archived=True)
+    )
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer",
+        entity_id=customer_id,
+        action="archive",
+        summary=f"Lead arxivlandi: {before_snapshot['full_name']}",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+    )
     await session.commit()
     await _delete_customer_calendar_best_effort(customer_id)
 
-    return SuccessResponse(message=f"Mijoz {existing_customer.full_name} muvaffaqiyatli o'chirildi")
+    return SuccessResponse(message=f"Mijoz {before_snapshot['full_name']} muvaffaqiyatli arxivlandi")
 
 
 from utils.telegram_helper import  bot
@@ -1177,6 +1549,7 @@ async def get_customer_stats(
 @router.delete("/customers/bulk-delete", response_model=SuccessResponse, summary="Ko'p mijozlarni o'chirish")
 async def bulk_delete_customers(
         delete_data: CustomerDeleteRequest,
+        request: Request,
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_crm_access)
 ):
@@ -1203,19 +1576,46 @@ async def bulk_delete_customers(
             detail="O'chiriladigan mijozlar ro'yxati bo'sh"
         )
 
-    # Mijozlarni o'chirish
+    # Soft delete - archive
     customers_result = await session.execute(
-        select(customer.c.id).where(customer.c.id.in_(delete_data.customer_ids))
+        select(customer).where(customer.c.id.in_(delete_data.customer_ids))
     )
-    existing_customer_ids = [row.id for row in customers_result.fetchall()]
+    existing_customers = customers_result.fetchall()
+    existing_customer_ids = [row.id for row in existing_customers]
     await session.execute(
-        delete(customer).where(customer.c.id.in_(delete_data.customer_ids))
+        update(customer).where(customer.c.id.in_(delete_data.customer_ids)).values(is_archived=True)
+    )
+    for existing_customer in existing_customers:
+        before_snapshot = _serialize_customer_for_audit(existing_customer)
+        await log_audit_event(
+            session,
+            module="crm",
+            table_name="customer",
+            entity_type="customer",
+            entity_id=existing_customer.id,
+            action="archive",
+            summary=f"Lead bulk arxivlandi: {before_snapshot['full_name']}",
+            actor_user=current_user,
+            request=request,
+            before_data=before_snapshot,
+        )
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer_bulk",
+        entity_id=None,
+        action="bulk_archive",
+        summary=f"{len(existing_customer_ids)} ta lead bulk arxivlandi",
+        actor_user=current_user,
+        request=request,
+        before_data={"customer_ids": existing_customer_ids},
     )
     await session.commit()
     for customer_id in existing_customer_ids:
         await _delete_customer_calendar_best_effort(customer_id)
 
-    return SuccessResponse(message=f"{len(delete_data.customer_ids)} ta mijoz muvaffaqiyatli o'chirildi")
+    return SuccessResponse(message=f"{len(delete_data.customer_ids)} ta mijoz muvaffaqiyatli arxivlandi")
 
 
 # crm.py fayli boshida
@@ -1261,6 +1661,7 @@ async def create_customer_api(
         "phone_number": encrypt_text(customer_data.phone_number),
         "status": customer_data.status,
         "assistant_name": customer_data.assistant_name,
+        "chat_url": customer_data.chat_url,
         "notes": customer_data.notes,
         "aisummary": ai_summary,
         "recall_time": _to_utc_naive_from_uz(resolved_recall_time),
@@ -1268,13 +1669,27 @@ async def create_customer_api(
     }
 
     result = await session.execute(insert(customer).values(**customer_dict))
-    await session.commit()
     _debug_customer_create(
         "api",
         f"customer inserted id={result.inserted_primary_key[0]} recall_time_saved={customer_dict['recall_time']}"
     )
 
     new_customer_id = result.inserted_primary_key[0]
+    created_customer = await _ensure_customer_exists(session, new_customer_id)
+    after_snapshot = _serialize_customer_for_audit(created_customer)
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer",
+        entity_id=new_customer_id,
+        action="create",
+        summary=f"Lead API orqali yaratildi: {after_snapshot['full_name']}",
+        request=request,
+        after_data=after_snapshot,
+        is_system_action=True,
+    )
+    await session.commit()
     await _sync_customer_calendar_best_effort(
         _calendar_customer_payload(
             new_customer_id,
@@ -1313,7 +1728,7 @@ async def filter_customers_by_status(
         # Filter by status_name (dynamic status) instead of status enum
         result = await session.execute(
             select(customer)
-            .where(customer.c.status_name == status_filter)
+            .where(customer.c.status_name == status_filter, customer.c.is_archived.is_not(True))
             .order_by(desc(customer.c.created_at))
         )
         customers = result.fetchall()
@@ -1330,6 +1745,7 @@ async def filter_customers_by_status(
                 phone_number=decrypt_text(c.phone_number),
                 status=c.status_name or c.status.value,  # Use status_name if available
                 assistant_name=c.assistant_name,
+                chat_url=c.chat_url,
                 notes=c.notes,
                 aisummary=c.aisummary,
                 audio_file_id=c.audio_file_id,
@@ -1356,7 +1772,7 @@ async def filter_customers_by_platform(
     # Platforma nomi bo'yicha filterlash
     result = await session.execute(
         select(customer)
-        .where(func.lower(customer.c.platform) == platform.lower())  # Kichik harflarga o'tkazish
+        .where(func.lower(customer.c.platform) == platform.lower(), customer.c.is_archived.is_not(True))
         .order_by(desc(customer.c.created_at))
     )
     customers = result.fetchall()
@@ -1374,6 +1790,7 @@ async def filter_customers_by_platform(
             phone_number=decrypt_text(c.phone_number),
             status=c.status.value,
             assistant_name=c.assistant_name,
+            chat_url=c.chat_url,
             notes=c.notes,
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
@@ -1487,7 +1904,8 @@ async def customers_period_report(
     base_query = select(customer).where(
         and_(
             customer.c.created_at >= start_utc_naive,
-            customer.c.created_at < end_utc_naive
+            customer.c.created_at < end_utc_naive,
+            customer.c.is_archived.is_not(True)
         )
     )
     if status_filter:
@@ -1527,6 +1945,7 @@ async def customers_period_report(
                 phone_number=decrypted_phone,
                 status=status_key,
                 assistant_name=c.assistant_name,
+                chat_url=c.chat_url,
                 notes=c.notes,
                 aisummary=c.aisummary,
                 audio_file_id=c.audio_file_id,
@@ -1582,7 +2001,8 @@ async def filter_customers_by_date(
         select(customer)
         .where(and_(
             customer.c.created_at >= start_date,
-            customer.c.created_at < end_date + timedelta(days=1)  # 1 kun qo'shish orqali tugash sanasini o'zgartrish
+            customer.c.created_at < end_date + timedelta(days=1),
+            customer.c.is_archived.is_not(True)
         ))
         .order_by(desc(customer.c.created_at))
     )
@@ -1601,6 +2021,7 @@ async def filter_customers_by_date(
             phone_number=decrypt_text(c.phone_number),
             status=c.status.value,
             assistant_name=c.assistant_name,
+            chat_url=c.chat_url,
             notes=c.notes,
             aisummary=c.aisummary,
             audio_file_id=c.audio_file_id,
@@ -1611,4 +2032,159 @@ async def filter_customers_by_date(
         for c in customers
     ]
 
+# ─────────────────────────────────────────────
+# ARCHIVE / RESTORE / HARD-DELETE ENDPOINTS
+# ─────────────────────────────────────────────
 
+def _require_ceo(current_user):
+    if current_user.company_code != "ceo":
+        raise HTTPException(status_code=403, detail="Bu amal faqat CEO uchun ruxsat etilgan")
+
+
+@router.get("/customers/archived", response_model=List[CustomerResponse], summary="Arxivlangan mijozlar (CEO only)")
+async def get_archived_customers(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access),
+):
+    _require_ceo(current_user)
+    result = await session.execute(
+        select(customer)
+        .where(customer.c.is_archived == True)
+        .order_by(desc(customer.c.created_at))
+    )
+    customers_data = result.fetchall()
+    return [
+        CustomerResponse(
+            id=c.id,
+            full_name=_safe_decrypt(c.full_name),
+            platform=c.platform,
+            username=c.username,
+            phone_number=_safe_decrypt(c.phone_number),
+            status=c.status_name or (c.status.value if hasattr(c.status, "value") else c.status),
+            assistant_name=c.assistant_name,
+            chat_url=getattr(c, "chat_url", None),
+            notes=c.notes,
+            aisummary=c.aisummary,
+            audio_file_id=c.audio_file_id,
+            conversation_language=getattr(c, "conversation_language", None),
+            recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
+            created_at=c.created_at.isoformat(),
+            is_archived=True,
+        )
+        for c in customers_data
+    ]
+
+
+@router.post("/customers/{customer_id}/restore", response_model=SuccessResponse, summary="Arxivdan tiklash (CEO only)")
+async def restore_customer(
+    customer_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access),
+):
+    _require_ceo(current_user)
+    result = await session.execute(select(customer).where(customer.c.id == customer_id))
+    existing = result.fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Mijoz topilmadi")
+    if not getattr(existing, "is_archived", None):
+        raise HTTPException(status_code=400, detail="Mijoz arxivlanmagan")
+    before_snapshot = _serialize_customer_for_audit(existing)
+    await session.execute(
+        update(customer).where(customer.c.id == customer_id).values(is_archived=False)
+    )
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer",
+        entity_id=customer_id,
+        action="restore",
+        summary=f"Lead arxivdan tiklandi: {before_snapshot['full_name']}",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+    )
+    await session.commit()
+    return SuccessResponse(message=f"Mijoz {before_snapshot['full_name']} muvaffaqiyatli tiklandi")
+
+
+@router.delete("/customers/{customer_id}/hard", response_model=SuccessResponse, summary="Mijozni butunlay o'chirish (CEO only)")
+async def hard_delete_customer(
+    customer_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access),
+):
+    _require_ceo(current_user)
+    result = await session.execute(select(customer).where(customer.c.id == customer_id))
+    existing = result.fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Mijoz topilmadi")
+    before_snapshot = _serialize_customer_for_audit(existing)
+    await session.execute(delete(customer).where(customer.c.id == customer_id))
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer",
+        entity_id=customer_id,
+        action="hard_delete",
+        summary=f"Lead butunlay o'chirildi: {before_snapshot['full_name']}",
+        actor_user=current_user,
+        request=request,
+        before_data=before_snapshot,
+    )
+    await session.commit()
+    await _delete_customer_calendar_best_effort(customer_id)
+    return SuccessResponse(message=f"Mijoz {before_snapshot['full_name']} butunlay o'chirildi")
+
+
+@router.delete("/customers/bulk-hard-delete", response_model=SuccessResponse, summary="Ko'p mijozlarni butunlay o'chirish (CEO only)")
+async def bulk_hard_delete_customers(
+    delete_data: CustomerDeleteRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_crm_access),
+):
+    _require_ceo(current_user)
+    if not delete_data.customer_ids:
+        raise HTTPException(status_code=400, detail="O'chiriladigan mijozlar ro'yxati bo'sh")
+    customers_result = await session.execute(
+        select(customer).where(customer.c.id.in_(delete_data.customer_ids))
+    )
+    existing_customers = customers_result.fetchall()
+    existing_customer_ids = [row.id for row in existing_customers]
+    await session.execute(
+        delete(customer).where(customer.c.id.in_(delete_data.customer_ids))
+    )
+    for existing_customer in existing_customers:
+        before_snapshot = _serialize_customer_for_audit(existing_customer)
+        await log_audit_event(
+            session,
+            module="crm",
+            table_name="customer",
+            entity_type="customer",
+            entity_id=existing_customer.id,
+            action="hard_delete",
+            summary=f"Lead bulk hard delete qilindi: {before_snapshot['full_name']}",
+            actor_user=current_user,
+            request=request,
+            before_data=before_snapshot,
+        )
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer_bulk",
+        entity_id=None,
+        action="bulk_hard_delete",
+        summary=f"{len(existing_customer_ids)} ta lead bulk hard delete qilindi",
+        actor_user=current_user,
+        request=request,
+        before_data={"customer_ids": existing_customer_ids},
+    )
+    await session.commit()
+    for customer_id in existing_customer_ids:
+        await _delete_customer_calendar_best_effort(customer_id)
+    return SuccessResponse(message=f"{len(existing_customer_ids)} ta mijoz butunlay o'chirildi")
