@@ -30,6 +30,7 @@ class CustomerCreateRequest(BaseModel):
     phone_number: str = Field(..., min_length=1, max_length=20, description="Telefon raqami")
     status: CustomerStatus = Field(..., description="Mijoz holati")
     assistant_name: Optional[str] = Field(None, max_length=255, description="Yordamchi ismi")
+    chat_url: Optional[str] = Field(None, max_length=1000, description="Chat URL")
     notes: Optional[str] = Field(None, description="Qo'shimcha eslatmalar")
     recall_time: Optional[datetime] = Field(
         None,
@@ -53,7 +54,7 @@ class CustomerCreateRequest(BaseModel):
             raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
         return v.strip()
 
-    @validator('username', 'assistant_name')
+    @validator('username', 'assistant_name', 'chat_url')
     def validate_optional_not_empty(cls, v):
         if v is not None and not v.strip():
             raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
@@ -67,6 +68,7 @@ class CustomerUpdateRequest(BaseModel):
     phone_number: Optional[str] = Field(None, min_length=1, max_length=20, description="Telefon raqami")
     status: Optional[CustomerStatus] = Field(None, description="Mijoz holati")
     assistant_name: Optional[str] = Field(None, max_length=255, description="Yordamchi ismi")
+    chat_url: Optional[str] = Field(None, max_length=1000, description="Chat URL")
     notes: Optional[str] = Field(None, description="Qo'shimcha eslatmalar")
     recall_time: Optional[datetime] = Field(
         None,
@@ -75,7 +77,7 @@ class CustomerUpdateRequest(BaseModel):
     )
     conversation_language: Optional[ConversationLanguageEnum] = Field(None, description="Suhbat tili")
 
-    @validator('phone_number', 'full_name', 'platform', 'username', 'assistant_name')
+    @validator('phone_number', 'full_name', 'platform', 'username', 'assistant_name', 'chat_url')
     def validate_not_empty(cls, v):
         if v is not None and not v.strip():
             raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
@@ -84,6 +86,42 @@ class CustomerUpdateRequest(BaseModel):
 
 class CustomerDeleteRequest(BaseModel):
     customer_ids: List[int] = Field(..., min_items=1, description="O'chiriladigan mijozlar ID ro'yxati")
+
+
+class CustomerNoteCreateRequest(BaseModel):
+    note: str = Field(..., min_length=1, description="Customer uchun qo'shimcha note")
+
+    @validator("note")
+    def validate_note(cls, v):
+        if not v.strip():
+            raise ValueError("Note bo'sh bo'lishi mumkin emas")
+        return v.strip()
+
+
+class CustomerNoteUpdateRequest(BaseModel):
+    note: str = Field(..., min_length=1, description="Yangilangan note matni")
+
+    @validator("note")
+    def validate_note(cls, v):
+        if not v.strip():
+            raise ValueError("Note bo'sh bo'lishi mumkin emas")
+        return v.strip()
+
+
+class CustomerNoteResponse(BaseModel):
+    id: int
+    customer_id: int
+    note: str
+    created_by: Optional[int]
+    created_by_full_name: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class CustomerNoteListResponse(BaseModel):
+    customer_id: int
+    items: List[CustomerNoteResponse]
+    total_count: int
 
 
 # --- CUSTOMER RESPONSE MODELS ---
@@ -95,13 +133,16 @@ class CustomerResponse(BaseModel):
     phone_number: str
     status: str
     assistant_name: Optional[str]
+    chat_url: Optional[str]
     notes: Optional[str]
     aisummary: Optional[str] = None
     audio_file_id: Optional[str]
-    audio_url: Optional[str] = None  # ✅ Yangi maydon qo‘shildi
+    audio_url: Optional[str] = None
     recall_time: Optional[str] = None
     conversation_language: Optional[str]
     created_at: str
+    is_archived: Optional[bool] = None
+    additional_notes: Optional[List[CustomerNoteResponse]] = None
 
     class Config:
         from_attributes = True
@@ -183,6 +224,7 @@ class CustomerAPICreateRequest(BaseModel):
     phone_number: str = Field(..., min_length=1, max_length=20)
     status: CustomerStatus = Field(default=CustomerStatus.need_to_call)
     assistant_name: Optional[str] = Field(None, max_length=255)
+    chat_url: Optional[str] = Field(None, max_length=1000)
     notes: Optional[str] = Field(None)
     recall_time: Optional[datetime] = Field(
         None,
@@ -206,7 +248,7 @@ class CustomerAPICreateRequest(BaseModel):
             raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
         return v.strip()
 
-    @validator('username', 'assistant_name')
+    @validator('username', 'assistant_name', 'chat_url')
     def validate_optional_not_empty(cls, v):
         if v is not None and not v.strip():
             raise ValueError('Bu maydon bo\'sh bo\'lishi mumkin emas')
@@ -222,6 +264,7 @@ class CustomerAPICreateRequest(BaseModel):
                 "phone_number": "+998901234567",
                 "status": "need_to_call",
                 "assistant_name": "Assistant Name",
+                "chat_url": "https://t.me/example_chat",
                 "notes": "Qo'shimcha ma'lumotlar",
                 "conversation_language": "uz"
             }
@@ -237,6 +280,7 @@ class CustomerAPIResponse(BaseModel):
     phone_number: str
     status: str
     assistant_name: Optional[str]
+    chat_url: Optional[str]
     notes: Optional[str]
     aisummary: Optional[str] = None
     audio_file_id: Optional[str]
