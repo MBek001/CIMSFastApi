@@ -73,6 +73,22 @@ DEFAULT_PAGE_DEFINITIONS = [
         "order": 8,
         "is_system": False,
     },
+    {
+        "name": "cognilabsai_chat",
+        "display_name": "CognilabsAI Chat",
+        "description": "CognilabsAI chat operations access",
+        "route_path": "/cognilabsai/chat",
+        "order": 90,
+        "is_system": False,
+    },
+    {
+        "name": "cognilabsai_integrations",
+        "display_name": "CognilabsAI Integrations",
+        "description": "CognilabsAI integrations access",
+        "route_path": "/cognilabsai/integrations",
+        "order": 91,
+        "is_system": False,
+    },
 ]
 
 

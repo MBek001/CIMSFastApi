@@ -23,6 +23,8 @@ from routers.projects import router as projects_router
 from routers.ai_chat import router as ai_chat_router
 from routers.attendance import router as attendance_router
 from routers.audit import router as audit_router
+from cognilabsai.router import router as cognilabsai_router
+from cognilabsai.service import shutdown_cognilabsai, startup_cognilabsai
 from utils.file_storage import IMAGES_ROOT, ensure_image_directories
 from uuid import uuid4
 
@@ -87,6 +89,7 @@ app.include_router(projects_router)
 app.include_router(ai_chat_router)
 app.include_router(attendance_router)
 app.include_router(audit_router)
+app.include_router(cognilabsai_router)
 
 
 # --------------------------------------------------
@@ -112,6 +115,16 @@ async def root():
         "approach": "Table-based SQLAlchemy",
         "docs": "/docs",
     }
+
+
+@app.on_event("startup")
+async def app_startup():
+    await startup_cognilabsai()
+
+
+@app.on_event("shutdown")
+async def app_shutdown():
+    await shutdown_cognilabsai()
 
 
 # --------------------------------------------------
