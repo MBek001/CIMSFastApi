@@ -1,15 +1,19 @@
 import hashlib
+import json
 import os
 import re
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import String, cast, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import async_session_maker
-from models.admin_models import app_page_table
+from models.admin_models import CustomerStatus, app_page_table, customer, customer_note, sales_manager_assignment
+from models.user_models import user
+from utils.audit import log_audit_event
+from utils.page_permissions import ensure_app_page_schema
 
 from cognilabsai.realtime import manager
 from cognilabsai.tables import (
@@ -28,6 +32,13 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_VERIFY_TOKEN = "cognilabsai-verify-token"
 DEFAULT_WS_KEY = "cognilabsai-websocket-key"
+COGNILABSAI_BEHAVIOR_PROMPT = (
+    "When the user provides all needed details (name, business field/job, phone, preferred call time), "
+    "you must call the register_customer tool once. Otherwise continue the script and ask only one question per message. "
+    "If the user gives a short Uzbekistan number like 991234567, normalize it to +998991234567. "
+    "Always greet with 'Assalomu Alaykum' on first reply. Reply in the customer's language. "
+    "Do not mention you are an AI unless directly asked. Do not repeat the same confirmation twice."
+)
 
 
 def utcnow() -> datetime:
@@ -40,6 +51,72 @@ def normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
     if value.tzinfo is not None:
         return value.astimezone(timezone.utc).replace(tzinfo=None)
     return value
+
+
+def map_conversation_language(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized.startswith("ru"):
+        return "RU"
+    if normalized.startswith("en"):
+        return "EN"
+    return "UZ"
+
+
+def build_crm_chat_url(conversation_id: int) -> str:
+    return f"/cognilabsai/chat?conversation_id={conversation_id}"
+
+
+def build_chat_mode(channel: Optional[str]) -> tuple[str, bool]:
+    normalized = (channel or "").strip().lower()
+    if normalized == "telegram":
+        return "telegram_operator", False
+    if normalized == "instagram":
+        return "instagram_ai", True
+    return f"{normalized or 'unknown'}_operator", False
+
+
+def decorate_conversation_payload(payload: dict) -> dict:
+    chat_mode, supports_ai = build_chat_mode(payload.get("channel"))
+    enriched = dict(payload)
+    enriched["chat_mode"] = chat_mode
+    enriched["supports_ai"] = supports_ai
+    return enriched
+
+
+def normalize_telegram_search_query(value: str) -> str:
+    normalized = (value or "").strip()
+    if normalized.startswith("https://t.me/"):
+        normalized = normalized.rsplit("/", 1)[-1]
+    elif normalized.startswith("http://t.me/"):
+        normalized = normalized.rsplit("/", 1)[-1]
+    return normalized.lstrip("@").strip().lower()
+
+
+def build_telegram_search_rank(item: dict, normalized_query: str) -> tuple[int, int, int, str]:
+    username = (item.get("username") or "").strip().lower()
+    peer = (item.get("peer") or "").strip().lower()
+    full_name = (item.get("full_name") or "").strip().lower()
+    exact_username = username == normalized_query
+    exact_peer = peer == normalized_query
+    starts_username = bool(username) and username.startswith(normalized_query)
+    starts_peer = bool(peer) and peer.startswith(normalized_query)
+    contains_name = bool(full_name) and normalized_query in full_name
+    has_existing = item.get("existing_conversation_id") is not None
+    has_avatar = bool(item.get("avatar_url"))
+    if exact_username or exact_peer:
+        match_bucket = 0
+    elif starts_username or starts_peer:
+        match_bucket = 1
+    elif contains_name:
+        match_bucket = 2
+    else:
+        match_bucket = 3
+    return (
+        match_bucket,
+        0 if has_existing else 1,
+        0 if has_avatar else 1,
+        username or peer or full_name,
+    )
 
 
 async def ensure_schema(session: AsyncSession):
@@ -68,8 +145,15 @@ async def ensure_schema(session: AsyncSession):
             client_external_id VARCHAR(255) NOT NULL,
             client_username VARCHAR(255),
             client_full_name VARCHAR(255),
+            client_avatar_url VARCHAR(1000),
             instagram_business_id VARCHAR(255),
             ai_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            lead_created BOOLEAN NOT NULL DEFAULT FALSE,
+            crm_customer_id INTEGER NULL,
+            lead_full_name VARCHAR(255) NULL,
+            lead_phone_number VARCHAR(64) NULL,
+            lead_business_field VARCHAR(255) NULL,
+            lead_scheduled_time VARCHAR(255) NULL,
             pause_reason VARCHAR(64),
             paused_until TIMESTAMP NULL,
             last_message_at TIMESTAMP NULL,
@@ -81,6 +165,34 @@ async def ensure_schema(session: AsyncSession):
             updated_at TIMESTAMP DEFAULT NOW(),
             CONSTRAINT uq_cognilabsai_conversation_channel_client UNIQUE (channel, client_external_id)
         )
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS client_avatar_url VARCHAR(1000) NULL
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS lead_created BOOLEAN NOT NULL DEFAULT FALSE
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS crm_customer_id INTEGER NULL
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS lead_full_name VARCHAR(255) NULL
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS lead_phone_number VARCHAR(64) NULL
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS lead_business_field VARCHAR(255) NULL
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS lead_scheduled_time VARCHAR(255) NULL
     """))
     await session.execute(text("""
         CREATE TABLE IF NOT EXISTS cognilabsai_message (
@@ -124,6 +236,7 @@ async def ensure_schema(session: AsyncSession):
 
 
 async def ensure_permission_pages(session: AsyncSession):
+    await ensure_app_page_schema(session)
     pages = [
         {
             "name": COGNILABSAI_CHAT_PERMISSION,
@@ -202,7 +315,7 @@ async def list_conversations(session: AsyncSession, channel: Optional[str] = Non
     if channel:
         query = query.where(cognilabsai_conversation.c.channel == channel)
     result = await session.execute(query)
-    return [dict(row) for row in result.mappings().all()]
+    return [decorate_conversation_payload(dict(row)) for row in result.mappings().all()]
 
 
 async def get_conversation(session: AsyncSession, conversation_id: int) -> Optional[dict]:
@@ -211,7 +324,7 @@ async def get_conversation(session: AsyncSession, conversation_id: int) -> Optio
         select(cognilabsai_conversation).where(cognilabsai_conversation.c.id == conversation_id)
     )
     row = result.mappings().first()
-    return dict(row) if row else None
+    return decorate_conversation_payload(dict(row)) if row else None
 
 
 async def get_messages(session: AsyncSession, conversation_id: int, limit: int = 200, offset: int = 0) -> list[dict]:
@@ -253,6 +366,7 @@ async def upsert_conversation(
     client_external_id: str,
     client_username: Optional[str] = None,
     client_full_name: Optional[str] = None,
+    client_avatar_url: Optional[str] = None,
     instagram_business_id: Optional[str] = None,
     is_imported: bool = False,
 ) -> dict:
@@ -270,6 +384,8 @@ async def upsert_conversation(
             updates["client_username"] = client_username
         if client_full_name:
             updates["client_full_name"] = client_full_name
+        if client_avatar_url:
+            updates["client_avatar_url"] = client_avatar_url
         if instagram_business_id:
             updates["instagram_business_id"] = instagram_business_id
         if is_imported:
@@ -288,8 +404,14 @@ async def upsert_conversation(
             client_external_id=client_external_id,
             client_username=client_username,
             client_full_name=client_full_name,
+            client_avatar_url=client_avatar_url,
             instagram_business_id=instagram_business_id,
             ai_enabled=True,
+            lead_created=False,
+            lead_full_name=None,
+            lead_phone_number=None,
+            lead_business_field=None,
+            lead_scheduled_time=None,
             pause_reason=None,
             paused_until=None,
             last_message_at=None,
@@ -430,16 +552,22 @@ async def set_conversation_pause(
 
 
 async def send_instagram_message(access_token: str, recipient_id: str, text_value: str) -> str | None:
-    url = "https://graph.facebook.com/v21.0/me/messages"
+    url = "https://graph.instagram.com/v17.0/me/messages"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
     payload = {
+        "messaging_product": "instagram",
         "recipient": {"id": recipient_id},
         "message": {"text": text_value},
-        "messaging_type": "RESPONSE",
-        "access_token": access_token,
+        "metadata": "by_bot",
     }
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
+        response = await client.post(url, headers=headers, json=payload)
+        if response.status_code >= 400:
+            print(f"Instagram send error {response.status_code}: {response.text}")
+            response.raise_for_status()
         data = response.json()
         return data.get("message_id")
 
@@ -497,11 +625,18 @@ async def send_operator_message(session: AsyncSession, conversation_id: int, tex
 
 async def build_openai_messages(session: AsyncSession, conversation_id: int) -> list[dict]:
     config = await get_integration_config(session)
+    conversation = await get_conversation(session, conversation_id)
     history = await get_messages(session, conversation_id, limit=30, offset=0)
     prompt = config.get("system_prompt") or ""
     messages = []
     if prompt:
         messages.append({"role": "system", "content": prompt})
+    messages.append({"role": "system", "content": COGNILABSAI_BEHAVIOR_PROMPT})
+    if conversation and conversation.get("lead_created"):
+        messages.append({
+            "role": "system",
+            "content": "Lead is already created for this conversation. Do not call register_customer again and do not repeat confirmation.",
+        })
     for item in history:
         role = "user"
         if item["sender_type"] == "ai":
@@ -512,29 +647,306 @@ async def build_openai_messages(session: AsyncSession, conversation_id: int) -> 
     return messages
 
 
+async def build_legacy_user_context(session: AsyncSession, conversation_id: int) -> str:
+    history = await get_messages(session, conversation_id, limit=50, offset=0)
+    lines: list[str] = []
+    for item in history:
+        if item["sender_type"] == "client":
+            lines.append(f"User: {item['text']}")
+        elif item["sender_type"] == "ai":
+            lines.append(f"Assistant: {item['text']}")
+        elif item["sender_type"] == "operator":
+            lines.append(f"Operator: {item['text']}")
+    return "\n".join(lines)
+
+
+def is_missing_required_value(value: Optional[str]) -> bool:
+    normalized = (value or "").strip().lower()
+    invalid_values = {
+        "", "-", "yoq", "yo'q", "bilmayman", "none", "null", "n/a", "na",
+        "нет", "не знаю", "unknown",
+    }
+    return normalized in invalid_values
+
+
+def normalize_uzbek_phone(phone_number: Optional[str]) -> str:
+    raw = re.sub(r"\D+", "", phone_number or "")
+    if raw.startswith("998") and len(raw) == 12:
+        return f"+{raw}"
+    if len(raw) == 9:
+        return f"+998{raw}"
+    if raw.startswith("0") and len(raw) == 10:
+        return f"+998{raw[1:]}"
+    return phone_number or ""
+
+
+def build_lead_confirmation(language: str) -> str:
+    language = (language or "").lower()
+    if "ru" in language:
+        return "😊 Спасибо! Мы получили ваш номер и скоро свяжемся с вами."
+    if "en" in language:
+        return "😊 Thank you! We have received your number and will contact you very soon."
+    return "😊 Raqamingizni oldik! Jamoamiz tez orada siz bilan bog'lanadi."
+
+
+async def get_default_sales_manager_id(session: AsyncSession) -> Optional[int]:
+    normalized_role = func.lower(func.replace(func.coalesce(user.c.role_name, cast(user.c.role, String)), "_", " "))
+    result = await session.execute(
+        select(user.c.id)
+        .where(
+            normalized_role == "sales manager",
+            user.c.is_active == True,
+        )
+        .order_by(user.c.id.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_crm_customer_from_lead(
+    session: AsyncSession,
+    conversation_id: int,
+    *,
+    channel: str,
+    client_external_id: str,
+    client_username: Optional[str],
+    client_full_name: Optional[str],
+    full_name: str,
+    phone_number: str,
+    business_field: str,
+    scheduled_time: str,
+    language: str,
+) -> int:
+    conversation = await get_conversation(session, conversation_id)
+    if conversation and conversation.get("crm_customer_id"):
+        return int(conversation["crm_customer_id"])
+    notes_value = "\n".join(
+        value for value in [
+            f"Business field: {business_field}" if business_field else None,
+            f"Preferred call time: {scheduled_time}" if scheduled_time else None,
+            f"Source conversation: {conversation_id}",
+            f"Source channel: {channel}",
+            f"External client id: {client_external_id}",
+        ]
+        if value
+    )
+    display_name = full_name.strip() or client_full_name or client_username or client_external_id
+    insert_result = await session.execute(
+        insert(customer)
+        .values(
+            full_name=display_name,
+            platform=channel,
+            username=client_username,
+            phone_number=phone_number,
+            status=CustomerStatus.need_to_call,
+            status_name="need_to_call",
+            assistant_name="Alisher",
+            chat_url=build_crm_chat_url(conversation_id),
+            notes=notes_value,
+            conversation_language=map_conversation_language(language),
+            created_at=utcnow(),
+            is_archived=False,
+        )
+        .returning(customer.c.id)
+    )
+    customer_id = int(insert_result.scalar_one())
+    await session.execute(
+        insert(customer_note).values(
+            customer_id=customer_id,
+            note=notes_value,
+            created_by=None,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+    )
+    await session.execute(
+        update(cognilabsai_conversation)
+        .where(cognilabsai_conversation.c.id == conversation_id)
+        .values(
+            crm_customer_id=customer_id,
+            updated_at=utcnow(),
+        )
+    )
+    await log_audit_event(
+        session,
+        module="crm",
+        table_name="customer",
+        entity_type="customer",
+        entity_id=customer_id,
+        action="create",
+        summary=f"CognilabsAI lead CRM ga yaratildi: {display_name}",
+        after_data={
+            "full_name": display_name,
+            "platform": channel,
+            "phone_number": phone_number,
+            "username": client_username,
+            "source_conversation_id": conversation_id,
+        },
+        is_system_action=True,
+    )
+    sales_manager_id = await get_default_sales_manager_id(session)
+    if sales_manager_id is not None:
+        await session.execute(
+            insert(sales_manager_assignment).values(
+                customer_id=customer_id,
+                sales_manager_id=sales_manager_id,
+                assigned_at=utcnow(),
+                assigned_by=None,
+                is_active=True,
+            )
+        )
+    await session.commit()
+    return customer_id
+
+
+async def save_lead_state(
+    session: AsyncSession,
+    conversation_id: int,
+    *,
+    full_name: str,
+    phone_number: str,
+    business_field: str,
+    scheduled_time: str,
+    language: str = "uz",
+):
+    conversation = await get_conversation(session, conversation_id)
+    await session.execute(
+        update(cognilabsai_conversation)
+        .where(cognilabsai_conversation.c.id == conversation_id)
+        .values(
+            lead_created=True,
+            lead_full_name=full_name,
+            lead_phone_number=phone_number,
+            lead_business_field=business_field,
+            lead_scheduled_time=scheduled_time,
+            updated_at=utcnow(),
+        )
+    )
+    await session.commit()
+    if conversation:
+        await create_crm_customer_from_lead(
+            session,
+            conversation_id,
+            channel=conversation["channel"],
+            client_external_id=conversation["client_external_id"],
+            client_username=conversation.get("client_username"),
+            client_full_name=conversation.get("client_full_name"),
+            full_name=full_name,
+            phone_number=phone_number,
+            business_field=business_field,
+            scheduled_time=scheduled_time,
+            language=language,
+        )
+
+
 async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Optional[str]:
     config = await get_integration_config(session)
     api_key = config.get("openai_api_key")
     if not api_key:
         return None
+    conversation = await get_conversation(session, conversation_id)
     base_url = (config.get("openai_base_url") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
     model = config.get("openai_model") or DEFAULT_OPENAI_MODEL
+    prompt = config.get("system_prompt") or ""
+    legacy_context = await build_legacy_user_context(session, conversation_id)
+    messages = [
+        {"role": "system", "content": prompt},
+        {
+            "role": "system",
+            "content": "When the user provides all needed details (name, job, phone, time), use the register_customer function. Otherwise, keep asking. If user give short form of number like 991234567 fill it yourself and format like +998991234567",
+        },
+        {"role": "user", "content": legacy_context},
+    ]
     payload = {
         "model": model,
-        "messages": await build_openai_messages(session, conversation_id),
+        "messages": messages,
+        "max_tokens": 350,
     }
+    if conversation and not conversation.get("lead_created"):
+        payload["functions"] = [
+            {
+                "name": "register_customer",
+                "description": "Register new interested customer into CRM",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "language": {"type": "string"},
+                        "scheduled_time": {"type": "string"},
+                        "client's_job": {"type": "string"},
+                        "full_name": {"type": "string"},
+                        "phone_number": {"type": "string"},
+                    },
+                    "required": ["language", "scheduled_time", "client's_job", "full_name", "phone_number"],
+                },
+            }
+        ]
+        payload["function_call"] = "auto"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            print(f"OpenAI error {response.status_code}: {response.text}")
+            return None
         data = response.json()
     choices = data.get("choices") or []
     if not choices:
         return None
-    return (choices[0].get("message") or {}).get("content")
+    message = choices[0].get("message") or {}
+    function_call = message.get("function_call")
+    if function_call:
+        arguments = function_call.get("arguments") or "{}"
+        try:
+            tool_data = json.loads(arguments)
+        except Exception:
+            tool_data = {}
+        language = tool_data.get("language", "uzbek")
+        scheduled_time = (tool_data.get("scheduled_time") or "").strip()
+        business_field = (tool_data.get("client's_job") or "").strip()
+        full_name = (tool_data.get("full_name") or "").strip()
+        phone_number = normalize_uzbek_phone((tool_data.get("phone_number") or "").strip())
+
+        if is_missing_required_value(full_name):
+            if "ru" in language.lower():
+                return "Пожалуйста, напишите свое имя. Это нужно для регистрации."
+            if "en" in language.lower():
+                return "Please send your name too. We need it for registration."
+            return "Ismingizni ham yozib yuboring. To'liq ro'yxatdan o'tish uchun kerak bo'ladi."
+
+        if is_missing_required_value(business_field):
+            if "ru" in language.lower():
+                return "Пожалуйста, напишите, в какой сфере вы работаете. Это нужно для регистрации."
+            if "en" in language.lower():
+                return "Please tell me what field you work in. We need it for registration."
+            return "Qaysi sohada ishlashingizni ham yozib yuboring. Bu ro'yxatdan o'tish uchun kerak bo'ladi."
+
+        if is_missing_required_value(scheduled_time):
+            if "ru" in language.lower():
+                return "Во сколько мы можем с вами связаться?"
+            if "en" in language.lower():
+                return "What time can we contact you?"
+            return "Qaysi vaqtda siz bilan bog'lansak bo'ladi?"
+
+        if is_missing_required_value(phone_number):
+            if "ru" in language.lower():
+                return "Пожалуйста, отправьте свой номер телефона. Он нужен, чтобы мы могли с вами связаться."
+            if "en" in language.lower():
+                return "Please send your phone number too. We need it to contact you."
+            return "Telefon raqamingizni ham yozib yuboring. Siz bilan bog'lanishimiz uchun kerak bo'ladi."
+
+        await save_lead_state(
+            session,
+            conversation_id,
+            full_name=full_name,
+            phone_number=phone_number,
+            business_field=business_field,
+            scheduled_time=scheduled_time,
+            language=language,
+        )
+        return build_lead_confirmation(language)
+    return (message.get("content") or "").strip() or None
 
 
 async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
@@ -618,7 +1030,10 @@ async def process_instagram_webhook_payload(session: AsyncSession, payload: dict
                 client_external_id=sender_id,
                 instagram_message_id=message_data.get("mid"),
             )
-            await maybe_send_ai_reply(session, conversation["id"])
+            try:
+                await maybe_send_ai_reply(session, conversation["id"])
+            except Exception as exc:
+                print(f"Instagram AI reply error for conversation {conversation['id']}: {exc}")
 
 
 async def process_telegram_userbot_message(
@@ -639,6 +1054,7 @@ async def process_telegram_userbot_message(
             client_external_id=peer_id,
             client_username=username,
             client_full_name=full_name,
+            client_avatar_url=None,
         )
         await create_message(
             session,
@@ -648,7 +1064,6 @@ async def process_telegram_userbot_message(
             text_value=text,
             client_external_id=sender_id or peer_id,
         )
-        await maybe_send_ai_reply(session, conversation["id"])
 
 
 async def start_telegram_outbound_conversation(session: AsyncSession, peer: str, text_value: str, current_user) -> dict:
@@ -659,6 +1074,7 @@ async def start_telegram_outbound_conversation(session: AsyncSession, peer: str,
         client_external_id=snapshot["external_id"],
         client_username=snapshot.get("username"),
         client_full_name=snapshot.get("full_name"),
+        client_avatar_url=snapshot.get("avatar_url"),
     )
     operator_name = " ".join(value for value in [getattr(current_user, "name", None), getattr(current_user, "surname", None)] if value) or getattr(current_user, "email", None)
     telegram_message_id = await telegram_userbot_manager.send_message(peer, text_value)
@@ -684,6 +1100,51 @@ async def start_telegram_outbound_conversation(session: AsyncSession, peer: str,
         action="pause",
     )
     return {"conversation": updated_conversation, "message": message}
+
+
+async def search_telegram_peer(session: AsyncSession, query: str) -> dict:
+    snapshot = await telegram_userbot_manager.resolve_peer_snapshot(query)
+    existing = await telegram_userbot_manager.find_existing_conversation(snapshot["external_id"])
+    if existing:
+        await upsert_conversation(
+            session,
+            channel="telegram",
+            client_external_id=snapshot["external_id"],
+            client_username=snapshot.get("username"),
+            client_full_name=snapshot.get("full_name"),
+            client_avatar_url=snapshot.get("avatar_url"),
+        )
+    return {
+        "peer": query,
+        "external_id": snapshot["external_id"],
+        "username": snapshot.get("username"),
+        "full_name": snapshot.get("full_name"),
+        "avatar_url": snapshot.get("avatar_url") or (existing.get("client_avatar_url") if existing else None),
+        "existing_conversation_id": existing.get("id") if existing else None,
+    }
+
+
+async def search_telegram_peers(session: AsyncSession, query: str, limit: int = 10) -> dict:
+    matches = await telegram_userbot_manager.search_peers(query, limit=limit)
+    normalized_query = normalize_telegram_search_query(query)
+    items: list[dict] = []
+    for item in matches:
+        existing = await telegram_userbot_manager.find_existing_conversation(item["external_id"])
+        items.append(
+            {
+                "peer": item["peer"],
+                "external_id": item["external_id"],
+                "username": item.get("username"),
+                "full_name": item.get("full_name"),
+                "avatar_url": item.get("avatar_url") or (existing.get("client_avatar_url") if existing else None),
+                "existing_conversation_id": existing.get("id") if existing else None,
+            }
+        )
+    items.sort(key=lambda item: build_telegram_search_rank(item, normalized_query))
+    return {
+        "query": query,
+        "items": items[:limit],
+    }
 
 
 def parse_conversation_line(line: str):

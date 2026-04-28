@@ -38,8 +38,15 @@ cognilabsai_conversation = Table(
     Column("client_external_id", String(255), nullable=False),
     Column("client_username", String(255), nullable=True),
     Column("client_full_name", String(255), nullable=True),
+    Column("client_avatar_url", String(1000), nullable=True),
     Column("instagram_business_id", String(255), nullable=True),
     Column("ai_enabled", Boolean, nullable=False, default=True),
+    Column("lead_created", Boolean, nullable=False, default=False),
+    Column("crm_customer_id", Integer, nullable=True),
+    Column("lead_full_name", String(255), nullable=True),
+    Column("lead_phone_number", String(64), nullable=True),
+    Column("lead_business_field", String(255), nullable=True),
+    Column("lead_scheduled_time", String(255), nullable=True),
     Column("pause_reason", String(64), nullable=True),
     Column("paused_until", DateTime, nullable=True),
     Column("last_message_at", DateTime, nullable=True),
@@ -98,4 +105,3 @@ cognilabsai_import_log = Table(
     UniqueConstraint("source_hash", name="uq_cognilabsai_import_log_hash"),
     extend_existing=True,
 )
-

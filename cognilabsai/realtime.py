@@ -1,6 +1,7 @@
 import asyncio
 from collections import defaultdict
 
+from fastapi.encoders import jsonable_encoder
 from fastapi import WebSocket
 
 
@@ -34,15 +35,16 @@ class CognilabsAIConnectionManager:
         targets = set(self._all_connections)
         if conversation_id is not None:
             targets |= self._conversation_connections.get(conversation_id, set())
+        encoded_payload = jsonable_encoder(payload)
         stale: list[WebSocket] = []
         for websocket in targets:
             try:
-                await websocket.send_json(payload)
-            except Exception:
+                await websocket.send_json(encoded_payload)
+            except Exception as exc:
+                print(f"CognilabsAI websocket broadcast error: {exc}")
                 stale.append(websocket)
         for websocket in stale:
             await self.disconnect(websocket)
 
 
 manager = CognilabsAIConnectionManager()
-

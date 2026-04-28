@@ -27,9 +27,12 @@ class IntegrationConfigResponse(IntegrationConfigPayload):
 class ConversationItem(BaseModel):
     id: int
     channel: str
+    chat_mode: str
+    supports_ai: bool
     client_external_id: str
     client_username: Optional[str] = None
     client_full_name: Optional[str] = None
+    client_avatar_url: Optional[str] = None
     instagram_business_id: Optional[str] = None
     ai_enabled: bool
     pause_reason: Optional[str] = None
@@ -77,6 +80,29 @@ class TelegramStartConversationRequest(BaseModel):
     client_full_name: Optional[str] = None
 
 
+class TelegramSearchResult(BaseModel):
+    peer: str
+    external_id: str
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    existing_conversation_id: Optional[int] = None
+
+
+class TelegramSearchMatch(BaseModel):
+    peer: str
+    external_id: str
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    existing_conversation_id: Optional[int] = None
+
+
+class TelegramSearchListResponse(BaseModel):
+    query: str
+    items: list[TelegramSearchMatch]
+
+
 class ImportConversationsRequest(BaseModel):
     folder_path: str = "/home/akhmad/PyCharmMiscProject/project/conversations"
 
@@ -90,4 +116,3 @@ class ImportConversationsResponse(BaseModel):
 
 class GenericMessageResponse(BaseModel):
     message: str
-

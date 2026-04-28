@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import select
@@ -6,6 +7,7 @@ from sqlalchemy import select
 from database import async_session_maker
 
 from cognilabsai.tables import cognilabsai_conversation, cognilabsai_global_integration
+from utils.file_storage import PROFILE_IMAGES_DIR
 
 
 class TelegramUserbotManager:
@@ -18,7 +20,9 @@ class TelegramUserbotManager:
         async with self._lock:
             config = await self._load_config()
             if not config:
-                await self.stop()
+                if self.client is not None:
+                    await self.client.disconnect()
+                    self.client = None
                 return False
             if self.client is not None:
                 return True
@@ -87,11 +91,60 @@ class TelegramUserbotManager:
                 raise RuntimeError("Telegram userbot is not configured")
         entity = await self.client.get_entity(self._normalize_peer(peer))
         full_name = " ".join(value for value in [getattr(entity, "first_name", None), getattr(entity, "last_name", None)] if value) or None
+        avatar_url = await self._download_avatar(entity)
         return {
             "external_id": str(getattr(entity, "id", peer)),
             "username": getattr(entity, "username", None),
             "full_name": full_name,
+            "avatar_url": avatar_url,
         }
+
+    async def search_peers(self, query: str, limit: int = 10) -> list[dict]:
+        if self.client is None:
+            started = await self.start()
+            if not started or self.client is None:
+                raise RuntimeError("Telegram userbot is not configured")
+        try:
+            from telethon.tl.functions.contacts import SearchRequest
+        except Exception as exc:
+            raise RuntimeError("Telegram search is not available") from exc
+        normalized = self._normalize_peer(query)
+        results: list[dict] = []
+        seen: set[str] = set()
+
+        async def append_entity(entity):
+            if entity is None:
+                return
+            external_id = str(getattr(entity, "id", "") or "")
+            if not external_id or external_id in seen:
+                return
+            seen.add(external_id)
+            full_name = " ".join(value for value in [getattr(entity, "first_name", None), getattr(entity, "last_name", None)] if value) or None
+            avatar_url = await self._download_avatar(entity)
+            username = getattr(entity, "username", None)
+            peer_value = username or external_id
+            results.append(
+                {
+                    "peer": peer_value,
+                    "external_id": external_id,
+                    "username": username,
+                    "full_name": full_name,
+                    "avatar_url": avatar_url,
+                }
+            )
+
+        try:
+            entity = await self.client.get_entity(normalized)
+            await append_entity(entity)
+        except Exception:
+            pass
+
+        search = await self.client(SearchRequest(q=str(query).strip(), limit=limit))
+        for entity in list(getattr(search, "users", []) or []):
+            await append_entity(entity)
+            if len(results) >= limit:
+                break
+        return results[:limit]
 
     async def find_existing_conversation(self, external_id: str):
         async with async_session_maker() as session:
@@ -115,9 +168,31 @@ class TelegramUserbotManager:
 
     def _normalize_peer(self, peer: str):
         normalized = str(peer).strip()
+        if normalized.startswith("https://t.me/"):
+            normalized = normalized.rsplit("/", 1)[-1]
+        if normalized.startswith("http://t.me/"):
+            normalized = normalized.rsplit("/", 1)[-1]
+        normalized = normalized.lstrip("@")
         if normalized.lstrip("-").isdigit():
             return int(normalized)
         return normalized
+
+    async def _download_avatar(self, entity) -> Optional[str]:
+        if self.client is None:
+            return None
+        PROFILE_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        entity_id = getattr(entity, "id", None)
+        if not entity_id:
+            return None
+        base_path = PROFILE_IMAGES_DIR / f"cognilabsai_telegram_{entity_id}"
+        for existing in PROFILE_IMAGES_DIR.glob(f"{base_path.name}.*"):
+            if existing.is_file():
+                existing.unlink()
+        downloaded = await self.client.download_profile_photo(entity, file=str(base_path))
+        if not downloaded:
+            return None
+        downloaded_path = Path(downloaded)
+        return f"/images/profil_images/{downloaded_path.name}"
 
 
 telegram_userbot_manager = TelegramUserbotManager()

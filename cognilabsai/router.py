@@ -17,6 +17,8 @@ from cognilabsai.schemas import (
     PauseConversationRequest,
     PauseUntilRequest,
     SendMessageRequest,
+    TelegramSearchListResponse,
+    TelegramSearchResult,
     TelegramStartConversationRequest,
 )
 from cognilabsai.service import (
@@ -28,6 +30,8 @@ from cognilabsai.service import (
     maybe_send_ai_reply,
     process_instagram_webhook_payload,
     send_operator_message,
+    search_telegram_peer,
+    search_telegram_peers,
     set_conversation_pause,
     update_integration_config,
     verify_websocket_api_key,
@@ -174,6 +178,31 @@ async def chat_telegram_start(
 ):
     try:
         return await start_telegram_outbound_conversation(session, request.peer, request.text, current_user)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@chat_router.get("/telegram/search", response_model=TelegramSearchResult)
+async def chat_telegram_search(
+    query: str = Query(min_length=1),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    try:
+        return await search_telegram_peer(session, query)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@chat_router.get("/telegram/search-list", response_model=TelegramSearchListResponse)
+async def chat_telegram_search_list(
+    query: str = Query(min_length=1),
+    limit: int = Query(default=10, ge=1, le=20),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    try:
+        return await search_telegram_peers(session, query, limit=limit)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

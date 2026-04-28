@@ -48,6 +48,7 @@ app.mount("/images", StaticFiles(directory=str(IMAGES_ROOT)), name="images")
 # --------------------------------------------------
 origins = [
     "http://localhost:3000",
+    "http://localhost:5173",
     "https://cims.cognilabs.org"
 ]
 
