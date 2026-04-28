@@ -1105,7 +1105,13 @@ async def start_telegram_outbound_conversation(session: AsyncSession, peer: str,
 
 
 async def search_telegram_peer(session: AsyncSession, query: str) -> dict:
-    snapshot = await telegram_userbot_manager.resolve_peer_snapshot(query)
+    try:
+        snapshot = await telegram_userbot_manager.resolve_peer_snapshot(query)
+    except Exception:
+        search_results = await telegram_userbot_manager.search_peers(query, limit=1)
+        if not search_results:
+            raise
+        snapshot = search_results[0]
     existing = await telegram_userbot_manager.find_existing_conversation(snapshot["external_id"])
     if existing:
         await upsert_conversation(

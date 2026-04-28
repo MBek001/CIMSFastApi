@@ -25,7 +25,13 @@ class TelegramUserbotManager:
                     self.client = None
                 return False
             if self.client is not None:
-                return True
+                try:
+                    if self.client.is_connected():
+                        return True
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+                self.client = None
             try:
                 from telethon import TelegramClient, events
                 from telethon.sessions import StringSession
@@ -75,21 +81,28 @@ class TelegramUserbotManager:
         await self.stop()
         return await self.start()
 
-    async def send_message(self, peer: str, text: str) -> str | None:
+    async def _get_client(self):
+        started = await self.start()
+        if not started or self.client is None:
+            raise RuntimeError("Telegram userbot is not configured")
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+        except Exception:
+            await self.restart()
         if self.client is None:
-            started = await self.start()
-            if not started or self.client is None:
-                raise RuntimeError("Telegram userbot is not configured")
-        entity = await self.client.get_entity(self._normalize_peer(peer))
-        message = await self.client.send_message(entity=entity, message=text)
+            raise RuntimeError("Telegram userbot is not configured")
+        return self.client
+
+    async def send_message(self, peer: str, text: str) -> str | None:
+        client = await self._get_client()
+        entity = await client.get_entity(self._normalize_peer(peer))
+        message = await client.send_message(entity=entity, message=text)
         return str(message.id) if message else None
 
     async def resolve_peer_snapshot(self, peer: str) -> dict:
-        if self.client is None:
-            started = await self.start()
-            if not started or self.client is None:
-                raise RuntimeError("Telegram userbot is not configured")
-        entity = await self.client.get_entity(self._normalize_peer(peer))
+        client = await self._get_client()
+        entity = await client.get_entity(self._normalize_peer(peer))
         full_name = " ".join(value for value in [getattr(entity, "first_name", None), getattr(entity, "last_name", None)] if value) or None
         avatar_url = await self._download_avatar(entity)
         return {
@@ -100,10 +113,7 @@ class TelegramUserbotManager:
         }
 
     async def search_peers(self, query: str, limit: int = 10) -> list[dict]:
-        if self.client is None:
-            started = await self.start()
-            if not started or self.client is None:
-                raise RuntimeError("Telegram userbot is not configured")
+        client = await self._get_client()
         try:
             from telethon.tl.functions.contacts import SearchRequest
         except Exception as exc:
@@ -120,7 +130,10 @@ class TelegramUserbotManager:
                 return
             seen.add(external_id)
             full_name = " ".join(value for value in [getattr(entity, "first_name", None), getattr(entity, "last_name", None)] if value) or None
-            avatar_url = await self._download_avatar(entity)
+            try:
+                avatar_url = await self._download_avatar(entity)
+            except Exception:
+                avatar_url = None
             username = getattr(entity, "username", None)
             peer_value = username or external_id
             results.append(
@@ -134,16 +147,19 @@ class TelegramUserbotManager:
             )
 
         try:
-            entity = await self.client.get_entity(normalized)
+            entity = await client.get_entity(normalized)
             await append_entity(entity)
         except Exception:
             pass
 
-        search = await self.client(SearchRequest(q=str(query).strip(), limit=limit))
-        for entity in list(getattr(search, "users", []) or []):
-            await append_entity(entity)
-            if len(results) >= limit:
-                break
+        try:
+            search = await client(SearchRequest(q=str(query).strip(), limit=limit))
+            for entity in list(getattr(search, "users", []) or []):
+                await append_entity(entity)
+                if len(results) >= limit:
+                    break
+        except Exception:
+            pass
         return results[:limit]
 
     async def find_existing_conversation(self, external_id: str):
@@ -178,7 +194,8 @@ class TelegramUserbotManager:
         return normalized
 
     async def _download_avatar(self, entity) -> Optional[str]:
-        if self.client is None:
+        client = self.client
+        if client is None:
             return None
         PROFILE_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         entity_id = getattr(entity, "id", None)
@@ -188,7 +205,7 @@ class TelegramUserbotManager:
         for existing in PROFILE_IMAGES_DIR.glob(f"{base_path.name}.*"):
             if existing.is_file():
                 existing.unlink()
-        downloaded = await self.client.download_profile_photo(entity, file=str(base_path))
+        downloaded = await client.download_profile_photo(entity, file=str(base_path))
         if not downloaded:
             return None
         downloaded_path = Path(downloaded)

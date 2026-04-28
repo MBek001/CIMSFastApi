@@ -20,5 +20,6 @@ __pycache__/
 app.log
 images/
 secrets/
+tgsession.py
 cims.sql
 cims_alembic_versions.tar.gz
