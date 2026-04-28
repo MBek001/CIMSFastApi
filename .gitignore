@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
 
 # Virtual env
 .venv/
@@ -14,3 +15,10 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Runtime / generated files
+app.log
+images/
+secrets/
+cims.sql
+cims_alembic_versions.tar.gz
