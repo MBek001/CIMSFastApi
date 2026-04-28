@@ -112,6 +112,7 @@ class ImportConversationsResponse(BaseModel):
     skipped_files: int
     created_conversations: int
     created_messages: int
+    source_type: Optional[str] = None
 
 
 class GenericMessageResponse(BaseModel):

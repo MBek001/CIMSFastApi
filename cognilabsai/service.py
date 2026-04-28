@@ -1,7 +1,9 @@
 import hashlib
+import io
 import json
 import os
 import re
+import zipfile
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -1164,15 +1166,29 @@ def parse_conversation_line(line: str):
 
 async def import_instagram_conversations(session: AsyncSession, folder_path: str) -> dict:
     await ensure_schema(session)
-    imported_files = 0
-    skipped_files = 0
-    created_conversations = 0
-    created_messages = 0
+    sources: list[tuple[str, bytes, str]] = []
     for file_name in sorted(os.listdir(folder_path)):
         full_path = os.path.join(folder_path, file_name)
         if not os.path.isfile(full_path):
             continue
-        file_hash = hashlib.sha256(f"{file_name}:{os.path.getsize(full_path)}:{os.path.getmtime(full_path)}".encode()).hexdigest()
+        with open(full_path, "rb") as source:
+            sources.append((file_name, source.read(), full_path))
+    result = await import_instagram_conversation_sources(session, sources)
+    result["source_type"] = "folder"
+    return result
+
+
+async def import_instagram_conversation_sources(
+    session: AsyncSession,
+    sources: list[tuple[str, bytes, str]],
+) -> dict:
+    await ensure_schema(session)
+    imported_files = 0
+    skipped_files = 0
+    created_conversations = 0
+    created_messages = 0
+    for file_name, file_bytes, source_label in sources:
+        file_hash = hashlib.sha256(f"{file_name}:".encode() + file_bytes).hexdigest()
         existing_log = await session.execute(
             select(cognilabsai_import_log.c.id).where(cognilabsai_import_log.c.source_hash == file_hash)
         )
@@ -1193,7 +1209,7 @@ async def import_instagram_conversations(session: AsyncSession, folder_path: str
         )
         if was_created:
             created_conversations += 1
-        with open(full_path, "r", encoding="utf-8") as source:
+        with io.TextIOWrapper(io.BytesIO(file_bytes), encoding="utf-8") as source:
             buffered_text = None
             buffered_created_at = None
             buffered_sender_type = None
@@ -1228,7 +1244,7 @@ async def import_instagram_conversations(session: AsyncSession, folder_path: str
                 created_messages += 1
         await session.execute(
             insert(cognilabsai_import_log).values(
-                source_file=full_path,
+                source_file=source_label,
                 source_hash=file_hash,
                 conversation_id=conversation["id"],
                 imported_at=utcnow(),
@@ -1242,6 +1258,42 @@ async def import_instagram_conversations(session: AsyncSession, folder_path: str
         "created_conversations": created_conversations,
         "created_messages": created_messages,
     }
+
+
+async def import_instagram_conversations_upload(
+    session: AsyncSession,
+    upload_filename: str,
+    upload_bytes: bytes,
+) -> dict:
+    await ensure_schema(session)
+    normalized_name = (upload_filename or "").strip().lower()
+    sources: list[tuple[str, bytes, str]] = []
+    if normalized_name.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(upload_bytes)) as archive:
+            for member in sorted(archive.infolist(), key=lambda item: item.filename):
+                if member.is_dir():
+                    continue
+                member_name = os.path.basename(member.filename)
+                if not member_name or member_name.startswith("."):
+                    continue
+                if not member_name.lower().endswith(".txt"):
+                    continue
+                sources.append(
+                    (
+                        member_name,
+                        archive.read(member),
+                        f"{upload_filename}:{member.filename}",
+                    )
+                )
+        result = await import_instagram_conversation_sources(session, sources)
+        result["source_type"] = "zip"
+        return result
+    if normalized_name.endswith(".txt"):
+        sources.append((os.path.basename(upload_filename), upload_bytes, upload_filename))
+        result = await import_instagram_conversation_sources(session, sources)
+        result["source_type"] = "txt"
+        return result
+    raise ValueError("Only .zip or .txt files are supported")
 
 
 async def startup_cognilabsai():

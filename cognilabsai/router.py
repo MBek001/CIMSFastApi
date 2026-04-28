@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from cognilabsai.service import (
     get_integration_config,
     get_messages,
     import_instagram_conversations,
+    import_instagram_conversations_upload,
     list_conversations,
     maybe_send_ai_reply,
     process_instagram_webhook_payload,
@@ -168,6 +169,19 @@ async def chat_import_instagram_conversations(
     current_user=Depends(require_cognilabsai_chat),
 ):
     return await import_instagram_conversations(session, request.folder_path)
+
+
+@chat_router.post("/import-instagram-conversations-upload", response_model=ImportConversationsResponse)
+async def chat_import_instagram_conversations_upload(
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    try:
+        file_bytes = await file.read()
+        return await import_instagram_conversations_upload(session, file.filename or "upload.zip", file_bytes)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @chat_router.post("/telegram/start")
