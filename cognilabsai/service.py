@@ -10,12 +10,15 @@ from typing import Optional
 import httpx
 from sqlalchemy import String, cast, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from telegram import Bot
+from telegram.request import HTTPXRequest
 
 from database import async_session_maker
-from models.admin_models import CustomerStatus, app_page_table, customer, customer_note, sales_manager_assignment
+from models.admin_models import app_page_table
 from models.user_models import user
-from utils.audit import log_audit_event
 from utils.page_permissions import ensure_app_page_schema
+from schemes.crm_schemes import ConversationLanguageEnum, CustomerAPICreateRequest
+from routers.crm import create_customer_api_record
 
 from cognilabsai.realtime import manager
 from cognilabsai.tables import (
@@ -66,6 +69,13 @@ def map_conversation_language(value: Optional[str]) -> str:
 
 def build_crm_chat_url(conversation_id: int) -> str:
     return f"/cognilabsai/chat?conversation_id={conversation_id}"
+
+
+def build_public_chat_url(conversation_id: int, frontend_base_url: Optional[str]) -> Optional[str]:
+    base_url = (frontend_base_url or "").strip()
+    if not base_url:
+        return None
+    return f"{base_url.rstrip('/')}{build_crm_chat_url(conversation_id)}"
 
 
 def build_chat_mode(channel: Optional[str]) -> tuple[str, bool]:
@@ -135,10 +145,25 @@ async def ensure_schema(session: AsyncSession):
             telegram_api_id VARCHAR(100),
             telegram_api_hash VARCHAR(255),
             telegram_session TEXT,
+            cognilabs_telegram_token TEXT,
+            cognilabs_channel_id VARCHAR(255),
+            frontend_base_url VARCHAR(1000),
             websocket_api_key VARCHAR(255),
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         )
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_global_integration
+        ADD COLUMN IF NOT EXISTS cognilabs_telegram_token TEXT
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_global_integration
+        ADD COLUMN IF NOT EXISTS cognilabs_channel_id VARCHAR(255)
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_global_integration
+        ADD COLUMN IF NOT EXISTS frontend_base_url VARCHAR(1000)
     """))
     await session.execute(text("""
         CREATE TABLE IF NOT EXISTS cognilabsai_conversation (
@@ -705,6 +730,70 @@ async def get_default_sales_manager_id(session: AsyncSession) -> Optional[int]:
     return result.scalar_one_or_none()
 
 
+async def send_cognilabs_lead_notification(
+    config: dict,
+    customer_id: int,
+    *,
+    full_name: str,
+    phone_number: str,
+    platform: str,
+    username: Optional[str],
+    business_field: str,
+    scheduled_time: str,
+    conversation_id: int,
+) -> None:
+    token = (config.get("cognilabs_telegram_token") or "").strip()
+    channel_id = (config.get("cognilabs_channel_id") or "").strip()
+    if not token or not channel_id:
+        return
+    lines = [
+        "🆕 <b>Yangi lead keldi</b>",
+        f"👤 <b>Ism:</b> {full_name}",
+        f"📞 <b>Telefon:</b> {phone_number}",
+        f"🌐 <b>Platforma:</b> {platform}",
+    ]
+    if username:
+        lines.append(f"🔗 <b>Username:</b> {username}")
+    if business_field:
+        lines.append(f"💼 <b>Yo'nalish:</b> {business_field}")
+    if scheduled_time:
+        lines.append(f"🕒 <b>Qulay vaqt:</b> {scheduled_time}")
+    lines.append(f"🆔 <b>Lead ID:</b> {customer_id}")
+    lines.append(f"💬 <b>Conversation ID:</b> {conversation_id}")
+    reply_markup = None
+    chat_url = build_public_chat_url(conversation_id, config.get("frontend_base_url"))
+    if chat_url:
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "Suhbatni ko'rish",
+                        "url": chat_url,
+                    }
+                ]
+            ]
+        }
+    bot = Bot(
+        token=token,
+        request=HTTPXRequest(
+            connection_pool_size=8,
+            connect_timeout=30.0,
+            read_timeout=60.0,
+            write_timeout=60.0,
+            pool_timeout=30.0,
+        ),
+    )
+    try:
+        await bot.send_message(
+            chat_id=channel_id,
+            text="\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+    except Exception as exc:
+        print(f"[cognilabsai-lead-notify] customer_id={customer_id} error: {exc}", flush=True)
+
+
 async def create_crm_customer_from_lead(
     session: AsyncSession,
     conversation_id: int,
@@ -733,34 +822,22 @@ async def create_crm_customer_from_lead(
         if value
     )
     display_name = full_name.strip() or client_full_name or client_username or client_external_id
-    insert_result = await session.execute(
-        insert(customer)
-        .values(
+    config = await get_integration_config(session)
+    create_response = await create_customer_api_record(
+        session,
+        CustomerAPICreateRequest(
             full_name=display_name,
             platform=channel,
             username=client_username,
             phone_number=phone_number,
-            status=CustomerStatus.need_to_call,
-            status_name="need_to_call",
             assistant_name="Alisher",
             chat_url=build_crm_chat_url(conversation_id),
             notes=notes_value,
-            conversation_language=map_conversation_language(language),
-            created_at=utcnow(),
-            is_archived=False,
-        )
-        .returning(customer.c.id)
+            status="need_to_call",
+            conversation_language=ConversationLanguageEnum(map_conversation_language(language).lower()),
+        ),
     )
-    customer_id = int(insert_result.scalar_one())
-    await session.execute(
-        insert(customer_note).values(
-            customer_id=customer_id,
-            note=notes_value,
-            created_by=None,
-            created_at=utcnow(),
-            updated_at=utcnow(),
-        )
-    )
+    customer_id = int(create_response.id)
     await session.execute(
         update(cognilabsai_conversation)
         .where(cognilabsai_conversation.c.id == conversation_id)
@@ -769,35 +846,18 @@ async def create_crm_customer_from_lead(
             updated_at=utcnow(),
         )
     )
-    await log_audit_event(
-        session,
-        module="crm",
-        table_name="customer",
-        entity_type="customer",
-        entity_id=customer_id,
-        action="create",
-        summary=f"CognilabsAI lead CRM ga yaratildi: {display_name}",
-        after_data={
-            "full_name": display_name,
-            "platform": channel,
-            "phone_number": phone_number,
-            "username": client_username,
-            "source_conversation_id": conversation_id,
-        },
-        is_system_action=True,
-    )
-    sales_manager_id = await get_default_sales_manager_id(session)
-    if sales_manager_id is not None:
-        await session.execute(
-            insert(sales_manager_assignment).values(
-                customer_id=customer_id,
-                sales_manager_id=sales_manager_id,
-                assigned_at=utcnow(),
-                assigned_by=None,
-                is_active=True,
-            )
-        )
     await session.commit()
+    await send_cognilabs_lead_notification(
+        config,
+        customer_id,
+        full_name=display_name,
+        phone_number=phone_number,
+        platform=channel,
+        username=client_username,
+        business_field=business_field,
+        scheduled_time=scheduled_time,
+        conversation_id=conversation_id,
+    )
     return customer_id
 
 

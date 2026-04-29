@@ -15,6 +15,9 @@ class IntegrationConfigPayload(BaseModel):
     telegram_api_id: Optional[str] = None
     telegram_api_hash: Optional[str] = None
     telegram_session: Optional[str] = None
+    cognilabs_telegram_token: Optional[str] = None
+    cognilabs_channel_id: Optional[str] = None
+    frontend_base_url: Optional[str] = None
     websocket_api_key: Optional[str] = None
 
 

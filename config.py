@@ -10,6 +10,7 @@ DB_PASSWORD = os.environ.get('DB_PASSWORD')
 DB_HOST = os.environ.get('DB_HOST')
 DB_PORT = os.environ.get('DB_PORT')
 SECRET = os.environ.get('SECRET')
+DOMAIN = os.environ.get('DOMAIN')
 
 
 SECRET_KEY = os.environ.get('SECRET_KEY', default='uzbekiston-juda-xavfsiz-kalit-1234567890')

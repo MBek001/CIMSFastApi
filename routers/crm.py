@@ -1634,6 +1634,19 @@ async def create_customer_api(
         request: Request,
         session: AsyncSession = Depends(get_async_session)
 ):
+    return await create_customer_api_record(
+        session,
+        customer_data,
+        request=request,
+    )
+
+
+async def create_customer_api_record(
+    session: AsyncSession,
+    customer_data: CustomerAPICreateRequest,
+    *,
+    request: Request | None = None,
+) -> CreateResponse:
     _debug_customer_create(
         "api",
         f"request received platform={customer_data.platform} phone={customer_data.phone_number} notes='{(customer_data.notes or '')[:220]}' recall_time_input={customer_data.recall_time}"
