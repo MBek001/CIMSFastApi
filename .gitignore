@@ -1,21 +1,13 @@
 .env
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .pytest_cache/
-*.log
 
 # Virtual env
 .venv/
-venv/
-env/
-
-# Telegram sessions
-*.session
-*.session-journal
 
 # IDE
 .idea/
@@ -23,14 +15,12 @@ env/
 
 # OS
 .DS_Store
-Thumbs.db
 
 # Runtime / generated files
 app.log
 images/
 secrets/
-
-# Local scripts / dumps
 tgsession.py
 cims.sql
 cims_alembic_versions.tar.gz
+yoursession.session
