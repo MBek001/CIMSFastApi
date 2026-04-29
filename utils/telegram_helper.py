@@ -4,7 +4,7 @@ from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from fastapi import UploadFile, HTTPException
 import io
-from config import TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID
+from config import TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID, TELEGRAM_UPDATE_BOT_TOKEN
 
 # Log konfiguratsiyasi
 logging.basicConfig(
@@ -130,6 +130,36 @@ async def get_audio_url_from_telegram(file_id: str) -> str:
             status_code=500,
             detail=f"Xatolik: {str(e)}"
         )
+
+
+async def send_card_assignment_notification(
+    chat_id: str,
+    title: str,
+    description: str | None,
+    priority: str,
+    due_date,
+    assigner_name: str,
+) -> None:
+    if not TELEGRAM_UPDATE_BOT_TOKEN:
+        return
+    try:
+        lines = ["📋 <b>Sizga yangi task berildi!</b>", ""]
+        lines.append(f"📌 <b>Task:</b> {title}")
+        if description:
+            lines.append(f"📝 <b>Tavsif:</b> {description}")
+        lines.append(f"🎯 <b>Priority:</b> {priority.capitalize()}")
+        if due_date:
+            lines.append(f"📅 <b>Muddat:</b> {due_date}")
+        lines.append(f"👤 <b>Kim berdi:</b> {assigner_name}")
+
+        update_bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN, request=request)
+        await update_bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logging.warning(f"Card assignment notification yuborishda xatolik: {e}")
 
 
 def validate_audio_file(audio: UploadFile) -> bool:

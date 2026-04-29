@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,7 @@ from schemes.projects_schemes import (
 )
 from schemes.schemes_users import CreateResponse, SuccessResponse
 from utils.file_storage import delete_image_if_exists, save_image
+from utils.telegram_helper import send_card_assignment_notification
 
 router = APIRouter(tags=["Projects"])
 
@@ -1022,6 +1023,7 @@ async def delete_column(
 @router.post("/columns/{column_id}/cards", response_model=CreateResponse, summary="Card yaratish")
 async def create_card(
     column_id: int,
+    background_tasks: BackgroundTasks,
     title: str = Form(...),
     description: Optional[str] = Form(None),
     order: Optional[int] = Form(None),
@@ -1086,6 +1088,23 @@ async def create_card(
     sibling_ids.insert(target_order, card_id)
     await resequence_cards(session, sibling_ids)
     await session.commit()
+
+    if assignee_id is not None:
+        assignee_result = await session.execute(
+            select(user.c.chat_id).where(user.c.id == assignee_id)
+        )
+        assignee_row = assignee_result.fetchone()
+        if assignee_row and assignee_row.chat_id:
+            assigner_name = f"{current_user.name} {current_user.surname}".strip()
+            background_tasks.add_task(
+                send_card_assignment_notification,
+                assignee_row.chat_id,
+                title,
+                description,
+                priority,
+                due_date,
+                assigner_name,
+            )
 
     return CreateResponse(message="Card muvaffaqiyatli yaratildi", id=card_id)
 
@@ -1346,6 +1365,7 @@ async def open_get_card_detail_by_user(
 @router.patch("/cards/{card_id}", response_model=SuccessResponse, summary="Cardni yangilash")
 async def update_card(
     card_id: int,
+    background_tasks: BackgroundTasks,
     title: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
     priority: Optional[str] = Form(None),
@@ -1357,6 +1377,7 @@ async def update_card(
     current_user=Depends(get_current_active_user),
 ):
     card_row = await get_card_or_404(session, card_id)
+    old_assignee_id = card_row.assignee_id
     column_row = await get_column_or_404(session, card_row.column_id)
     board_row = await get_board_or_404(session, column_row.board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
@@ -1410,6 +1431,30 @@ async def update_card(
 
     await save_card_images(session, card_id, images)
     await session.commit()
+
+    new_assignee_id = update_values.get("assignee_id") if update_values else None
+    if new_assignee_id is not None and new_assignee_id != old_assignee_id:
+        assignee_result = await session.execute(
+            select(user.c.chat_id, user.c.name, user.c.surname).where(user.c.id == new_assignee_id)
+        )
+        assignee_row = assignee_result.fetchone()
+        if assignee_row and assignee_row.chat_id:
+            assigner_name = f"{current_user.name} {current_user.surname}".strip()
+            card_title = update_values.get("title", card_row.title)
+            card_description = update_values.get("description", card_row.description)
+            card_priority = str(update_values.get("priority", card_row.priority).value
+                                if hasattr(update_values.get("priority", card_row.priority), "value")
+                                else update_values.get("priority", card_row.priority))
+            card_due_date = update_values.get("due_date", card_row.due_date)
+            background_tasks.add_task(
+                send_card_assignment_notification,
+                assignee_row.chat_id,
+                card_title,
+                card_description,
+                card_priority,
+                card_due_date,
+                assigner_name,
+            )
 
     return SuccessResponse(message="Card muvaffaqiyatli yangilandi")
 
