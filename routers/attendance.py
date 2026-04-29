@@ -1,5 +1,7 @@
+import calendar
+from collections import defaultdict
 from datetime import datetime, date as date_type
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import and_, delete, insert, or_, select, update
@@ -271,3 +273,220 @@ async def delete_attendance_record(
     if result.rowcount == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attendance record topilmadi")
     return {"message": "Attendance record o'chirildi", "attendance_id": attendance_id}
+
+
+# ---------------------------------------------------------------------------
+# Office time helpers
+# ---------------------------------------------------------------------------
+
+_WEEKDAY_NAMES = {
+    0: "Dushanba", 1: "Seshanba", 2: "Chorshanba",
+    3: "Payshanba", 4: "Juma", 5: "Shanba", 6: "Yakshanba",
+}
+
+
+def _calc_duration_minutes(check_in, check_out) -> Optional[int]:
+    if check_in is None or check_out is None:
+        return None
+    diff = (check_out.hour * 60 + check_out.minute) - (check_in.hour * 60 + check_in.minute)
+    return diff if diff >= 0 else None
+
+
+def _build_days(year: int, month: int, att_by_date: dict) -> List[dict]:
+    num_days = calendar.monthrange(year, month)[1]
+    days = []
+    for day in range(1, num_days + 1):
+        d = date_type(year, month, day)
+        att = att_by_date.get(d, {})
+        check_in = att.get("check_in")
+        check_out = att.get("check_out")
+        duration = _calc_duration_minutes(check_in, check_out)
+        days.append({
+            "date": str(d),
+            "weekday": _WEEKDAY_NAMES[d.weekday()],
+            "check_in_time": check_in.isoformat() if check_in else None,
+            "check_out_time": check_out.isoformat() if check_out else None,
+            "duration_minutes": duration,
+            "is_complete": check_in is not None and check_out is not None,
+        })
+    return days
+
+
+def _build_weekly_stats(days: List[dict]) -> List[dict]:
+    week_buckets: dict = {}
+    for day in days:
+        d = date_type.fromisoformat(day["date"])
+        iso_week = d.isocalendar()[1]
+        week_buckets.setdefault(iso_week, []).append(day)
+
+    weekly_stats = []
+    for week_num, (_, week_days) in enumerate(sorted(week_buckets.items()), start=1):
+        present = [d for d in week_days if d["check_in_time"] is not None]
+        durations = [d["duration_minutes"] for d in present if d["duration_minutes"] is not None]
+        total_min = sum(durations)
+        avg_min = round(total_min / len(durations)) if durations else 0
+        date_from = week_days[0]["date"][5:]
+        date_to = week_days[-1]["date"][5:]
+        weekly_stats.append({
+            "week_number": week_num,
+            "week_label": f"{week_num}-hafta ({date_from} – {date_to})",
+            "days_present": len(present),
+            "total_minutes": total_min,
+            "avg_daily_minutes": avg_min,
+            "total_hours": round(total_min / 60, 1),
+        })
+    return weekly_stats
+
+
+def _build_monthly_stats(days: List[dict]) -> dict:
+    present = [d for d in days if d["check_in_time"] is not None]
+    complete = [d for d in present if d["is_complete"]]
+    durations = [d["duration_minutes"] for d in complete if d["duration_minutes"] is not None]
+    total_min = sum(durations)
+    avg_min = round(total_min / len(durations)) if durations else 0
+    return {
+        "days_present": len(present),
+        "days_complete": len(complete),
+        "total_minutes": total_min,
+        "avg_daily_minutes": avg_min,
+        "total_hours": round(total_min / 60, 1),
+    }
+
+
+def _build_office_time_payload(emp_row, year: int, month: int, att_rows: list) -> dict:
+    month_start = date_type(year, month, 1)
+    month_end = date_type(year, month, calendar.monthrange(year, month)[1])
+    att_by_date = {
+        row.attendance_date: {
+            "check_in": row.check_in_time,
+            "check_out": row.check_out_time,
+        }
+        for row in att_rows
+    }
+    days = _build_days(year, month, att_by_date)
+    return {
+        "employee": {
+            "id": emp_row.id,
+            "full_name": f"{emp_row.name} {emp_row.surname}".strip(),
+            "role": serialize_role(getattr(emp_row, "role", None), getattr(emp_row, "role_name", None)),
+        },
+        "period": {
+            "year": year,
+            "month": month,
+            "from": str(month_start),
+            "to": str(month_end),
+        },
+        "days": days,
+        "weekly_stats": _build_weekly_stats(days),
+        "monthly_stats": _build_monthly_stats(days),
+    }
+
+
+def _validate_year_month(year: int, month: int) -> None:
+    if year < 2000 or year > 2100:
+        raise HTTPException(status_code=400, detail="year 2000–2100 oralig'ida bo'lishi kerak")
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="month 1–12 oralig'ida bo'lishi kerak")
+
+
+# ---------------------------------------------------------------------------
+# New endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/employee-monthly-office-time", summary="Xodimlar oylik office vaqti (keldi/ketdi)")
+async def get_employee_monthly_office_time(
+    year: int,
+    month: int,
+    employee_id: Optional[int] = Query(default=None, description="Berilmasa — barcha aktiv userlar"),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    _validate_year_month(year, month)
+    month_start = date_type(year, month, 1)
+    month_end = date_type(year, month, calendar.monthrange(year, month)[1])
+
+    if employee_id is not None:
+        emp_result = await session.execute(
+            select(user.c.id, user.c.name, user.c.surname, user.c.role, user.c.role_name)
+            .where(and_(user.c.id == employee_id, user.c.is_active == True))  # noqa: E712
+        )
+        emp_row = emp_result.fetchone()
+        if not emp_row:
+            raise HTTPException(status_code=404, detail="Xodim topilmadi")
+
+        att_rows = (await session.execute(
+            select(
+                attendance_log.c.attendance_date,
+                attendance_log.c.check_in_time,
+                attendance_log.c.check_out_time,
+            )
+            .where(and_(
+                attendance_log.c.employee_id == employee_id,
+                attendance_log.c.attendance_date >= month_start,
+                attendance_log.c.attendance_date <= month_end,
+            ))
+            .order_by(attendance_log.c.attendance_date.asc())
+        )).fetchall()
+
+        return _build_office_time_payload(emp_row, year, month, att_rows)
+
+    # Barcha aktiv userlar
+    user_rows = (await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.role, user.c.role_name)
+        .where(and_(user.c.is_active == True, user.c.role != UserRole.customer))  # noqa: E712
+        .order_by(user.c.name.asc(), user.c.surname.asc())
+    )).fetchall()
+
+    user_ids = [r.id for r in user_rows]
+    all_att_rows = (await session.execute(
+        select(
+            attendance_log.c.employee_id,
+            attendance_log.c.attendance_date,
+            attendance_log.c.check_in_time,
+            attendance_log.c.check_out_time,
+        )
+        .where(and_(
+            attendance_log.c.employee_id.in_(user_ids) if user_ids else False,
+            attendance_log.c.attendance_date >= month_start,
+            attendance_log.c.attendance_date <= month_end,
+        ))
+        .order_by(attendance_log.c.employee_id.asc(), attendance_log.c.attendance_date.asc())
+    )).fetchall()
+
+    att_by_user: dict = defaultdict(list)
+    for row in all_att_rows:
+        att_by_user[row.employee_id].append(row)
+
+    items = [
+        _build_office_time_payload(emp_row, year, month, att_by_user[emp_row.id])
+        for emp_row in user_rows
+    ]
+    return {"items": items, "total_count": len(items)}
+
+
+@router.get("/office-time-me", summary="Mening oylik office vaqtim (haftalik breakdown bilan)")
+async def get_my_office_time(
+    year: int,
+    month: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    _validate_year_month(year, month)
+    month_start = date_type(year, month, 1)
+    month_end = date_type(year, month, calendar.monthrange(year, month)[1])
+
+    att_rows = (await session.execute(
+        select(
+            attendance_log.c.attendance_date,
+            attendance_log.c.check_in_time,
+            attendance_log.c.check_out_time,
+        )
+        .where(and_(
+            attendance_log.c.employee_id == current_user.id,
+            attendance_log.c.attendance_date >= month_start,
+            attendance_log.c.attendance_date <= month_end,
+        ))
+        .order_by(attendance_log.c.attendance_date.asc())
+    )).fetchall()
+
+    return _build_office_time_payload(current_user, year, month, att_rows)

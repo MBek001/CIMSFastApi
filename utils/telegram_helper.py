@@ -139,11 +139,14 @@ async def send_card_assignment_notification(
     priority: str,
     due_date,
     assigner_name: str,
+    project_name: str | None = None,
 ) -> None:
     if not TELEGRAM_UPDATE_BOT_TOKEN:
         return
     try:
         lines = ["📋 <b>Sizga yangi task berildi!</b>", ""]
+        if project_name:
+            lines.append(f"🗂 <b>Project:</b> {project_name}")
         lines.append(f"📌 <b>Task:</b> {title}")
         if description:
             lines.append(f"📝 <b>Tavsif:</b> {description}")

@@ -1095,6 +1095,10 @@ async def create_card(
         )
         assignee_row = assignee_result.fetchone()
         if assignee_row and assignee_row.chat_id:
+            project_result = await session.execute(
+                select(project.c.project_name).where(project.c.id == board_row.project_id)
+            )
+            project_row = project_result.fetchone()
             assigner_name = f"{current_user.name} {current_user.surname}".strip()
             background_tasks.add_task(
                 send_card_assignment_notification,
@@ -1104,6 +1108,7 @@ async def create_card(
                 priority,
                 due_date,
                 assigner_name,
+                project_row.project_name if project_row else None,
             )
 
     return CreateResponse(message="Card muvaffaqiyatli yaratildi", id=card_id)
@@ -1439,6 +1444,10 @@ async def update_card(
         )
         assignee_row = assignee_result.fetchone()
         if assignee_row and assignee_row.chat_id:
+            project_result = await session.execute(
+                select(project.c.project_name).where(project.c.id == board_row.project_id)
+            )
+            project_row = project_result.fetchone()
             assigner_name = f"{current_user.name} {current_user.surname}".strip()
             card_title = update_values.get("title", card_row.title)
             card_description = update_values.get("description", card_row.description)
@@ -1454,6 +1463,7 @@ async def update_card(
                 card_priority,
                 card_due_date,
                 assigner_name,
+                project_row.project_name if project_row else None,
             )
 
     return SuccessResponse(message="Card muvaffaqiyatli yangilandi")

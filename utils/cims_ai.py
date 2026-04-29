@@ -123,7 +123,7 @@ def _n(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
-def _clip(text: str, max_len: int = 180) -> str:
+def _clip(text: str, max_len: int = 300) -> str:
     text = re.sub(r"\s+", " ", (text or "").strip())
     return text if len(text) <= max_len else text[: max_len - 3].rstrip() + "..."
 
@@ -234,31 +234,27 @@ def _next_company_payment_occurrence(payment_day: int, payment_time: Any, base_d
 
 
 def _should_run_sql_analytics(question: str, context: dict[str, Any]) -> bool:
-    q = _n(question)
-    explicit_markers = [
-        "sql", "query", "jadval", "table", "rows", "row", "ro'yxat", "royxat", "list",
-        "eng", "top", "qaysi", "kim", "kimlar", "taqqosla", "solishtir", "trend",
-        "daily", "kunma-kun", "oyma-oy", "haftama-hafta", "group by", "filter",
-    ]
-    if any(marker in q for marker in explicit_markers):
-        return True
     populated_sections = [
-        key
-        for key in [
-            "employee_update",
-            "lead_stats",
-            "customer_detail",
-            "finance_summary",
-            "payment_summary",
-            "recall_summary",
-            "sales_manager_stats",
-            "project_overview",
-            "company_overview",
-            "data_hub",
+        key for key in [
+            "employee_update", "all_employees_update",
+            "lead_stats", "customer_detail",
+            "finance_summary", "payment_summary",
+            "recall_summary", "sales_manager_stats",
+            "project_overview", "company_overview",
+            "attendance_detail", "compensation_detail",
         ]
         if context.get(key)
     ]
-    return not populated_sections
+    if populated_sections:
+        return False
+    q = _n(question)
+    explicit_markers = [
+        "sql", "query", "jadval", "table",
+        "ro'yxat", "royxat", "list",
+        "taqqosla", "solishtir", "trend",
+        "kunma-kun", "oyma-oy", "haftama-hafta", "group by",
+    ]
+    return any(marker in q for marker in explicit_markers)
 
 
 def _extract_response_text(payload: dict) -> Optional[str]:
@@ -500,7 +496,7 @@ def _detect_actions(question: str, employee: Optional[dict[str, Any]], sales_man
         actions.append("payment_summary")
 
     # Recall
-    if any(x in q for x in ["recall", "call", "qayta aloqa", "eslatma", "need_to_call", "bog'lan", "boglan"]):
+    if any(x in q for x in ["recall", "qayta aloqa", "eslatma", "need_to_call", "bog'lan", "boglan", "qayta bog'lan", "qayta call"]):
         actions.append("recall_summary")
 
     # Sales manager
@@ -508,7 +504,11 @@ def _detect_actions(question: str, employee: Optional[dict[str, Any]], sales_man
         actions.append("sales_manager_stats")
 
     # Projects
-    if any(x in q for x in ["project", "loyiha", "board", "kanban", "task", "card"]):
+    project_base = any(x in q for x in ["project", "loyiha", "board", "kanban"])
+    project_via_card = any(x in q for x in ["task", "card"]) and any(
+        x in q for x in ["project", "loyiha", "kanban", "board", "qancha", "nechta", "overdue", "muddat", "tugagan", "bajarilgan"]
+    )
+    if project_base or project_via_card:
         actions.append("project_overview")
 
     # Company overview — only as fallback
@@ -616,7 +616,7 @@ async def _employee_update_context(session: AsyncSession, employee: dict[str, An
                 "latest_report_date": report_rows[0].update_date.isoformat() if report_rows[0].update_date else None,
                 "total_salary_amount": round(sum(float(item.salary_amount or 0) for item in report_rows), 2),
             }
-            report_items = [{"id": item.id, "update_percentage": float(item.update_percentage or 0), "salary_amount": float(item.salary_amount or 0), "update_date": item.update_date.isoformat() if item.update_date else None, "next_payment_date": item.next_payment_date.isoformat() if item.next_payment_date else None, "note": _clip(item.note or "", 180) if item.note else None} for item in report_rows[:5]]
+            report_items = [{"id": item.id, "update_percentage": float(item.update_percentage or 0), "salary_amount": float(item.salary_amount or 0), "update_date": item.update_date.isoformat() if item.update_date else None, "next_payment_date": item.next_payment_date.isoformat() if item.next_payment_date else None, "note": _clip(item.note or "", 300) if item.note else None} for item in report_rows[:5]]
     latest = rows[-1] if rows else None
     return {
         "employee": employee,
@@ -628,8 +628,8 @@ async def _employee_update_context(session: AsyncSession, employee: dict[str, An
         "day_off_count": month_summary.get("day_off_count", 0),
         "short_day_count": month_summary.get("short_day_count", 0),
         "latest_update_date": latest.update_date.isoformat() if latest else None,
-        "latest_update_preview": _clip(latest.update_content or "", 220) if latest else None,
-        "recent_updates": [{"date": item.update_date.isoformat(), "content": _clip(item.update_content or "", 220)} for item in sorted(rows, key=lambda x: (x.update_date, x.created_at or datetime.min), reverse=True)[:5]],
+        "latest_update_preview": _clip(latest.update_content or "", 350) if latest else None,
+        "recent_updates": [{"date": item.update_date.isoformat(), "content": _clip(item.update_content or "", 350)} for item in sorted(rows, key=lambda x: (x.update_date, x.created_at or datetime.min), reverse=True)[:5]],
         "monthly_report_summary": report_summary,
         "monthly_report_items": report_items,
     }
@@ -861,11 +861,11 @@ async def _lead_stats_context(session: AsyncSession, period: PeriodSpec, custome
                 "platform": row.platform,
                 "assistant_name": row.assistant_name,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
-                "note": _clip(row.notes or "", 220),
+                "note": _clip(row.notes or "", 350),
             }
             for row in note_rows
             if str(row.notes or "").strip()
-        ][:6],
+        ][:8],
         "sales_recommendations": sales_recommendations,
     }
 
@@ -880,7 +880,7 @@ async def _customer_detail_context(session: AsyncSession, customer_match: dict[s
     return {
         "customer": customer_match,
         "sales_manager": {"id": row.sales_manager_id, "full_name": f"{row.name} {row.surname}".strip(), "email": row.email} if row else None,
-        "notes_preview": _clip(customer_match.get("notes") or "", 260) if customer_match.get("notes") else None,
+        "notes_preview": _clip(customer_match.get("notes") or "", 400) if customer_match.get("notes") else None,
     }
 
 
@@ -1450,10 +1450,12 @@ async def _company_overview_context(session: AsyncSession, period: PeriodSpec) -
 
 
 async def build_cims_ai_context(session: AsyncSession, question: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
-    history_user_text = _history_text(history, roles=("user",), limit=3)
+    # For follow-up resolution include both user and assistant messages
+    history_full_text = _history_text(history, roles=("user", "assistant"), limit=4)
     resolution_text = question.strip()
-    if history_user_text and _is_follow_up_question(question):
-        resolution_text = f"{history_user_text}\n{question.strip()}".strip()
+    if _is_follow_up_question(question) and history_full_text:
+        resolution_text = f"{history_full_text}\n{question.strip()}".strip()
+
     period = _resolve_period(question if _has_explicit_period(question) else resolution_text)
     employee = await _match_user(session, question) or (await _match_user(session, resolution_text) if resolution_text != question else None)
     sales_manager = await _match_user(session, question, UserRole.sales_manager) or (
@@ -1462,7 +1464,11 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
     customer_match = await _match_customer(session, question) or (await _match_customer(session, resolution_text) if resolution_text != question else None)
     customer_type = _detect_customer_type(question) or _detect_customer_type(resolution_text)
     intents = _detect_actions(resolution_text, employee, sales_manager, customer_match)
-    data_hub = await _company_data_hub_context(session, period)
+
+    # data_hub faqat kerak bo'lganda yuklanadi — company_overview yoki payment_summary uchun
+    needs_data_hub = any(i in intents for i in ("company_overview", "payment_summary"))
+    data_hub = await _company_data_hub_context(session, period) if needs_data_hub else {}
+
     context: dict[str, Any] = {
         "question": question.strip(),
         "resolved_question": resolution_text,
@@ -1472,8 +1478,10 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
         "sales_manager": sales_manager,
         "customer_match": customer_match,
         "customer_type_filter": customer_type,
-        "data_hub": data_hub,
     }
+    if data_hub:
+        context["data_hub"] = data_hub
+
     if "all_employees_update" in intents:
         context["all_employees_update"] = await _all_employees_update_context(session, period)
     if "employee_update" in intents and employee:
@@ -1816,24 +1824,28 @@ async def generate_cims_ai_answer(
     ) or "yoq"
 
     system_prompt = (
-        "Siz CIMS AI analytics agent siz. Faqat berilgan CIMS context asosida javob bering. "
-        "O'zbek tilida aniq raqamlar bilan yozing. Bir nechta savol bo'lsa, hammasiga javob bering. "
-        "Ma'lumot yetmasa buni aniq ayting. Agar contextda customer notes bo'lsa, ularni o'qib amaliy "
-        "xulosa va sotuv bo'yicha tavsiya bering. "
-        "Faqat statistikani sanab chiqish bilan cheklanib qolmang — kerak bo'lsa 2-5 ta aniq action point bering. "
-        "Xom DB iboralarini ishlatmang: masalan 'unique customer' o'rniga 'alohida mijoz' deb yozing."
+        "Siz CIMS — korporativ boshqaruv tizimining ichki AI analytics agentisiz. "
+        "Faqat berilgan CIMS context ma'lumotlari asosida javob bering, o'zingizdan ma'lumot qo'shmang. "
+        "Javobni O'ZBEK tilida yozing. Aniq raqamlar, foizlar, sanalar bilan gapiring. "
+        "Bir nechta savol bo'lsa hammasiga javob bering. "
+        "Ma'lumot kontekstda yo'q bo'lsa, 'bu ma'lumot mavjud emas' deb aniq ayting. "
+        "Statistikani sanab o'tish bilan cheklanmang — har doim 2-4 ta aniq amaliy tavsiya qo'shing. "
+        "Customer notes bo'lsa, ularni o'qib savdo holatini tahlil qiling va keyingi qadamni bering. "
+        "Texnik DB atamalarini ishlatmang: 'need_to_call' o'rniga 'qo'ng'iroq kutayotgan', "
+        "'project_started' o'rniga 'loyiha boshlangan', 'finished' o'rniga 'yakunlangan' deb yozing. "
+        "Follow-up savolda avvalgi chat kontekstini to'liq hisobga oling."
     )
     user_prompt = (
         f"Savol: {question}\n\n"
         f"Oldingi chat:\n{history_text}\n\n"
-        f"CIMS context:\n{_trim_context_for_llm(context, max_chars=8000)}\n\n"
-        "Foydalanuvchiga ishonchli, qisqa, tahlilli va amaliy tavsiyali javob yozing."
+        f"CIMS context:\n{_trim_context_for_llm(context, max_chars=9000)}\n\n"
+        "Yuqoridagi context asosida aniq, qisqa va amaliy javob yozing."
     )
 
     answer_text = await _call_llm(
         api_key=api_key, model=model, base_url=base_url,
         system=system_prompt, user=user_prompt,
-        temperature=0.2, max_tokens=700, timeout=35.0,
+        temperature=0.15, max_tokens=1200, timeout=45.0,
     )
     if answer_text:
         return answer_text, True
