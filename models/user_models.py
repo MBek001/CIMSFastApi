@@ -121,7 +121,7 @@ monthly_penalty = Table(
     Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
     Column("year", Integer, nullable=False),
     Column("month", Integer, nullable=False),                      # 1..12
-    Column("penalty_points", DECIMAL(6, 2), nullable=False),      # 0..100+
+    Column("penalty_amount", DECIMAL(12, 2), nullable=False),
     Column("reason", String(500), nullable=True),
     Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", DateTime, nullable=False)

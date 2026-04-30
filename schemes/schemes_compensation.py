@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -54,3 +55,19 @@ class DeliveryBonusUpdateRequest(BaseModel):
     description: Optional[str] = None
     award_date: Optional[date] = None
     project_id: Optional[int] = None
+
+
+class SimpleBonusCreateRequest(BaseModel):
+    user_id: int
+    year: int = Field(..., ge=2020, le=2035)
+    month: int = Field(..., ge=1, le=12)
+    amount: Decimal = Field(..., gt=0, description="Bonus summasi (UZS)")
+    reason: Optional[str] = Field(None, max_length=500)
+
+
+class SimplePenaltyCreateRequest(BaseModel):
+    user_id: int
+    year: int = Field(..., ge=2020, le=2035)
+    month: int = Field(..., ge=1, le=12)
+    amount: Decimal = Field(..., gt=0, description="Jarima summasi (UZS)")
+    reason: Optional[str] = Field(None, max_length=500)

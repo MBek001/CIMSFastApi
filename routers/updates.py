@@ -18,6 +18,8 @@ from models.user_models import (
     UserRole,
     compensation_bonus,
     compensation_mistake,
+    monthly_bonus,
+    monthly_penalty,
     monthly_update,
     user,
     user_page_permission,
@@ -27,6 +29,8 @@ from schemes.schemes_compensation import (
     CompensationMistakeUpdateRequest,
     DeliveryBonusCreateRequest,
     DeliveryBonusUpdateRequest,
+    SimpleBonusCreateRequest,
+    SimplePenaltyCreateRequest,
 )
 from utils.admin_stats import _is_excluded_from_admin_stats
 from utils.compensation_policy import (
@@ -511,28 +515,20 @@ def build_user_deduction_breakdown(user_id: int, user_base_salary: Decimal | flo
         if raw_deduction_amount > 0:
             positive_raw_amounts.append(raw_deduction_amount)
 
-    cap_amount = max_monthly_deduction_amount(salary_base)
-    capped_positive_amounts = proportional_cap(positive_raw_amounts, cap_amount)
     raw_total = Decimal("0")
     applied_total = Decimal("0")
-    positive_index = 0
     for item in detail_items:
         raw_decimal = item.pop("raw_deduction_amount_decimal")
         raw_total += raw_decimal
-        if raw_decimal > 0:
-            applied_decimal = capped_positive_amounts[positive_index]
-            positive_index += 1
-        else:
-            applied_decimal = Decimal("0")
-        applied_total += applied_decimal
-        item["applied_deduction_amount"] = as_money(applied_decimal)
+        applied_total += raw_decimal
+        item["applied_deduction_amount"] = as_money(raw_decimal)
 
     return {
         "items": detail_items,
         "raw_total": raw_total,
         "applied_total": applied_total,
-        "cap_amount": cap_amount,
-        "cap_applied": raw_total > cap_amount,
+        "cap_amount": raw_total,
+        "cap_applied": False,
     }
 
 
@@ -626,6 +622,96 @@ async def fetch_employee_period_delivery_bonuses(
         .order_by(compensation_bonus.c.award_date.asc(), compensation_bonus.c.id.asc())
     )
     return result.fetchall()
+
+
+async def fetch_simple_bonuses(
+    session: AsyncSession,
+    user_id: int,
+    year: int,
+    month: int,
+) -> List:
+    result = await session.execute(
+        select(monthly_bonus)
+        .where(
+            and_(
+                monthly_bonus.c.user_id == user_id,
+                monthly_bonus.c.year == year,
+                monthly_bonus.c.month == month,
+            )
+        )
+        .order_by(monthly_bonus.c.created_at.asc(), monthly_bonus.c.id.asc())
+    )
+    return result.fetchall()
+
+
+async def fetch_simple_penalties(
+    session: AsyncSession,
+    user_id: int,
+    year: int,
+    month: int,
+) -> List:
+    result = await session.execute(
+        select(monthly_penalty)
+        .where(
+            and_(
+                monthly_penalty.c.user_id == user_id,
+                monthly_penalty.c.year == year,
+                monthly_penalty.c.month == month,
+            )
+        )
+        .order_by(monthly_penalty.c.created_at.asc(), monthly_penalty.c.id.asc())
+    )
+    return result.fetchall()
+
+
+async def fetch_simple_bonuses_for_users(
+    session: AsyncSession,
+    user_ids: List[int],
+    year: int,
+    month: int,
+) -> Dict[int, List]:
+    if not user_ids:
+        return {}
+    result = await session.execute(
+        select(monthly_bonus)
+        .where(
+            and_(
+                monthly_bonus.c.user_id.in_(user_ids),
+                monthly_bonus.c.year == year,
+                monthly_bonus.c.month == month,
+            )
+        )
+        .order_by(monthly_bonus.c.created_at.asc(), monthly_bonus.c.id.asc())
+    )
+    bonuses_map: Dict[int, List] = {uid: [] for uid in user_ids}
+    for row in result.fetchall():
+        bonuses_map.setdefault(row.user_id, []).append(row)
+    return bonuses_map
+
+
+async def fetch_simple_penalties_for_users(
+    session: AsyncSession,
+    user_ids: List[int],
+    year: int,
+    month: int,
+) -> Dict[int, List]:
+    if not user_ids:
+        return {}
+    result = await session.execute(
+        select(monthly_penalty)
+        .where(
+            and_(
+                monthly_penalty.c.user_id.in_(user_ids),
+                monthly_penalty.c.year == year,
+                monthly_penalty.c.month == month,
+            )
+        )
+        .order_by(monthly_penalty.c.created_at.asc(), monthly_penalty.c.id.asc())
+    )
+    penalties_map: Dict[int, List] = {uid: [] for uid in user_ids}
+    for row in result.fetchall():
+        penalties_map.setdefault(row.user_id, []).append(row)
+    return penalties_map
 
 
 async def fetch_period_incidents_for_users(
@@ -744,6 +830,8 @@ def build_member_compensation_payload_from_prefetched(
     delivery_bonus_rows: List,
     update_coverage: dict,
     include_details: bool = True,
+    simple_bonuses: List = None,
+    simple_penalties: List = None,
 ) -> dict:
     salary_base = normalize_base_salary(getattr(user_row, "default_salary", 0))
     deduction_breakdown = build_user_deduction_breakdown(user_row.id, salary_base, incidents)
@@ -783,7 +871,6 @@ def build_member_compensation_payload_from_prefetched(
         productivity_percent,
     )
     delivery_percent = Decimal("0")
-    selected_delivery_bonus = None
     serialized_delivery_bonuses = []
     for row in delivery_bonus_rows:
         bonus_percent = delivery_bonus_rate(row.bonus_type)
@@ -806,13 +893,27 @@ def build_member_compensation_payload_from_prefetched(
             "bonus_amount": as_money(bonus_amount_from_percent(salary_base, bonus_percent)),
         }
         serialized_delivery_bonuses.append(serialized_item)
-        if bonus_percent >= delivery_percent:
-            delivery_percent = bonus_percent
-            selected_delivery_bonus = serialized_item
+        delivery_percent += bonus_percent
 
     total_bonus_percent = productivity_percent + quality_percent + delivery_percent
     total_bonus_amount = bonus_amount_from_percent(salary_base, total_bonus_percent)
-    final_salary = quantize_money(salary_base - deduction_breakdown["applied_total"] + total_bonus_amount)
+
+    simple_bonus_total = quantize_money(sum(
+        (Decimal(str(row.bonus_amount)) for row in (simple_bonuses or [])),
+        Decimal("0"),
+    ))
+    simple_penalty_total = quantize_money(sum(
+        (Decimal(str(row.penalty_amount)) for row in (simple_penalties or [])),
+        Decimal("0"),
+    ))
+
+    final_salary = quantize_money(
+        salary_base
+        - deduction_breakdown["applied_total"]
+        + total_bonus_amount
+        + simple_bonus_total
+        - simple_penalty_total
+    )
     bonus_lines = [
         {
             "type": "productivity",
@@ -832,13 +933,13 @@ def build_member_compensation_payload_from_prefetched(
         },
         {
             "type": "delivery",
-            "label": selected_delivery_bonus["title"] if selected_delivery_bonus else "No delivery bonus selected",
+            "label": f"{len(serialized_delivery_bonuses)} ta delivery bonus" if serialized_delivery_bonuses else "No delivery bonus",
             "applied": bool(delivery_percent > 0),
             "percent": as_money(delivery_percent),
             "amount": as_money(bonus_amount_from_percent(salary_base, delivery_percent)),
             "reason": (
-                f"Tanlangan delivery bonus: {selected_delivery_bonus['title']}"
-                if selected_delivery_bonus
+                f"{len(serialized_delivery_bonuses)} ta delivery bonus yig'ildi: {as_money(delivery_percent)}% jami."
+                if serialized_delivery_bonuses
                 else "Bu oy delivery bonus tanlanmagan."
             ),
         },
@@ -870,7 +971,30 @@ def build_member_compensation_payload_from_prefetched(
         formula_parts.append(
             f"- {format_money_uzs(deduction_line['amount'])} ({deduction_line['share_percent']}% of {deduction_line['severity']} mistake)"
         )
+    if simple_bonus_total > 0:
+        formula_parts.append(f"+ {format_money_uzs(simple_bonus_total)} (oddiy bonus)")
+    if simple_penalty_total > 0:
+        formula_parts.append(f"- {format_money_uzs(simple_penalty_total)} (jarima)")
     formula_parts.append(f"= {format_money_uzs(final_salary)}")
+
+    serialized_simple_bonuses = [
+        {
+            "id": row.id,
+            "amount": as_money(Decimal(str(row.bonus_amount))),
+            "reason": row.reason,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in (simple_bonuses or [])
+    ]
+    serialized_simple_penalties = [
+        {
+            "id": row.id,
+            "amount": as_money(Decimal(str(row.penalty_amount))),
+            "reason": row.reason,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in (simple_penalties or [])
+    ]
 
     payload = {
         "user": {
@@ -895,7 +1019,7 @@ def build_member_compensation_payload_from_prefetched(
                 }
                 for item in bonus_lines
             ],
-            "selected_delivery_bonus": selected_delivery_bonus,
+            "delivery_bonuses_count": len(serialized_delivery_bonuses),
             "total_bonus_percent": as_money(total_bonus_percent),
             "total_bonus_amount": as_money(total_bonus_amount),
         },
@@ -905,12 +1029,21 @@ def build_member_compensation_payload_from_prefetched(
             "cap_amount": as_money(deduction_breakdown["cap_amount"]),
             "cap_applied": deduction_breakdown["cap_applied"],
         },
+        "simple_adjustments": {
+            "bonus_total": as_money(simple_bonus_total),
+            "penalty_total": as_money(simple_penalty_total),
+            "net": as_money(simple_bonus_total - simple_penalty_total),
+            "bonuses": serialized_simple_bonuses,
+            "penalties": serialized_simple_penalties,
+        },
         "salary_estimate": {
             "base_salary": as_money(salary_base),
             "raw_deduction_amount": as_money(deduction_breakdown["raw_total"]),
             "applied_deduction_amount": as_money(deduction_breakdown["applied_total"]),
             "total_bonus_percent": as_money(total_bonus_percent),
             "total_bonus_amount": as_money(total_bonus_amount),
+            "simple_bonus_total": as_money(simple_bonus_total),
+            "simple_penalty_total": as_money(simple_penalty_total),
             "final_salary": as_money(final_salary),
             "estimated_salary": as_money(final_salary),
             "calculation_breakdown": {
@@ -938,6 +1071,8 @@ async def build_member_compensation_payload(
     incidents = await fetch_user_period_incidents(session, user_row.id, first_day, last_day)
     delivery_bonus_rows = await fetch_employee_period_delivery_bonuses(session, user_row.id, first_day, last_day)
     update_coverage = await calculate_monthly_update_coverage(session, user_row.id, year, month)
+    simple_bonuses = await fetch_simple_bonuses(session, user_row.id, year, month)
+    simple_penalties = await fetch_simple_penalties(session, user_row.id, year, month)
     return build_member_compensation_payload_from_prefetched(
         user_row=user_row,
         year=year,
@@ -946,6 +1081,8 @@ async def build_member_compensation_payload(
         delivery_bonus_rows=delivery_bonus_rows,
         update_coverage=update_coverage,
         include_details=include_details,
+        simple_bonuses=simple_bonuses,
+        simple_penalties=simple_penalties,
     )
 
 
@@ -1444,6 +1581,8 @@ async def get_employee_monthly_update_statistics(
         incidents_map = await fetch_period_incidents_for_users(session, employee_id_list, first_day, last_day)
         delivery_bonuses_map = await fetch_period_delivery_bonuses_for_users(session, employee_id_list, first_day, last_day)
         update_coverage_map = await calculate_monthly_update_coverage_batch(session, employee_id_list, year, month)
+        simple_bonuses_map = await fetch_simple_bonuses_for_users(session, employee_id_list, year, month)
+        simple_penalties_map = await fetch_simple_penalties_for_users(session, employee_id_list, year, month)
         total_base_salary = Decimal("0")
         total_applied_deduction = Decimal("0")
         total_bonus_amount = Decimal("0")
@@ -1467,6 +1606,8 @@ async def get_employee_monthly_update_statistics(
                     },
                 ),
                 include_details=False,
+                simple_bonuses=simple_bonuses_map.get(row.user_id, []),
+                simple_penalties=simple_penalties_map.get(row.user_id, []),
             )
             salary_estimate_map[row.user_id] = payload["salary_estimate"]
             total_base_salary += normalize_base_salary(row.default_salary)
@@ -1828,3 +1969,223 @@ async def delete_update(
     if result.rowcount == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Update topilmadi")
     return {"message": "Update muvaffaqiyatli o'chirildi"}
+
+
+# ---------------------------------------------------------------------------
+# Simple Bonus & Penalty endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/member/simple-bonus", summary="Hodimga oddiy bonus qo'shish")
+async def create_simple_bonus(
+    payload: SimpleBonusCreateRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_compensation_access(session, current_user)
+    await ensure_member_exists(session, payload.user_id)
+    result = await session.execute(
+        insert(monthly_bonus)
+        .values(
+            user_id=payload.user_id,
+            year=payload.year,
+            month=payload.month,
+            bonus_amount=payload.amount,
+            reason=payload.reason,
+            created_by=current_user.id,
+            created_at=datetime.utcnow(),
+        )
+        .returning(monthly_bonus.c.id)
+    )
+    bonus_id = result.scalar_one()
+    await session.commit()
+    return {"message": "Bonus muvaffaqiyatli qo'shildi", "bonus_id": bonus_id}
+
+
+@router.get("/member/simple-bonuses", summary="Oddiy bonuslar ro'yxati")
+async def list_simple_bonuses(
+    user_id: Optional[int] = None,
+    year: Optional[int] = Query(default=None, ge=2020, le=2035),
+    month: Optional[int] = Query(default=None, ge=1, le=12),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_compensation_access(session, current_user)
+    conditions = []
+    if user_id is not None:
+        conditions.append(monthly_bonus.c.user_id == user_id)
+    if year is not None:
+        conditions.append(monthly_bonus.c.year == year)
+    if month is not None:
+        conditions.append(monthly_bonus.c.month == month)
+
+    creator_user = user.alias("creator_user")
+    query = (
+        select(
+            monthly_bonus.c.id,
+            monthly_bonus.c.user_id,
+            monthly_bonus.c.year,
+            monthly_bonus.c.month,
+            monthly_bonus.c.bonus_amount,
+            monthly_bonus.c.reason,
+            monthly_bonus.c.created_by,
+            monthly_bonus.c.created_at,
+            user.c.name.label("user_name"),
+            user.c.surname.label("user_surname"),
+            creator_user.c.name.label("creator_name"),
+            creator_user.c.surname.label("creator_surname"),
+        )
+        .select_from(
+            monthly_bonus
+            .join(user, monthly_bonus.c.user_id == user.c.id)
+            .outerjoin(creator_user, monthly_bonus.c.created_by == creator_user.c.id)
+        )
+        .order_by(monthly_bonus.c.year.desc(), monthly_bonus.c.month.desc(), monthly_bonus.c.id.desc())
+    )
+    if conditions:
+        query = query.where(and_(*conditions))
+
+    rows = (await session.execute(query)).fetchall()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "user_id": row.user_id,
+                "user_full_name": f"{row.user_name} {row.user_surname}".strip(),
+                "year": row.year,
+                "month": row.month,
+                "amount": as_money(Decimal(str(row.bonus_amount))),
+                "reason": row.reason,
+                "created_by": row.created_by,
+                "created_by_full_name": (
+                    f"{row.creator_name} {row.creator_surname}".strip()
+                    if row.creator_name or row.creator_surname
+                    else None
+                ),
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ],
+        "total_count": len(rows),
+    }
+
+
+@router.delete("/member/simple-bonus/{bonus_id}", summary="Bonusni o'chirish")
+async def delete_simple_bonus(
+    bonus_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_compensation_access(session, current_user)
+    result = await session.execute(delete(monthly_bonus).where(monthly_bonus.c.id == bonus_id))
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bonus topilmadi")
+    return {"message": "Bonus o'chirildi", "bonus_id": bonus_id}
+
+
+@router.post("/member/simple-penalty", summary="Hodimga jarima qo'shish")
+async def create_simple_penalty(
+    payload: SimplePenaltyCreateRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_compensation_access(session, current_user)
+    await ensure_member_exists(session, payload.user_id)
+    result = await session.execute(
+        insert(monthly_penalty)
+        .values(
+            user_id=payload.user_id,
+            year=payload.year,
+            month=payload.month,
+            penalty_amount=payload.amount,
+            reason=payload.reason,
+            created_by=current_user.id,
+            created_at=datetime.utcnow(),
+        )
+        .returning(monthly_penalty.c.id)
+    )
+    penalty_id = result.scalar_one()
+    await session.commit()
+    return {"message": "Jarima muvaffaqiyatli qo'shildi", "penalty_id": penalty_id}
+
+
+@router.get("/member/simple-penalties", summary="Jarimalar ro'yxati")
+async def list_simple_penalties(
+    user_id: Optional[int] = None,
+    year: Optional[int] = Query(default=None, ge=2020, le=2035),
+    month: Optional[int] = Query(default=None, ge=1, le=12),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_compensation_access(session, current_user)
+    conditions = []
+    if user_id is not None:
+        conditions.append(monthly_penalty.c.user_id == user_id)
+    if year is not None:
+        conditions.append(monthly_penalty.c.year == year)
+    if month is not None:
+        conditions.append(monthly_penalty.c.month == month)
+
+    creator_user = user.alias("creator_user")
+    query = (
+        select(
+            monthly_penalty.c.id,
+            monthly_penalty.c.user_id,
+            monthly_penalty.c.year,
+            monthly_penalty.c.month,
+            monthly_penalty.c.penalty_amount,
+            monthly_penalty.c.reason,
+            monthly_penalty.c.created_by,
+            monthly_penalty.c.created_at,
+            user.c.name.label("user_name"),
+            user.c.surname.label("user_surname"),
+            creator_user.c.name.label("creator_name"),
+            creator_user.c.surname.label("creator_surname"),
+        )
+        .select_from(
+            monthly_penalty
+            .join(user, monthly_penalty.c.user_id == user.c.id)
+            .outerjoin(creator_user, monthly_penalty.c.created_by == creator_user.c.id)
+        )
+        .order_by(monthly_penalty.c.year.desc(), monthly_penalty.c.month.desc(), monthly_penalty.c.id.desc())
+    )
+    if conditions:
+        query = query.where(and_(*conditions))
+
+    rows = (await session.execute(query)).fetchall()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "user_id": row.user_id,
+                "user_full_name": f"{row.user_name} {row.user_surname}".strip(),
+                "year": row.year,
+                "month": row.month,
+                "amount": as_money(Decimal(str(row.penalty_amount))),
+                "reason": row.reason,
+                "created_by": row.created_by,
+                "created_by_full_name": (
+                    f"{row.creator_name} {row.creator_surname}".strip()
+                    if row.creator_name or row.creator_surname
+                    else None
+                ),
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ],
+        "total_count": len(rows),
+    }
+
+
+@router.delete("/member/simple-penalty/{penalty_id}", summary="Jarimani o'chirish")
+async def delete_simple_penalty(
+    penalty_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_compensation_access(session, current_user)
+    result = await session.execute(delete(monthly_penalty).where(monthly_penalty.c.id == penalty_id))
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Jarima topilmadi")
+    return {"message": "Jarima o'chirildi", "penalty_id": penalty_id}
