@@ -205,6 +205,51 @@ attendance_log = Table(
 
 Index("idx_attendance_log_employee_date", attendance_log.c.employee_id, attendance_log.c.attendance_date)
 
+# -- FaceID: Daily attendance record table --
+attendance_daily_record = Table(
+    "attendance_daily_record",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("employee_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("attendance_date", Date, nullable=False),
+    Column("check_in_time", Time, nullable=True),
+    Column("check_out_time", Time, nullable=True),
+    Column("worked_minutes", Integer, nullable=True),
+    Column("worked_hours_decimal", DECIMAL(6, 2), nullable=True),
+    Column("status", String(20), nullable=False, default="present"),
+    Column("shift_name", String(100), nullable=True),
+    Column("source_system", String(50), nullable=True, default="faceid"),
+    Column("source_session_id", String(100), nullable=True),
+    Column("is_manual", Boolean, nullable=False, default=False),
+    Column("note", Text, nullable=True),
+    Column("source_updated_at", DateTime, nullable=True),
+    Column("is_deleted", Boolean, nullable=False, default=False),
+    Column("delete_reason", Text, nullable=True),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+    UniqueConstraint("employee_id", "attendance_date", name="uq_attendance_daily_record_employee_date"),
+)
+
+Index("idx_attendance_daily_record_employee_date", attendance_daily_record.c.employee_id, attendance_daily_record.c.attendance_date)
+Index("idx_attendance_daily_record_date", attendance_daily_record.c.attendance_date)
+
+# -- FaceID: Raw event log table --
+attendance_raw_event = Table(
+    "attendance_raw_event",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("employee_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("event_time", DateTime, nullable=False),
+    Column("action", String(20), nullable=False),
+    Column("source_system", String(50), nullable=True),
+    Column("terminal_ip", String(50), nullable=True),
+    Column("is_manual", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+)
+
+Index("idx_attendance_raw_event_employee", attendance_raw_event.c.employee_id)
+Index("idx_attendance_raw_event_time", attendance_raw_event.c.event_time)
+
 # -- Message table --
 message = Table(
     "message",

@@ -5,13 +5,21 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import and_, delete, insert, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_utils.auth_func import get_current_active_user
 from config import ATTENDANCE_API_KEY
 from database import get_async_session
-from models.user_models import UserRole, attendance_log, user
-from schemes.schemes_attendance import AttendanceCreateRequest, AttendanceUpdateRequest
+from models.user_models import UserRole, attendance_daily_record, attendance_log, attendance_raw_event, user
+from schemes.schemes_attendance import (
+    AttendanceCreateRequest,
+    AttendanceUpdateRequest,
+    AttendanceDailyRecordRequest,
+    BulkUpsertRequest,
+    BulkRawEventsRequest,
+    PatchDailyRecordRequest,
+)
 
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
@@ -490,3 +498,279 @@ async def get_my_office_time(
     )).fetchall()
 
     return _build_office_time_payload(current_user, year, month, att_rows)
+
+
+# ---------------------------------------------------------------------------
+# FaceID integration — attendance_daily_record endpoints
+# ---------------------------------------------------------------------------
+
+def _serialize_daily_record(row) -> dict:
+    return {
+        "id": row.id,
+        "employee_id": row.employee_id,
+        "attendance_date": row.attendance_date.isoformat(),
+        "check_in_time": row.check_in_time.isoformat() if row.check_in_time else None,
+        "check_out_time": row.check_out_time.isoformat() if row.check_out_time else None,
+        "worked_minutes": row.worked_minutes,
+        "worked_hours_decimal": float(row.worked_hours_decimal) if row.worked_hours_decimal is not None else None,
+        "status": row.status,
+        "shift_name": row.shift_name,
+        "source_system": row.source_system,
+        "source_session_id": row.source_session_id,
+        "is_manual": row.is_manual,
+        "note": row.note,
+        "source_updated_at": row.source_updated_at.isoformat() if row.source_updated_at else None,
+        "is_deleted": row.is_deleted,
+        "delete_reason": row.delete_reason,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+async def _upsert_daily_record(session: AsyncSession, payload: AttendanceDailyRecordRequest) -> int:
+    now = datetime.utcnow()
+    values = {
+        "employee_id": payload.employee_id,
+        "attendance_date": payload.attendance_date,
+        "check_in_time": payload.check_in_time,
+        "check_out_time": payload.check_out_time,
+        "worked_minutes": payload.worked_minutes,
+        "worked_hours_decimal": payload.worked_hours_decimal,
+        "status": payload.status,
+        "shift_name": payload.shift_name,
+        "source_system": payload.source_system,
+        "source_session_id": payload.source_session_id,
+        "is_manual": payload.is_manual,
+        "note": payload.note,
+        "source_updated_at": payload.source_updated_at,
+        "is_deleted": False,
+        "delete_reason": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    update_cols = {k: v for k, v in values.items() if k != "created_at"}
+    stmt = (
+        pg_insert(attendance_daily_record)
+        .values(**values)
+        .on_conflict_do_update(
+            constraint="uq_attendance_daily_record_employee_date",
+            set_={**update_cols, "updated_at": now},
+        )
+        .returning(attendance_daily_record.c.id)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one()
+
+
+@router.put(
+    "/daily-records/{employee_id}/{attendance_date}",
+    summary="FaceID: Kunlik davomat yozuvi upsert",
+)
+async def upsert_daily_record(
+    employee_id: int,
+    attendance_date: date_type,
+    payload: AttendanceDailyRecordRequest,
+    session: AsyncSession = Depends(get_async_session),
+    _: None = Depends(require_attendance_api_key),
+):
+    payload.employee_id = employee_id
+    payload.attendance_date = attendance_date
+    await ensure_employee_exists(session, employee_id)
+    record_id = await _upsert_daily_record(session, payload)
+    await session.commit()
+    return {"success": True, "record_id": record_id}
+
+
+@router.post(
+    "/daily-records/bulk-upsert",
+    summary="FaceID: Bir nechta kunlik davomat yozuvlari upsert (partial success)",
+)
+async def bulk_upsert_daily_records(
+    payload: BulkUpsertRequest,
+    session: AsyncSession = Depends(get_async_session),
+    _: None = Depends(require_attendance_api_key),
+):
+    results = []
+    success_count = 0
+    failed_count = 0
+    for record in payload.records:
+        try:
+            await ensure_employee_exists(session, record.employee_id)
+            record_id = await _upsert_daily_record(session, record)
+            await session.commit()
+            results.append({
+                "success": True,
+                "employee_id": record.employee_id,
+                "attendance_date": record.attendance_date.isoformat(),
+                "record_id": record_id,
+            })
+            success_count += 1
+        except Exception as e:
+            await session.rollback()
+            results.append({
+                "success": False,
+                "employee_id": record.employee_id,
+                "attendance_date": record.attendance_date.isoformat(),
+                "error": str(e),
+            })
+            failed_count += 1
+    return {"success_count": success_count, "failed_count": failed_count, "results": results}
+
+
+@router.get(
+    "/daily-records/{employee_id}/{attendance_date}",
+    summary="FaceID: Bitta kunlik davomat yozuvi",
+)
+async def get_daily_record(
+    employee_id: int,
+    attendance_date: date_type,
+    session: AsyncSession = Depends(get_async_session),
+    _: None = Depends(require_attendance_api_key),
+):
+    result = await session.execute(
+        select(attendance_daily_record).where(
+            and_(
+                attendance_daily_record.c.employee_id == employee_id,
+                attendance_daily_record.c.attendance_date == attendance_date,
+                attendance_daily_record.c.is_deleted == False,  # noqa: E712
+            )
+        )
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Davomat yozuvi topilmadi")
+    return _serialize_daily_record(row)
+
+
+@router.patch(
+    "/daily-records/{employee_id}/{attendance_date}",
+    summary="FaceID: Kunlik davomat yozuvini yangilash (soft delete / patch)",
+)
+async def patch_daily_record(
+    employee_id: int,
+    attendance_date: date_type,
+    payload: PatchDailyRecordRequest,
+    session: AsyncSession = Depends(get_async_session),
+    _: None = Depends(require_attendance_api_key),
+):
+    result = await session.execute(
+        select(attendance_daily_record.c.id).where(
+            and_(
+                attendance_daily_record.c.employee_id == employee_id,
+                attendance_daily_record.c.attendance_date == attendance_date,
+            )
+        )
+    )
+    row_id = result.scalar()
+    if row_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Davomat yozuvi topilmadi")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Hech qanday o'zgartirish yo'q")
+
+    update_data["updated_at"] = datetime.utcnow()
+    await session.execute(
+        update(attendance_daily_record)
+        .where(attendance_daily_record.c.id == row_id)
+        .values(**update_data)
+    )
+    await session.commit()
+    return {"success": True, "record_id": row_id}
+
+
+@router.get(
+    "/daily-records",
+    summary="Kunlik davomat yozuvlari ro'yxati (JWT auth)",
+)
+async def list_daily_records(
+    employee_id: Optional[int] = Query(default=None),
+    date_from: Optional[date_type] = Query(default=None),
+    date_to: Optional[date_type] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    conditions = [attendance_daily_record.c.is_deleted == False]  # noqa: E712
+    if employee_id is not None:
+        conditions.append(attendance_daily_record.c.employee_id == employee_id)
+    if date_from is not None:
+        conditions.append(attendance_daily_record.c.attendance_date >= date_from)
+    if date_to is not None:
+        conditions.append(attendance_daily_record.c.attendance_date <= date_to)
+    if status_filter is not None:
+        conditions.append(attendance_daily_record.c.status == status_filter)
+
+    query = (
+        select(
+            attendance_daily_record,
+            user.c.name,
+            user.c.surname,
+        )
+        .select_from(
+            attendance_daily_record.join(user, attendance_daily_record.c.employee_id == user.c.id)
+        )
+        .where(and_(*conditions))
+        .order_by(attendance_daily_record.c.attendance_date.desc(), attendance_daily_record.c.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    rows = (await session.execute(query)).fetchall()
+    return {
+        "items": [
+            {
+                **_serialize_daily_record(row),
+                "full_name": f"{row.name} {row.surname}".strip(),
+            }
+            for row in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total_count": len(rows),
+    }
+
+
+@router.post(
+    "/raw-events/bulk",
+    summary="FaceID: Bir nechta raw event saqlash",
+)
+async def bulk_create_raw_events(
+    payload: BulkRawEventsRequest,
+    session: AsyncSession = Depends(get_async_session),
+    _: None = Depends(require_attendance_api_key),
+):
+    if not payload.events:
+        return {"success_count": 0, "failed_count": 0, "results": []}
+
+    results = []
+    success_count = 0
+    failed_count = 0
+    now = datetime.utcnow()
+
+    for event in payload.events:
+        try:
+            result = await session.execute(
+                insert(attendance_raw_event)
+                .values(
+                    employee_id=event.employee_id,
+                    event_time=event.event_time,
+                    action=event.action,
+                    source_system=event.source_system,
+                    terminal_ip=event.terminal_ip,
+                    is_manual=event.is_manual,
+                    created_at=now,
+                )
+                .returning(attendance_raw_event.c.id)
+            )
+            event_id = result.scalar_one()
+            await session.commit()
+            results.append({"success": True, "employee_id": event.employee_id, "event_id": event_id})
+            success_count += 1
+        except Exception as e:
+            await session.rollback()
+            results.append({"success": False, "employee_id": event.employee_id, "error": str(e)})
+            failed_count += 1
+
+    return {"success_count": success_count, "failed_count": failed_count, "results": results}
