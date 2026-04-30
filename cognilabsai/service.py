@@ -291,7 +291,10 @@ async def ensure_permission_pages(session: AsyncSession):
 
 
 async def ensure_global_integration_row(session: AsyncSession):
-    result = await session.execute(select(cognilabsai_global_integration.c.id))
+    result = await session.execute(
+        select(cognilabsai_global_integration.c.id)
+        .where(cognilabsai_global_integration.c.id == 1)
+    )
     if result.scalar() is None:
         await session.execute(
             insert(cognilabsai_global_integration).values(
@@ -308,7 +311,10 @@ async def ensure_global_integration_row(session: AsyncSession):
 
 async def get_integration_config(session: AsyncSession) -> dict:
     await ensure_schema(session)
-    result = await session.execute(select(cognilabsai_global_integration))
+    result = await session.execute(
+        select(cognilabsai_global_integration)
+        .where(cognilabsai_global_integration.c.id == 1)
+    )
     row = result.mappings().first()
     return dict(row)
 
