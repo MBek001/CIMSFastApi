@@ -1,4 +1,5 @@
 import math
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, desc, func, select
@@ -51,6 +52,8 @@ async def _query_audit_logs(
     entity_id: str | None = None,
     action: str | None = None,
     actor_user_id: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> AuditLogListResponse:
@@ -67,6 +70,12 @@ async def _query_audit_logs(
         conditions.append(audit_log.c.action == action)
     if actor_user_id is not None:
         conditions.append(audit_log.c.actor_user_id == actor_user_id)
+    if date_from is not None:
+        effective_to = date_to if date_to is not None else date_from
+        conditions.append(audit_log.c.created_at >= datetime(date_from.year, date_from.month, date_from.day))
+        conditions.append(audit_log.c.created_at < datetime(effective_to.year, effective_to.month, effective_to.day) + timedelta(days=1))
+    elif date_to is not None:
+        conditions.append(audit_log.c.created_at < datetime(date_to.year, date_to.month, date_to.day) + timedelta(days=1))
 
     where_clause = and_(*conditions) if conditions else None
     base_query = select(audit_log)
@@ -100,6 +109,8 @@ async def list_audit_logs(
     entity_id: str | None = Query(default=None),
     action: str | None = Query(default=None),
     actor_user_id: int | None = Query(default=None),
+    date_from: date | None = Query(default=None, description="Boshlanish sanasi (YYYY-MM-DD)"),
+    date_to: date | None = Query(default=None, description="Tugash sanasi (YYYY-MM-DD). Bo'sh bo'lsa date_from ning o'zi bir kun"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     session: AsyncSession = Depends(get_async_session),
@@ -114,6 +125,8 @@ async def list_audit_logs(
         entity_id=entity_id,
         action=action,
         actor_user_id=actor_user_id,
+        date_from=date_from,
+        date_to=date_to,
         page=page,
         page_size=page_size,
     )
