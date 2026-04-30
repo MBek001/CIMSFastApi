@@ -31,4 +31,4 @@ services:
 
 volumes:
   pg_data:
-
+    name: cimsfastapi_pg_data
