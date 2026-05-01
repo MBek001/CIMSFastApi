@@ -333,11 +333,13 @@ def _build_weekly_stats(days: List[dict]) -> List[dict]:
         durations = [d["duration_minutes"] for d in present if d["duration_minutes"] is not None]
         total_min = sum(durations)
         avg_min = round(total_min / len(durations)) if durations else 0
-        date_from = week_days[0]["date"][5:]
-        date_to = week_days[-1]["date"][5:]
+        date_from = week_days[0]["date"]
+        date_to = week_days[-1]["date"]
         weekly_stats.append({
             "week_number": week_num,
-            "week_label": f"{week_num}-hafta ({date_from} – {date_to})",
+            "week_label": f"{week_num}-hafta ({date_from[5:]} – {date_to[5:]})",
+            "date_from": date_from,
+            "date_to": date_to,
             "days_present": len(present),
             "total_minutes": total_min,
             "avg_daily_minutes": avg_min,
@@ -395,6 +397,29 @@ def _validate_year_month(year: int, month: int) -> None:
         raise HTTPException(status_code=400, detail="year 2000–2100 oralig'ida bo'lishi kerak")
     if month < 1 or month > 12:
         raise HTTPException(status_code=400, detail="month 1–12 oralig'ida bo'lishi kerak")
+
+
+_MONTH_NAMES_UZ = {
+    1: "Yanvar", 2: "Fevral", 3: "Mart", 4: "Aprel", 5: "May", 6: "Iyun",
+    7: "Iyul", 8: "Avgust", 9: "Sentabr", 10: "Oktabr", 11: "Noyabr", 12: "Dekabr",
+}
+
+
+def _build_employee_attendance_summary(emp_row, year: int, month: int, att_rows: list) -> dict:
+    att_by_date = {
+        row.attendance_date: {"check_in": row.check_in_time, "check_out": row.check_out_time}
+        for row in att_rows
+    }
+    days = _build_days(year, month, att_by_date)
+    return {
+        "employee": {
+            "id": emp_row.id,
+            "full_name": f"{emp_row.name} {emp_row.surname}".strip(),
+            "role": serialize_role(getattr(emp_row, "role", None), getattr(emp_row, "role_name", None)),
+        },
+        "monthly_stats": _build_monthly_stats(days),
+        "weekly_stats": _build_weekly_stats(days),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +523,71 @@ async def get_my_office_time(
     )).fetchall()
 
     return _build_office_time_payload(current_user, year, month, att_rows)
+
+
+@router.get("/monthly-summary", summary="Barcha xodimlar oylik davomat xulosasi (haftalik breakdown bilan)")
+async def get_monthly_attendance_summary(
+    year: int,
+    month: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    _validate_year_month(year, month)
+    month_start = date_type(year, month, 1)
+    month_end = date_type(year, month, calendar.monthrange(year, month)[1])
+
+    user_rows = (await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.role, user.c.role_name)
+        .where(and_(user.c.is_active == True, user.c.role != UserRole.customer))  # noqa: E712
+        .order_by(user.c.name.asc(), user.c.surname.asc())
+    )).fetchall()
+
+    user_ids = [r.id for r in user_rows]
+    all_att_rows = (await session.execute(
+        select(
+            attendance_log.c.employee_id,
+            attendance_log.c.attendance_date,
+            attendance_log.c.check_in_time,
+            attendance_log.c.check_out_time,
+        )
+        .where(and_(
+            attendance_log.c.employee_id.in_(user_ids) if user_ids else False,
+            attendance_log.c.attendance_date >= month_start,
+            attendance_log.c.attendance_date <= month_end,
+        ))
+        .order_by(attendance_log.c.employee_id.asc(), attendance_log.c.attendance_date.asc())
+    )).fetchall()
+
+    att_by_user: dict = defaultdict(list)
+    for row in all_att_rows:
+        att_by_user[row.employee_id].append(row)
+
+    employees = [
+        _build_employee_attendance_summary(emp_row, year, month, att_by_user[emp_row.id])
+        for emp_row in user_rows
+    ]
+    employees.sort(key=lambda x: x["monthly_stats"]["total_hours"], reverse=True)
+
+    employees_with_records = sum(1 for e in employees if e["monthly_stats"]["days_present"] > 0)
+    total_hours_all = round(sum(e["monthly_stats"]["total_hours"] for e in employees), 1)
+    avg_hours = round(total_hours_all / employees_with_records, 1) if employees_with_records else 0.0
+
+    return {
+        "period": {
+            "year": year,
+            "month": month,
+            "month_name": _MONTH_NAMES_UZ[month],
+            "date_from": str(month_start),
+            "date_to": str(month_end),
+        },
+        "overall": {
+            "total_employees": len(employees),
+            "employees_with_records": employees_with_records,
+            "total_hours_all": total_hours_all,
+            "avg_hours_per_employee": avg_hours,
+        },
+        "employees": employees,
+    }
 
 
 # ---------------------------------------------------------------------------

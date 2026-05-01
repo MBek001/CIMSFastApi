@@ -428,6 +428,21 @@ def _detect_actions(question: str, employee: Optional[dict[str, Any]], sales_man
     q = _n(question)
     actions: list[str] = []
 
+    GREETING_TOKENS = {
+        "salom", "assalomu", "alaykum", "assalom",
+        "hello", "hi", "hey",
+        "привет", "здравствуйте", "хай",
+    }
+    DATA_SIGNALS = [
+        "xodim", "hodim", "lead", "mijoz", "customer", "update", "foiz",
+        "hisobot", "finance", "balans", "maosh", "salary", "davomat",
+        "project", "loyiha", "bonus", "jarima", "recall", "payment",
+        "to'lov", "statistika", "qancha", "nechta", "kim", "qaysi",
+        "ko'rsat", "bering", "ayt",
+    ]
+    if (set(q.split()) & GREETING_TOKENS) and not any(s in q for s in DATA_SIGNALS) and len(q.split()) <= 8:
+        return ["greeting"]
+
     EMPLOYEE_KEYWORDS = [
         "xodim", "hodim", "xodimlar", "hodimlar", "ishchi", "dasturchi",
         "jamoa", "team", "member", "backend", "frontend", "designer",
@@ -1465,6 +1480,18 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
     customer_type = _detect_customer_type(question) or _detect_customer_type(resolution_text)
     intents = _detect_actions(resolution_text, employee, sales_manager, customer_match)
 
+    if intents == ["greeting"]:
+        return {
+            "question": question.strip(),
+            "resolved_question": resolution_text,
+            "period": period.as_dict(),
+            "intents": ["greeting"],
+            "employee": None,
+            "sales_manager": None,
+            "customer_match": None,
+            "customer_type_filter": None,
+        }
+
     # data_hub faqat kerak bo'lganda yuklanadi — company_overview yoki payment_summary uchun
     needs_data_hub = any(i in intents for i in ("company_overview", "payment_summary"))
     data_hub = await _company_data_hub_context(session, period) if needs_data_hub else {}
@@ -1517,6 +1544,12 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
 
 def build_cims_ai_fallback_answer(context: dict[str, Any]) -> str:
     out: list[str] = []
+
+    if "greeting" in context.get("intents", []):
+        return (
+            "Salom! Men CIMS AI analytics agentiman. "
+            "Xodimlar, leadlar, moliya, davomat va loyihalar bo'yicha savollaringizga javob bera olaman."
+        )
 
     all_employees = context.get("all_employees_update")
     if all_employees:
@@ -1809,7 +1842,7 @@ async def generate_cims_ai_answer(
         return fallback, False
 
     sql_analytics = None
-    if _should_run_sql_analytics(question, context):
+    if "greeting" not in context.get("intents", []) and _should_run_sql_analytics(question, context):
         sql_analytics = await _generate_sql_analytics(
             session, question, context, history,
             api_key=api_key, model=model, base_url=base_url,
@@ -1824,8 +1857,10 @@ async def generate_cims_ai_answer(
     ) or "yoq"
 
     system_prompt = (
-        "Siz CIMS — korporativ boshqaruv tizimining ichki AI analytics agentisiz. "
-        "Faqat berilgan CIMS context ma'lumotlari asosida javob bering, o'zingizdan ma'lumot qo'shmang. "
+        "Siz CIMS — korporativ boshqaruv tizimining AI analytics agentisiz. "
+        "Agar foydalanuvchi salomlashsa yoki oddiy muloqot qilsa — do'stona va qisqa javob bering, "
+        "o'zingizni tanishtiring va nima qila olishingizni bir-ikki jumlada ayting. "
+        "Agar ma'lumot so'ralsa, faqat berilgan CIMS context asosida javob bering, o'zingizdan raqam qo'shmang. "
         "Javobni O'ZBEK tilida yozing. Aniq raqamlar, foizlar, sanalar bilan gapiring. "
         "Bir nechta savol bo'lsa hammasiga javob bering. "
         "Ma'lumot kontekstda yo'q bo'lsa, 'bu ma'lumot mavjud emas' deb aniq ayting. "
