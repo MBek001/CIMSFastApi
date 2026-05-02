@@ -131,19 +131,79 @@ def extract_client_name_from_text(text: str) -> Optional[str]:
     return None
 
 
+def is_name_request_text(text: str) -> bool:
+    value = (text or "").strip().lower()
+    if not value:
+        return False
+    patterns = [
+        "ismingizni",
+        "ismimni",
+        "ismim",
+        "ismingiz",
+        "исмингизни",
+        "исмингиз",
+        "исмингизни ҳам",
+        "как вас зовут",
+        "ваше имя",
+        "вашe имя",
+        "name",
+        "your name",
+    ]
+    return any(pattern in value for pattern in patterns)
+
+
+def extract_name_from_name_reply(text: str) -> Optional[str]:
+    value = " ".join((text or "").strip().split())
+    if not value:
+        return None
+    if len(value) > 60:
+        return None
+    if any(ch.isdigit() for ch in value):
+        return None
+    if "\n" in text:
+        return None
+    cleaned = re.sub(r"^[^A-Za-zА-Яа-яЁёʻ’'`-]+|[^A-Za-zА-Яа-яЁёʻ’'`-]+$", "", value)
+    if not cleaned:
+        return None
+    parts = [part for part in cleaned.split() if part]
+    if not 1 <= len(parts) <= 3:
+        return None
+    if any(len(part) < 2 for part in parts):
+        return None
+    lowered = cleaned.lower()
+    blocked = {
+        "ha", "yoq", "yo'q", "rahmat", "salom", "assalomu alaykum",
+        "hozir", "ertaga", "bugun", "кейин", "сейчас", "завтра",
+    }
+    if lowered in blocked:
+        return None
+    return cleaned[:255]
+
+
 async def infer_conversation_client_name(session: AsyncSession, conversation_id: int) -> Optional[str]:
     result = await session.execute(
-        select(cognilabsai_message.c.text)
+        select(cognilabsai_message.c.sender_type, cognilabsai_message.c.text)
         .where(
             cognilabsai_message.c.conversation_id == conversation_id,
-            cognilabsai_message.c.sender_type == "client",
         )
         .order_by(cognilabsai_message.c.created_at.asc(), cognilabsai_message.c.id.asc())
     )
-    for text_value in result.scalars().all():
+    previous_ai_text = None
+    for row in result.mappings().all():
+        sender_type = row["sender_type"]
+        text_value = row["text"] or ""
+        if sender_type == "ai":
+            previous_ai_text = text_value
+            continue
+        if sender_type != "client":
+            continue
         inferred_name = extract_client_name_from_text(text_value or "")
         if inferred_name:
             return inferred_name
+        if previous_ai_text and is_name_request_text(previous_ai_text):
+            inferred_name = extract_name_from_name_reply(text_value)
+            if inferred_name:
+                return inferred_name
     return None
 
 
@@ -579,6 +639,18 @@ async def create_message(
     created_at: Optional[datetime] = None,
 ) -> dict:
     ts = normalize_datetime(created_at) or utcnow()
+    previous_ai_text = None
+    if channel == "instagram" and sender_type == "client":
+        previous_result = await session.execute(
+            select(cognilabsai_message.c.text)
+            .where(
+                cognilabsai_message.c.conversation_id == conversation_id,
+                cognilabsai_message.c.sender_type == "ai",
+            )
+            .order_by(cognilabsai_message.c.created_at.desc(), cognilabsai_message.c.id.desc())
+            .limit(1)
+        )
+        previous_ai_text = previous_result.scalar_one_or_none()
     result = await session.execute(
         insert(cognilabsai_message).values(
             conversation_id=conversation_id,
@@ -605,6 +677,8 @@ async def create_message(
     )
     if channel == "instagram" and sender_type == "client":
         inferred_name = extract_client_name_from_text(text_value)
+        if not inferred_name and previous_ai_text and is_name_request_text(previous_ai_text):
+            inferred_name = extract_name_from_name_reply(text_value)
         if inferred_name:
             await session.execute(
                 update(cognilabsai_conversation)
