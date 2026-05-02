@@ -87,11 +87,99 @@ def build_chat_mode(channel: Optional[str]) -> tuple[str, bool]:
     return f"{normalized or 'unknown'}_operator", False
 
 
+def build_client_display_name(payload: dict) -> str:
+    full_name = (payload.get("client_full_name") or "").strip()
+    username = (payload.get("client_username") or "").strip()
+    external_id = (payload.get("client_external_id") or "").strip()
+    if full_name and username:
+        return f"{full_name} (@{username.lstrip('@')})"
+    if full_name:
+        return full_name
+    if username:
+        return f"@{username.lstrip('@')}"
+    channel = (payload.get("channel") or "").strip().lower()
+    if channel == "instagram":
+        return f"Instagram {external_id}" if external_id else "Instagram chat"
+    if channel == "telegram":
+        return f"Telegram {external_id}" if external_id else "Telegram chat"
+    return external_id or "Unknown chat"
+
+
+def extract_client_name_from_text(text: str) -> Optional[str]:
+    value = (text or "").strip()
+    if not value:
+        return None
+    patterns = [
+        r"(?:^|[\s,.:;!?])ismim\s+([A-Za-zА-Яа-яЁёʻ’'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёʻ’'`-]{2,}){0,2})",
+        r"(?:^|[\s,.:;!?])men(?:ing)?\s+ismim\s+([A-Za-zА-Яа-яЁёʻ’'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёʻ’'`-]{2,}){0,2})",
+        r"(?:^|[\s,.:;!?])men\s+([A-Za-zА-Яа-яЁёʻ’'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёʻ’'`-]{2,}){0,2})",
+        r"(?:^|[\s,.:;!?])меня\s+зовут\s+([A-Za-zА-Яа-яЁёʻ’'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёʻ’'`-]{2,}){0,2})",
+        r"(?:^|[\s,.:;!?])my\s+name\s+is\s+([A-Za-zА-Яа-яЁёʻ’'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёʻ’'`-]{2,}){0,2})",
+        r"(?:^|[\s,.:;!?])i[' ]?m\s+([A-Za-zА-Яа-яЁёʻ’'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёʻ’'`-]{2,}){0,2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = " ".join(part for part in match.group(1).strip().split() if part)
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in {"kerak", "ha", "yoq", "yo'q", "salom"}:
+            continue
+        return candidate[:255]
+    return None
+
+
+async def infer_conversation_client_name(session: AsyncSession, conversation_id: int) -> Optional[str]:
+    result = await session.execute(
+        select(cognilabsai_message.c.text)
+        .where(
+            cognilabsai_message.c.conversation_id == conversation_id,
+            cognilabsai_message.c.sender_type == "client",
+        )
+        .order_by(cognilabsai_message.c.created_at.asc(), cognilabsai_message.c.id.asc())
+    )
+    for text_value in result.scalars().all():
+        inferred_name = extract_client_name_from_text(text_value or "")
+        if inferred_name:
+            return inferred_name
+    return None
+
+
+async def backfill_instagram_client_names(session: AsyncSession) -> int:
+    result = await session.execute(
+        select(cognilabsai_conversation.c.id, cognilabsai_conversation.c.lead_full_name)
+        .where(
+            cognilabsai_conversation.c.channel == "instagram",
+            cognilabsai_conversation.c.client_full_name.is_(None),
+        )
+    )
+    updated_count = 0
+    for row in result.mappings().all():
+        inferred_name = (row.get("lead_full_name") or "").strip() or await infer_conversation_client_name(session, row["id"])
+        if not inferred_name:
+            continue
+        await session.execute(
+            update(cognilabsai_conversation)
+            .where(cognilabsai_conversation.c.id == row["id"])
+            .values(
+                client_full_name=inferred_name[:255],
+                updated_at=utcnow(),
+            )
+        )
+        updated_count += 1
+    if updated_count:
+        await session.commit()
+    return updated_count
+
+
 def decorate_conversation_payload(payload: dict) -> dict:
     chat_mode, supports_ai = build_chat_mode(payload.get("channel"))
     enriched = dict(payload)
     enriched["chat_mode"] = chat_mode
     enriched["supports_ai"] = supports_ai
+    enriched["client_display_name"] = build_client_display_name(payload)
     return enriched
 
 
@@ -515,6 +603,20 @@ async def create_message(
             updated_at=utcnow(),
         )
     )
+    if channel == "instagram" and sender_type == "client":
+        inferred_name = extract_client_name_from_text(text_value)
+        if inferred_name:
+            await session.execute(
+                update(cognilabsai_conversation)
+                .where(
+                    cognilabsai_conversation.c.id == conversation_id,
+                    cognilabsai_conversation.c.client_full_name.is_(None),
+                )
+                .values(
+                    client_full_name=inferred_name,
+                    updated_at=utcnow(),
+                )
+            )
     await session.commit()
     message = await get_message_by_id(session, message_id)
     await manager.broadcast(
@@ -883,6 +985,7 @@ async def save_lead_state(
         .where(cognilabsai_conversation.c.id == conversation_id)
         .values(
             lead_created=True,
+            client_full_name=full_name,
             lead_full_name=full_name,
             lead_phone_number=phone_number,
             lead_business_field=business_field,
@@ -1371,6 +1474,7 @@ async def import_instagram_conversations_upload(
 async def startup_cognilabsai():
     async with async_session_maker() as session:
         await ensure_schema(session)
+        await backfill_instagram_client_names(session)
     await telegram_userbot_manager.start()
 
 

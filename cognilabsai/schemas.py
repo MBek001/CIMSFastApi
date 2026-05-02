@@ -32,6 +32,7 @@ class ConversationItem(BaseModel):
     channel: str
     chat_mode: str
     supports_ai: bool
+    client_display_name: str
     client_external_id: str
     client_username: Optional[str] = None
     client_full_name: Optional[str] = None
