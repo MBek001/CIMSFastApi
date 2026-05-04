@@ -4,7 +4,7 @@ import json
 import os
 import re
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -37,6 +37,7 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_VERIFY_TOKEN = "cognilabsai-verify-token"
 DEFAULT_WS_KEY = "cognilabsai-websocket-key"
+LEAD_COOLDOWN_HOURS = 24
 COGNILABSAI_BEHAVIOR_PROMPT = (
     "When the user provides all needed details (name, business field/job, phone, preferred call time), "
     "you must call the register_customer tool once. Otherwise continue the script and ask only one question per message. "
@@ -48,6 +49,23 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
 
 def utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def get_lead_cooldown_deadline(last_lead_created_at: Optional[datetime]) -> Optional[datetime]:
+    normalized = normalize_datetime(last_lead_created_at)
+    if normalized is None:
+        return None
+    return normalized + timedelta(hours=LEAD_COOLDOWN_HOURS)
+
+
+def is_lead_cooldown_active(conversation: Optional[dict], now: Optional[datetime] = None) -> bool:
+    if not conversation:
+        return False
+    last_lead_created_at = conversation.get("last_lead_created_at")
+    deadline = get_lead_cooldown_deadline(last_lead_created_at)
+    if deadline is None:
+        return False
+    return deadline > (now or utcnow())
 
 
 def normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
@@ -329,6 +347,7 @@ async def ensure_schema(session: AsyncSession):
             lead_phone_number VARCHAR(64) NULL,
             lead_business_field VARCHAR(255) NULL,
             lead_scheduled_time VARCHAR(255) NULL,
+            last_lead_created_at TIMESTAMP NULL,
             pause_reason VARCHAR(64),
             paused_until TIMESTAMP NULL,
             last_message_at TIMESTAMP NULL,
@@ -368,6 +387,16 @@ async def ensure_schema(session: AsyncSession):
     await session.execute(text("""
         ALTER TABLE cognilabsai_conversation
         ADD COLUMN IF NOT EXISTS lead_scheduled_time VARCHAR(255) NULL
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS last_lead_created_at TIMESTAMP NULL
+    """))
+    await session.execute(text("""
+        UPDATE cognilabsai_conversation
+        SET last_lead_created_at = updated_at
+        WHERE lead_created = TRUE
+          AND last_lead_created_at IS NULL
     """))
     await session.execute(text("""
         CREATE TABLE IF NOT EXISTS cognilabsai_message (
@@ -593,6 +622,7 @@ async def upsert_conversation(
             lead_phone_number=None,
             lead_business_field=None,
             lead_scheduled_time=None,
+            last_lead_created_at=None,
             pause_reason=None,
             paused_until=None,
             last_message_at=None,
@@ -841,10 +871,10 @@ async def build_openai_messages(session: AsyncSession, conversation_id: int) -> 
     if prompt:
         messages.append({"role": "system", "content": prompt})
     messages.append({"role": "system", "content": COGNILABSAI_BEHAVIOR_PROMPT})
-    if conversation and conversation.get("lead_created"):
+    if is_lead_cooldown_active(conversation):
         messages.append({
             "role": "system",
-            "content": "Lead is already created for this conversation. Do not call register_customer again and do not repeat confirmation.",
+            "content": f"Lead was already created in the last {LEAD_COOLDOWN_HOURS} hours for this conversation. Do not call register_customer again and do not repeat confirmation.",
         })
     for item in history:
         role = "user"
@@ -991,7 +1021,7 @@ async def create_crm_customer_from_lead(
     language: str,
 ) -> int:
     conversation = await get_conversation(session, conversation_id)
-    if conversation and conversation.get("crm_customer_id"):
+    if is_lead_cooldown_active(conversation) and conversation and conversation.get("crm_customer_id"):
         return int(conversation["crm_customer_id"])
     notes_value = "\n".join(
         value for value in [
@@ -1054,6 +1084,7 @@ async def save_lead_state(
     language: str = "uz",
 ):
     conversation = await get_conversation(session, conversation_id)
+    lead_created_at = utcnow()
     await session.execute(
         update(cognilabsai_conversation)
         .where(cognilabsai_conversation.c.id == conversation_id)
@@ -1064,6 +1095,7 @@ async def save_lead_state(
             lead_phone_number=phone_number,
             lead_business_field=business_field,
             lead_scheduled_time=scheduled_time,
+            last_lead_created_at=lead_created_at,
             updated_at=utcnow(),
         )
     )
@@ -1107,7 +1139,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         "messages": messages,
         "max_tokens": 350,
     }
-    if conversation and not conversation.get("lead_created"):
+    if not is_lead_cooldown_active(conversation):
         payload["functions"] = [
             {
                 "name": "register_customer",
