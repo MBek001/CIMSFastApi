@@ -572,6 +572,7 @@ async def list_conversations(session: AsyncSession, channel: Optional[str] = Non
         query = query.where(cognilabsai_conversation.c.channel == channel)
     result = await session.execute(query)
     items = [decorate_conversation_payload(dict(row)) for row in result.mappings().all()]
+    await session.rollback()
     for item in items:
         if item.get("channel") != "telegram":
             continue
@@ -594,6 +595,7 @@ async def get_conversation(session: AsyncSession, conversation_id: int) -> Optio
     if not row:
         return None
     conversation = decorate_conversation_payload(dict(row))
+    await session.rollback()
     if conversation.get("channel") == "telegram":
         try:
             snapshot = await telegram_userbot_manager.resolve_peer_snapshot(conversation["client_external_id"])
