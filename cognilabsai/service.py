@@ -258,6 +258,10 @@ def decorate_conversation_payload(payload: dict) -> dict:
     enriched["chat_mode"] = chat_mode
     enriched["supports_ai"] = supports_ai
     enriched["client_display_name"] = build_client_display_name(payload)
+    enriched["unread_count"] = int(enriched.get("unread_count") or 0)
+    enriched.setdefault("telegram_is_online", None)
+    enriched.setdefault("telegram_presence_status", None)
+    enriched.setdefault("telegram_last_seen_at", None)
     return enriched
 
 
@@ -348,6 +352,7 @@ async def ensure_schema(session: AsyncSession):
             lead_business_field VARCHAR(255) NULL,
             lead_scheduled_time VARCHAR(255) NULL,
             last_lead_created_at TIMESTAMP NULL,
+            unread_count INTEGER NOT NULL DEFAULT 0,
             pause_reason VARCHAR(64),
             paused_until TIMESTAMP NULL,
             last_message_at TIMESTAMP NULL,
@@ -393,6 +398,10 @@ async def ensure_schema(session: AsyncSession):
         ADD COLUMN IF NOT EXISTS last_lead_created_at TIMESTAMP NULL
     """))
     await session.execute(text("""
+        ALTER TABLE cognilabsai_conversation
+        ADD COLUMN IF NOT EXISTS unread_count INTEGER NOT NULL DEFAULT 0
+    """))
+    await session.execute(text("""
         UPDATE cognilabsai_conversation
         SET last_lead_created_at = updated_at
         WHERE lead_created = TRUE
@@ -410,7 +419,43 @@ async def ensure_schema(session: AsyncSession):
             instagram_message_id VARCHAR(255) NULL,
             telegram_message_id VARCHAR(255) NULL,
             text TEXT NOT NULL,
+            is_read BOOLEAN NOT NULL DEFAULT FALSE,
+            read_at TIMESTAMP NULL,
             created_at TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_message
+        ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE
+    """))
+    await session.execute(text("""
+        ALTER TABLE cognilabsai_message
+        ADD COLUMN IF NOT EXISTS read_at TIMESTAMP NULL
+    """))
+    await session.execute(text("""
+        UPDATE cognilabsai_message
+        SET is_read = TRUE, read_at = COALESCE(read_at, created_at)
+        WHERE sender_type IN ('ai', 'operator', 'system')
+          AND is_read = FALSE
+    """))
+    await session.execute(text("""
+        UPDATE cognilabsai_conversation c
+        SET unread_count = COALESCE(sub.unread_count, 0)
+        FROM (
+            SELECT conversation_id, COUNT(*)::INTEGER AS unread_count
+            FROM cognilabsai_message
+            WHERE sender_type = 'client' AND is_read = FALSE
+            GROUP BY conversation_id
+        ) AS sub
+        WHERE c.id = sub.conversation_id
+    """))
+    await session.execute(text("""
+        UPDATE cognilabsai_conversation
+        SET unread_count = 0
+        WHERE id NOT IN (
+            SELECT DISTINCT conversation_id
+            FROM cognilabsai_message
+            WHERE sender_type = 'client' AND is_read = FALSE
         )
     """))
     await session.execute(text("""
@@ -525,7 +570,18 @@ async def list_conversations(session: AsyncSession, channel: Optional[str] = Non
     if channel:
         query = query.where(cognilabsai_conversation.c.channel == channel)
     result = await session.execute(query)
-    return [decorate_conversation_payload(dict(row)) for row in result.mappings().all()]
+    items = [decorate_conversation_payload(dict(row)) for row in result.mappings().all()]
+    for item in items:
+        if item.get("channel") != "telegram":
+            continue
+        try:
+            snapshot = await telegram_userbot_manager.resolve_peer_snapshot(item["client_external_id"])
+            item["telegram_is_online"] = snapshot.get("is_online")
+            item["telegram_presence_status"] = snapshot.get("presence_status")
+            item["telegram_last_seen_at"] = snapshot.get("last_seen_at")
+        except Exception:
+            pass
+    return items
 
 
 async def get_conversation(session: AsyncSession, conversation_id: int) -> Optional[dict]:
@@ -534,7 +590,18 @@ async def get_conversation(session: AsyncSession, conversation_id: int) -> Optio
         select(cognilabsai_conversation).where(cognilabsai_conversation.c.id == conversation_id)
     )
     row = result.mappings().first()
-    return decorate_conversation_payload(dict(row)) if row else None
+    if not row:
+        return None
+    conversation = decorate_conversation_payload(dict(row))
+    if conversation.get("channel") == "telegram":
+        try:
+            snapshot = await telegram_userbot_manager.resolve_peer_snapshot(conversation["client_external_id"])
+            conversation["telegram_is_online"] = snapshot.get("is_online")
+            conversation["telegram_presence_status"] = snapshot.get("presence_status")
+            conversation["telegram_last_seen_at"] = snapshot.get("last_seen_at")
+        except Exception:
+            pass
+    return conversation
 
 
 async def get_messages(session: AsyncSession, conversation_id: int, limit: int = 200, offset: int = 0) -> list[dict]:
@@ -547,6 +614,49 @@ async def get_messages(session: AsyncSession, conversation_id: int, limit: int =
         .offset(offset)
     )
     return [dict(row) for row in result.mappings().all()]
+
+
+async def mark_conversation_read(session: AsyncSession, conversation_id: int, sync_remote: bool = True) -> Optional[dict]:
+    conversation = await get_conversation(session, conversation_id)
+    if not conversation:
+        return None
+    now = utcnow()
+    await session.execute(
+        update(cognilabsai_message)
+        .where(
+            cognilabsai_message.c.conversation_id == conversation_id,
+            cognilabsai_message.c.sender_type == "client",
+            cognilabsai_message.c.is_read == False,
+        )
+        .values(
+            is_read=True,
+            read_at=now,
+        )
+    )
+    await session.execute(
+        update(cognilabsai_conversation)
+        .where(cognilabsai_conversation.c.id == conversation_id)
+        .values(
+            unread_count=0,
+            updated_at=now,
+        )
+    )
+    await session.commit()
+    if sync_remote and conversation.get("channel") == "telegram":
+        try:
+            await telegram_userbot_manager.mark_read(conversation["client_external_id"])
+        except Exception as exc:
+            print(f"Telegram mark read error for conversation {conversation_id}: {exc}", flush=True)
+    updated = await get_conversation(session, conversation_id)
+    if updated:
+        await manager.broadcast(
+            {
+                "type": "conversation.updated",
+                "conversation": updated,
+            },
+            conversation_id=conversation_id,
+        )
+    return updated
 
 
 async def refresh_expired_pauses(session: AsyncSession):
@@ -669,6 +779,7 @@ async def create_message(
     created_at: Optional[datetime] = None,
 ) -> dict:
     ts = normalize_datetime(created_at) or utcnow()
+    is_client_message = sender_type == "client"
     previous_ai_text = None
     if channel == "instagram" and sender_type == "client":
         previous_result = await session.execute(
@@ -692,6 +803,8 @@ async def create_message(
             instagram_message_id=instagram_message_id,
             telegram_message_id=telegram_message_id,
             text=text_value,
+            is_read=not is_client_message,
+            read_at=None if is_client_message else ts,
             created_at=ts,
         ).returning(cognilabsai_message.c.id)
     )
@@ -702,6 +815,7 @@ async def create_message(
         .values(
             last_message_at=ts,
             last_message_preview=text_value[:1000],
+            unread_count=(cognilabsai_conversation.c.unread_count + 1) if is_client_message else cognilabsai_conversation.c.unread_count,
             updated_at=utcnow(),
         )
     )

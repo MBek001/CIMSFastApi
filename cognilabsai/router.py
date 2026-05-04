@@ -28,6 +28,7 @@ from cognilabsai.service import (
     import_instagram_conversations,
     import_instagram_conversations_upload,
     list_conversations,
+    mark_conversation_read,
     maybe_send_ai_reply,
     process_instagram_webhook_payload,
     send_operator_message,
@@ -78,6 +79,11 @@ async def chat_messages(
     conversation = await get_conversation(session, conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    await mark_conversation_read(
+        session,
+        conversation_id,
+        sync_remote=conversation.get("channel") == "telegram",
+    )
     return await get_messages(session, conversation_id, limit=limit, offset=offset)
 
 

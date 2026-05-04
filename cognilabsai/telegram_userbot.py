@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -100,6 +101,66 @@ class TelegramUserbotManager:
         message = await client.send_message(entity=entity, message=text)
         return str(message.id) if message else None
 
+    def _serialize_presence(self, status) -> dict:
+        if status is None:
+            return {
+                "is_online": None,
+                "presence_status": None,
+                "last_seen_at": None,
+            }
+        try:
+            from telethon.tl.types import (
+                UserStatusLastMonth,
+                UserStatusLastWeek,
+                UserStatusOffline,
+                UserStatusOnline,
+                UserStatusRecently,
+            )
+        except Exception:
+            return {
+                "is_online": None,
+                "presence_status": None,
+                "last_seen_at": None,
+            }
+        if isinstance(status, UserStatusOnline):
+            return {
+                "is_online": True,
+                "presence_status": "online",
+                "last_seen_at": None,
+            }
+        if isinstance(status, UserStatusOffline):
+            was_online = getattr(status, "was_online", None)
+            if was_online is not None and getattr(was_online, "tzinfo", None) is None:
+                was_online = was_online.replace(tzinfo=timezone.utc)
+            return {
+                "is_online": False,
+                "presence_status": "offline",
+                "last_seen_at": was_online,
+            }
+        if isinstance(status, UserStatusRecently):
+            return {
+                "is_online": False,
+                "presence_status": "recently",
+                "last_seen_at": None,
+            }
+        if isinstance(status, UserStatusLastWeek):
+            return {
+                "is_online": False,
+                "presence_status": "last_week",
+                "last_seen_at": None,
+            }
+        if isinstance(status, UserStatusLastMonth):
+            return {
+                "is_online": False,
+                "presence_status": "last_month",
+                "last_seen_at": None,
+            }
+        return {
+            "is_online": None,
+            "presence_status": status.__class__.__name__.lower(),
+            "last_seen_at": None,
+        }
+
     async def resolve_peer_snapshot(self, peer: str) -> dict:
         client = await self._get_client()
         entity = await client.get_entity(self._normalize_peer(peer))
@@ -110,6 +171,7 @@ class TelegramUserbotManager:
             "username": getattr(entity, "username", None),
             "full_name": full_name,
             "avatar_url": avatar_url,
+            **self._serialize_presence(getattr(entity, "status", None)),
         }
 
     async def search_peers(self, query: str, limit: int = 10) -> list[dict]:
@@ -143,6 +205,7 @@ class TelegramUserbotManager:
                     "username": username,
                     "full_name": full_name,
                     "avatar_url": avatar_url,
+                    **self._serialize_presence(getattr(entity, "status", None)),
                 }
             )
 
@@ -171,6 +234,11 @@ class TelegramUserbotManager:
                 )
             )
             return result.mappings().first()
+
+    async def mark_read(self, peer: str) -> None:
+        client = await self._get_client()
+        entity = await client.get_entity(self._normalize_peer(peer))
+        await client.send_read_acknowledge(entity)
 
     async def _load_config(self) -> Optional[dict]:
         async with async_session_maker() as session:

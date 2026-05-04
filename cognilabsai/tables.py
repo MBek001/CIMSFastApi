@@ -51,6 +51,7 @@ cognilabsai_conversation = Table(
     Column("lead_business_field", String(255), nullable=True),
     Column("lead_scheduled_time", String(255), nullable=True),
     Column("last_lead_created_at", DateTime, nullable=True),
+    Column("unread_count", Integer, nullable=False, default=0),
     Column("pause_reason", String(64), nullable=True),
     Column("paused_until", DateTime, nullable=True),
     Column("last_message_at", DateTime, nullable=True),
@@ -78,6 +79,8 @@ cognilabsai_message = Table(
     Column("instagram_message_id", String(255), nullable=True),
     Column("telegram_message_id", String(255), nullable=True),
     Column("text", Text, nullable=False),
+    Column("is_read", Boolean, nullable=False, default=False),
+    Column("read_at", DateTime, nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),
     extend_existing=True,
 )

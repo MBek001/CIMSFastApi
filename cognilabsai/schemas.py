@@ -38,6 +38,10 @@ class ConversationItem(BaseModel):
     client_full_name: Optional[str] = None
     client_avatar_url: Optional[str] = None
     instagram_business_id: Optional[str] = None
+    unread_count: int = 0
+    telegram_is_online: Optional[bool] = None
+    telegram_presence_status: Optional[str] = None
+    telegram_last_seen_at: Optional[datetime] = None
     ai_enabled: bool
     pause_reason: Optional[str] = None
     paused_until: Optional[datetime] = None
@@ -61,6 +65,8 @@ class MessageItem(BaseModel):
     instagram_message_id: Optional[str] = None
     telegram_message_id: Optional[str] = None
     text: str
+    is_read: bool = False
+    read_at: Optional[datetime] = None
     created_at: datetime
 
 
@@ -90,6 +96,9 @@ class TelegramSearchResult(BaseModel):
     username: Optional[str] = None
     full_name: Optional[str] = None
     avatar_url: Optional[str] = None
+    is_online: Optional[bool] = None
+    presence_status: Optional[str] = None
+    last_seen_at: Optional[datetime] = None
     existing_conversation_id: Optional[int] = None
 
 
@@ -99,6 +108,9 @@ class TelegramSearchMatch(BaseModel):
     username: Optional[str] = None
     full_name: Optional[str] = None
     avatar_url: Optional[str] = None
+    is_online: Optional[bool] = None
+    presence_status: Optional[str] = None
+    last_seen_at: Optional[datetime] = None
     existing_conversation_id: Optional[int] = None
 
 
