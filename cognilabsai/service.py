@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import io
 import json
@@ -644,7 +645,10 @@ async def mark_conversation_read(session: AsyncSession, conversation_id: int, sy
     await session.commit()
     if sync_remote and conversation.get("channel") == "telegram":
         try:
-            await telegram_userbot_manager.mark_read(conversation["client_external_id"])
+            await asyncio.wait_for(
+                telegram_userbot_manager.mark_read(conversation["client_external_id"]),
+                timeout=5,
+            )
         except Exception as exc:
             print(f"Telegram mark read error for conversation {conversation_id}: {exc}", flush=True)
     updated = await get_conversation(session, conversation_id)
