@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from sqlalchemy import String, cast, func, insert, select, text, update
+from sqlalchemy import String, cast, delete, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Bot
 from telegram.request import HTTPXRequest
@@ -617,6 +617,38 @@ async def get_messages(session: AsyncSession, conversation_id: int, limit: int =
         .offset(offset)
     )
     return [dict(row) for row in result.mappings().all()]
+
+
+async def delete_conversation(session: AsyncSession, conversation_id: int) -> bool:
+    conversation = await get_conversation(session, conversation_id)
+    if not conversation:
+        return False
+    await session.execute(
+        update(cognilabsai_import_log)
+        .where(cognilabsai_import_log.c.conversation_id == conversation_id)
+        .values(conversation_id=None)
+    )
+    await session.execute(
+        delete(cognilabsai_pause_event)
+        .where(cognilabsai_pause_event.c.conversation_id == conversation_id)
+    )
+    await session.execute(
+        delete(cognilabsai_message)
+        .where(cognilabsai_message.c.conversation_id == conversation_id)
+    )
+    await session.execute(
+        delete(cognilabsai_conversation)
+        .where(cognilabsai_conversation.c.id == conversation_id)
+    )
+    await session.commit()
+    await manager.broadcast(
+        {
+            "type": "conversation.deleted",
+            "conversation_id": conversation_id,
+        },
+        conversation_id=conversation_id,
+    )
+    return True
 
 
 async def mark_conversation_read(session: AsyncSession, conversation_id: int, sync_remote: bool = True) -> Optional[dict]:

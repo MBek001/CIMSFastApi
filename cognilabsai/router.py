@@ -22,6 +22,7 @@ from cognilabsai.schemas import (
     TelegramStartConversationRequest,
 )
 from cognilabsai.service import (
+    delete_conversation,
     get_conversation,
     get_integration_config,
     get_messages,
@@ -100,6 +101,18 @@ async def chat_send_message(
         return await send_operator_message(session, request.conversation_id, request.text, current_user)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@chat_router.delete("/conversations/{conversation_id}", response_model=GenericMessageResponse)
+async def chat_delete_conversation(
+    conversation_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    deleted = await delete_conversation(session, conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return GenericMessageResponse(message="Conversation deleted")
 
 
 @chat_router.post("/pause", response_model=ConversationItem)
