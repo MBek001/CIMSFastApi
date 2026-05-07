@@ -8,6 +8,7 @@ from sqlalchemy.sql.expression import cast
 from sqlalchemy.sql.sqltypes import String
 from utils.crypto import decrypt_text
 from fastapi import Request
+from fastapi import Header
 from fastapi.responses import RedirectResponse
 from telegram.error import TelegramError
 # Import qilinadigan modellar
@@ -38,6 +39,7 @@ from utils.audit import log_audit_event
 from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram, validate_audio_file
 from utils.ai_summary import generate_customer_ai_summary, infer_recall_time_from_notes_ai
 from utils.google_calendar import sync_customer_recall_event, delete_customer_recall_event
+from config import CRM_CUSTOMER_API_KEY
 
 router = APIRouter(prefix="/crm", tags=['Sales CRM'])
 
@@ -340,6 +342,21 @@ async def _get_status_stats_for_date_range(
 def require_crm_access(current_user=Depends(get_current_active_user)):
 
     return current_user
+
+
+def require_crm_customer_api_key(
+    x_key: Optional[str] = Header(default=None, alias="X-Key")
+) -> None:
+    if not CRM_CUSTOMER_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="CRM_CUSTOMER_API_KEY serverda sozlanmagan",
+        )
+    if x_key != CRM_CUSTOMER_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="X-Key noto'g'ri yoki yuborilmagan",
+        )
 
 
 
@@ -1632,7 +1649,8 @@ from schemes.crm_schemes import CustomerAPICreateRequest
 async def create_customer_api(
         customer_data: CustomerAPICreateRequest,
         request: Request,
-        session: AsyncSession = Depends(get_async_session)
+        session: AsyncSession = Depends(get_async_session),
+        _: None = Depends(require_crm_customer_api_key)
 ):
     return await create_customer_api_record(
         session,
