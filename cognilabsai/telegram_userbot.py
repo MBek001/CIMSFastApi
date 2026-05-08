@@ -166,7 +166,7 @@ class TelegramUserbotManager:
     async def resolve_peer_snapshot(self, peer: str) -> dict:
         client = await self._get_client()
         entity = await self._resolve_entity(peer)
-        full_name = " ".join(value for value in [getattr(entity, "first_name", None), getattr(entity, "last_name", None)] if value) or None
+        full_name = self._extract_full_name(entity)
         avatar_url = await self._download_avatar(entity)
         return {
             "external_id": str(getattr(entity, "id", peer)),
@@ -193,7 +193,7 @@ class TelegramUserbotManager:
             if not external_id or external_id in seen:
                 return
             seen.add(external_id)
-            full_name = " ".join(value for value in [getattr(entity, "first_name", None), getattr(entity, "last_name", None)] if value) or None
+            full_name = self._extract_full_name(entity)
             try:
                 avatar_url = await self._download_avatar(entity)
             except Exception:
@@ -280,6 +280,14 @@ class TelegramUserbotManager:
         if 10 <= len(digits) <= 15:
             return f"+{digits}"
         return None
+
+    def _extract_full_name(self, entity) -> Optional[str]:
+        full_name = " ".join(
+            value for value in [getattr(entity, "first_name", None), getattr(entity, "last_name", None)] if value
+        ) or None
+        if full_name == "Search Temp":
+            return None
+        return full_name
 
     async def _resolve_entity(self, peer: str):
         client = await self._get_client()
