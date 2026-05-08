@@ -18,6 +18,12 @@ class IntegrationConfigPayload(BaseModel):
     cognilabs_telegram_token: Optional[str] = None
     cognilabs_channel_id: Optional[str] = None
     frontend_base_url: Optional[str] = None
+    instagram_followup_enabled: Optional[bool] = None
+    instagram_followup_delay_minutes: Optional[int] = None
+    instagram_followup_message: Optional[str] = None
+    telegram_followup_enabled: Optional[bool] = None
+    telegram_followup_delay_minutes: Optional[int] = None
+    telegram_followup_message: Optional[str] = None
     websocket_api_key: Optional[str] = None
 
 
@@ -45,6 +51,12 @@ class ConversationItem(BaseModel):
     ai_enabled: bool
     pause_reason: Optional[str] = None
     paused_until: Optional[datetime] = None
+    follow_up_enabled: bool = False
+    follow_up_mode: Optional[str] = None
+    follow_up_delay_minutes: Optional[int] = None
+    follow_up_message: Optional[str] = None
+    follow_up_due_at: Optional[datetime] = None
+    follow_up_sent_at: Optional[datetime] = None
     last_message_at: Optional[datetime] = None
     last_message_preview: Optional[str] = None
     last_operator_user_id: Optional[int] = None
@@ -82,6 +94,13 @@ class PauseConversationRequest(BaseModel):
 class PauseUntilRequest(BaseModel):
     conversation_id: int
     paused_until: datetime
+
+
+class FollowUpConfigRequest(BaseModel):
+    enabled: bool = False
+    mode: Optional[str] = None
+    delay_minutes: Optional[int] = None
+    message: Optional[str] = None
 
 
 class TelegramStartConversationRequest(BaseModel):

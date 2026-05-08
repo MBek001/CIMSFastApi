@@ -8,6 +8,7 @@ from cognilabsai.permissions import require_cognilabsai_chat, require_cognilabsa
 from cognilabsai.realtime import manager
 from cognilabsai.schemas import (
     ConversationItem,
+    FollowUpConfigRequest,
     GenericMessageResponse,
     ImportConversationsRequest,
     ImportConversationsResponse,
@@ -36,6 +37,7 @@ from cognilabsai.service import (
     search_telegram_peer,
     search_telegram_peers,
     set_conversation_pause,
+    update_conversation_follow_up,
     update_integration_config,
     verify_websocket_api_key,
     start_telegram_outbound_conversation,
@@ -113,6 +115,22 @@ async def chat_delete_conversation(
     if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return GenericMessageResponse(message="Conversation deleted")
+
+
+@chat_router.put("/conversations/{conversation_id}/follow-up", response_model=ConversationItem)
+async def chat_update_follow_up(
+    conversation_id: int,
+    request: FollowUpConfigRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    try:
+        conversation = await update_conversation_follow_up(session, conversation_id, request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
 
 
 @chat_router.post("/pause", response_model=ConversationItem)
