@@ -1555,6 +1555,9 @@ async def search_telegram_peer(session: AsyncSession, query: str) -> dict:
         "username": snapshot.get("username"),
         "full_name": snapshot.get("full_name"),
         "avatar_url": snapshot.get("avatar_url") or (existing.get("client_avatar_url") if existing else None),
+        "is_online": snapshot.get("is_online"),
+        "presence_status": snapshot.get("presence_status"),
+        "last_seen_at": snapshot.get("last_seen_at"),
         "existing_conversation_id": existing.get("id") if existing else None,
     }
 
@@ -1572,6 +1575,9 @@ async def search_telegram_peers(session: AsyncSession, query: str, limit: int = 
                 "username": item.get("username"),
                 "full_name": item.get("full_name"),
                 "avatar_url": item.get("avatar_url") or (existing.get("client_avatar_url") if existing else None),
+                "is_online": item.get("is_online"),
+                "presence_status": item.get("presence_status"),
+                "last_seen_at": item.get("last_seen_at"),
                 "existing_conversation_id": existing.get("id") if existing else None,
             }
         )

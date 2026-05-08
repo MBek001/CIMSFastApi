@@ -2,6 +2,8 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+import uuid
+import re
 
 from sqlalchemy import select
 
@@ -163,7 +165,7 @@ class TelegramUserbotManager:
 
     async def resolve_peer_snapshot(self, peer: str) -> dict:
         client = await self._get_client()
-        entity = await client.get_entity(self._normalize_peer(peer))
+        entity = await self._resolve_entity(peer)
         full_name = " ".join(value for value in [getattr(entity, "first_name", None), getattr(entity, "last_name", None)] if value) or None
         avatar_url = await self._download_avatar(entity)
         return {
@@ -210,10 +212,14 @@ class TelegramUserbotManager:
             )
 
         try:
-            entity = await client.get_entity(normalized)
+            entity = await self._resolve_entity(normalized)
             await append_entity(entity)
         except Exception:
             pass
+
+        phone_entity = await self._resolve_phone_entity(str(query).strip())
+        if phone_entity is not None:
+            await append_entity(phone_entity)
 
         try:
             search = await client(SearchRequest(q=str(query).strip(), limit=limit))
@@ -237,7 +243,7 @@ class TelegramUserbotManager:
 
     async def mark_read(self, peer: str) -> None:
         client = await self._get_client()
-        entity = await client.get_entity(self._normalize_peer(peer))
+        entity = await self._resolve_entity(peer)
         await client.send_read_acknowledge(entity)
 
     async def _load_config(self) -> Optional[dict]:
@@ -260,6 +266,67 @@ class TelegramUserbotManager:
         if normalized.lstrip("-").isdigit():
             return int(normalized)
         return normalized
+
+    def _normalize_phone(self, value: str) -> Optional[str]:
+        digits = re.sub(r"\D+", "", value or "")
+        if not digits:
+            return None
+        if digits.startswith("998") and len(digits) == 12:
+            return f"+{digits}"
+        if len(digits) == 9:
+            return f"+998{digits}"
+        if value.strip().startswith("+") and digits:
+            return f"+{digits}"
+        if 10 <= len(digits) <= 15:
+            return f"+{digits}"
+        return None
+
+    async def _resolve_entity(self, peer: str):
+        client = await self._get_client()
+        normalized = self._normalize_peer(peer)
+        try:
+            return await client.get_entity(normalized)
+        except Exception:
+            pass
+        phone_entity = await self._resolve_phone_entity(str(peer).strip())
+        if phone_entity is not None:
+            return phone_entity
+        return await client.get_entity(normalized)
+
+    async def _resolve_phone_entity(self, value: str):
+        phone = self._normalize_phone(value)
+        if not phone:
+            return None
+        client = await self._get_client()
+        try:
+            from telethon.tl.functions.contacts import DeleteContactsRequest, ImportContactsRequest
+            from telethon.tl.types import InputPhoneContact
+        except Exception:
+            return None
+        imported_users = []
+        try:
+            result = await client(
+                ImportContactsRequest(
+                    contacts=[
+                        InputPhoneContact(
+                            client_id=uuid.uuid4().int & ((1 << 63) - 1),
+                            phone=phone,
+                            first_name="Search",
+                            last_name="Temp",
+                        )
+                    ]
+                )
+            )
+            imported_users = list(getattr(result, "users", []) or [])
+            if not imported_users:
+                return None
+            return imported_users[0]
+        finally:
+            if imported_users:
+                try:
+                    await client(DeleteContactsRequest(id=imported_users))
+                except Exception:
+                    pass
 
     async def _download_avatar(self, entity) -> Optional[str]:
         client = self.client
