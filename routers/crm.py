@@ -1528,13 +1528,14 @@ async def get_customer_stats(
             func.count(customer.c.id).filter(customer.c.status == CustomerStatus.continuing).label('continuing'),
             func.count(customer.c.id).filter(customer.c.status == CustomerStatus.finished).label('finished'),
             func.count(customer.c.id).filter(customer.c.status == CustomerStatus.rejected).label('rejected')
-        )
+        ).where(customer.c.is_archived.is_not(True))
     )
     stats = status_stats_result.fetchone()
 
     # Status counts
     status_counts_result = await session.execute(
         select(customer.c.status, func.count(customer.c.status).label('count'))
+        .where(customer.c.is_archived.is_not(True))
         .group_by(customer.c.status)
         .order_by(customer.c.status)
     )

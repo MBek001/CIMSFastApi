@@ -1,5 +1,6 @@
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, desc, func, select
@@ -13,6 +14,11 @@ from utils.audit import json_loads_audit
 
 router = APIRouter(prefix="/audit", tags=["Audit Logs"])
 
+try:
+    UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
+except Exception:
+    UZBEKISTAN_TZ = timezone(timedelta(hours=5), name="Asia/Tashkent")
+
 
 def _ensure_audit_access(current_user) -> None:
     if current_user.company_code == "ceo" or current_user.is_admin or current_user.is_superuser:
@@ -20,10 +26,41 @@ def _ensure_audit_access(current_user) -> None:
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Audit loglarni ko'rish huquqingiz yo'q")
 
 
+def _from_utc_naive_to_uz_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.astimezone(UZBEKISTAN_TZ).isoformat()
+
+
+def _date_range_uz_to_utc_naive(
+    date_from: date | None,
+    date_to: date | None,
+) -> tuple[datetime | None, datetime | None]:
+    if date_from is None and date_to is None:
+        return None, None
+
+    start_utc = None
+    end_utc = None
+
+    if date_from is not None:
+        start_local = datetime(date_from.year, date_from.month, date_from.day, tzinfo=UZBEKISTAN_TZ)
+        start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
+
+    if date_to is not None:
+        end_local = datetime(date_to.year, date_to.month, date_to.day, tzinfo=UZBEKISTAN_TZ) + timedelta(days=1)
+        end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+
+    return start_utc, end_utc
+
+
 def _serialize_log(row) -> AuditLogResponse:
     return AuditLogResponse(
         id=row.id,
-        created_at=row.created_at.isoformat(),
+        created_at=_from_utc_naive_to_uz_iso(row.created_at),
         actor_user_id=row.actor_user_id,
         actor_email=row.actor_email,
         actor_name=row.actor_name,
@@ -70,12 +107,14 @@ async def _query_audit_logs(
         conditions.append(audit_log.c.action == action)
     if actor_user_id is not None:
         conditions.append(audit_log.c.actor_user_id == actor_user_id)
-    if date_from is not None:
-        effective_to = date_to if date_to is not None else date_from
-        conditions.append(audit_log.c.created_at >= datetime(date_from.year, date_from.month, date_from.day))
-        conditions.append(audit_log.c.created_at < datetime(effective_to.year, effective_to.month, effective_to.day) + timedelta(days=1))
-    elif date_to is not None:
-        conditions.append(audit_log.c.created_at < datetime(date_to.year, date_to.month, date_to.day) + timedelta(days=1))
+    start_utc, end_utc = _date_range_uz_to_utc_naive(
+        date_from,
+        date_to if date_to is not None else date_from,
+    ) if date_from is not None else _date_range_uz_to_utc_naive(None, date_to)
+    if start_utc is not None:
+        conditions.append(audit_log.c.created_at >= start_utc)
+    if end_utc is not None:
+        conditions.append(audit_log.c.created_at < end_utc)
 
     where_clause = and_(*conditions) if conditions else None
     base_query = select(audit_log)
