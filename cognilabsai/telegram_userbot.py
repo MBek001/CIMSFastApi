@@ -54,19 +54,30 @@ class TelegramUserbotManager:
                 @client.on(events.NewMessage(incoming=True))
                 async def on_new_message(event):
                     from cognilabsai.service import process_telegram_userbot_message
+                    sender = None
+                    try:
+                        sender = await event.get_sender()
+                    except Exception:
+                        sender = None
+                    if sender is None:
+                        try:
+                            sender = await client.get_entity(event.sender_id or event.chat_id)
+                        except Exception:
+                            sender = None
+                    snapshot = await self._build_snapshot(sender, fallback_external_id=str(event.chat_id)) if sender is not None else {
+                        "external_id": str(event.chat_id),
+                        "username": None,
+                        "full_name": None,
+                        "avatar_url": None,
+                    }
 
                     await process_telegram_userbot_message(
-                        peer_id=str(event.chat_id),
+                        peer_id=snapshot["external_id"],
                         sender_id=str(event.sender_id) if event.sender_id else None,
                         text=event.raw_text or "",
-                        username=getattr(event.sender, "username", None) if getattr(event, "sender", None) else None,
-                        full_name=" ".join(
-                            value for value in [
-                                getattr(event.sender, "first_name", None) if getattr(event, "sender", None) else None,
-                                getattr(event.sender, "last_name", None) if getattr(event, "sender", None) else None,
-                            ]
-                            if value
-                        ) or None,
+                        username=snapshot.get("username"),
+                        full_name=snapshot.get("full_name"),
+                        avatar_url=snapshot.get("avatar_url"),
                     )
 
                 self._handler_registered = True
@@ -166,15 +177,7 @@ class TelegramUserbotManager:
     async def resolve_peer_snapshot(self, peer: str) -> dict:
         client = await self._get_client()
         entity = await self._resolve_entity(peer)
-        full_name = self._extract_full_name(entity)
-        avatar_url = await self._download_avatar(entity)
-        return {
-            "external_id": str(getattr(entity, "id", peer)),
-            "username": getattr(entity, "username", None),
-            "full_name": full_name,
-            "avatar_url": avatar_url,
-            **self._serialize_presence(getattr(entity, "status", None)),
-        }
+        return await self._build_snapshot(entity, fallback_external_id=str(peer))
 
     async def search_peers(self, query: str, limit: int = 10) -> list[dict]:
         client = await self._get_client()
@@ -193,21 +196,13 @@ class TelegramUserbotManager:
             if not external_id or external_id in seen:
                 return
             seen.add(external_id)
-            full_name = self._extract_full_name(entity)
-            try:
-                avatar_url = await self._download_avatar(entity)
-            except Exception:
-                avatar_url = None
-            username = getattr(entity, "username", None)
+            snapshot = await self._build_snapshot(entity, fallback_external_id=external_id)
+            username = snapshot.get("username")
             peer_value = username or external_id
             results.append(
                 {
                     "peer": peer_value,
-                    "external_id": external_id,
-                    "username": username,
-                    "full_name": full_name,
-                    "avatar_url": avatar_url,
-                    **self._serialize_presence(getattr(entity, "status", None)),
+                    **snapshot,
                 }
             )
 
@@ -288,6 +283,20 @@ class TelegramUserbotManager:
         if full_name == "Search Temp":
             return None
         return full_name
+
+    async def _build_snapshot(self, entity, fallback_external_id: str) -> dict:
+        full_name = self._extract_full_name(entity)
+        try:
+            avatar_url = await self._download_avatar(entity)
+        except Exception:
+            avatar_url = None
+        return {
+            "external_id": str(getattr(entity, "id", fallback_external_id)),
+            "username": getattr(entity, "username", None),
+            "full_name": full_name,
+            "avatar_url": avatar_url,
+            **self._serialize_presence(getattr(entity, "status", None)),
+        }
 
     async def _resolve_entity(self, peer: str):
         client = await self._get_client()

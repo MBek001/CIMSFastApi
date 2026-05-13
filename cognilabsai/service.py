@@ -1672,6 +1672,7 @@ async def process_telegram_userbot_message(
     text: str,
     username: Optional[str],
     full_name: Optional[str],
+    avatar_url: Optional[str],
 ):
     if not text:
         return
@@ -1683,7 +1684,7 @@ async def process_telegram_userbot_message(
             client_external_id=peer_id,
             client_username=username,
             client_full_name=full_name,
-            client_avatar_url=None,
+            client_avatar_url=avatar_url,
         )
         await create_message(
             session,
