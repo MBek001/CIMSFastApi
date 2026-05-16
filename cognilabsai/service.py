@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import httpx
 from sqlalchemy import String, cast, delete, func, insert, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Bot
 from telegram.request import HTTPXRequest
@@ -62,6 +63,8 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
 
 FOLLOW_UP_POLL_INTERVAL_SECONDS = 60
 follow_up_scheduler_task: Optional[asyncio.Task] = None
+schema_ready = False
+schema_lock = asyncio.Lock()
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_DELAY_MINUTES = 180
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_DELAY_MINUTES = 360
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES = 1200
@@ -411,8 +414,14 @@ def build_telegram_search_rank(item: dict, normalized_query: str) -> tuple[int, 
 
 
 async def ensure_schema(session: AsyncSession):
-    await session.execute(text("""
-        CREATE TABLE IF NOT EXISTS cognilabsai_global_integration (
+    global schema_ready
+    if schema_ready:
+        return
+    async with schema_lock:
+        if schema_ready:
+            return
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS cognilabsai_global_integration (
             id SERIAL PRIMARY KEY,
             openai_api_key TEXT,
             openai_model VARCHAR(255),
@@ -442,70 +451,70 @@ async def ensure_schema(session: AsyncSession):
             websocket_api_key VARCHAR(255),
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
-        )
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS cognilabs_telegram_token TEXT
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS cognilabs_channel_id VARCHAR(255)
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS frontend_base_url VARCHAR(1000)
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_followup_enabled BOOLEAN NOT NULL DEFAULT FALSE
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_followup_delay_minutes INTEGER NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_followup_message TEXT NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS telegram_followup_enabled BOOLEAN NOT NULL DEFAULT FALSE
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS telegram_followup_delay_minutes INTEGER NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS telegram_followup_message TEXT NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_default_followup_step1_delay_minutes INTEGER NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_default_followup_step1_message TEXT NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_default_followup_step2_delay_minutes INTEGER NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_default_followup_step2_message TEXT NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_default_followup_step3_delay_minutes INTEGER NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_global_integration
-        ADD COLUMN IF NOT EXISTS instagram_default_followup_step3_message TEXT NULL
-    """))
-    await session.execute(text("""
-        CREATE TABLE IF NOT EXISTS cognilabsai_conversation (
+            )
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS cognilabs_telegram_token TEXT
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS cognilabs_channel_id VARCHAR(255)
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS frontend_base_url VARCHAR(1000)
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_followup_enabled BOOLEAN NOT NULL DEFAULT FALSE
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_followup_delay_minutes INTEGER NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_followup_message TEXT NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS telegram_followup_enabled BOOLEAN NOT NULL DEFAULT FALSE
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS telegram_followup_delay_minutes INTEGER NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS telegram_followup_message TEXT NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step1_delay_minutes INTEGER NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step1_message TEXT NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step2_delay_minutes INTEGER NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step2_message TEXT NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step3_delay_minutes INTEGER NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step3_message TEXT NULL
+        """))
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS cognilabsai_conversation (
             id SERIAL PRIMARY KEY,
             channel VARCHAR(32) NOT NULL,
             client_external_id VARCHAR(255) NOT NULL,
@@ -541,88 +550,88 @@ async def ensure_schema(session: AsyncSession):
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW(),
             CONSTRAINT uq_cognilabsai_conversation_channel_client UNIQUE (channel, client_external_id)
-        )
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS client_avatar_url VARCHAR(1000) NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS lead_created BOOLEAN NOT NULL DEFAULT FALSE
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS crm_customer_id INTEGER NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS lead_full_name VARCHAR(255) NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS lead_phone_number VARCHAR(64) NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS lead_business_field VARCHAR(255) NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS lead_scheduled_time VARCHAR(255) NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS last_lead_created_at TIMESTAMP NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS unread_count INTEGER NOT NULL DEFAULT 0
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS follow_up_enabled BOOLEAN NOT NULL DEFAULT FALSE
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS follow_up_mode VARCHAR(32) NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS follow_up_delay_minutes INTEGER NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS follow_up_message TEXT NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS follow_up_due_at TIMESTAMP NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS follow_up_sent_at TIMESTAMP NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS default_follow_up_last_step INTEGER NOT NULL DEFAULT 0
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS default_follow_up_due_at TIMESTAMP NULL
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_conversation
-        ADD COLUMN IF NOT EXISTS default_follow_up_last_sent_at TIMESTAMP NULL
-    """))
-    await session.execute(text("""
-        UPDATE cognilabsai_conversation
-        SET last_lead_created_at = updated_at
-        WHERE lead_created = TRUE
-          AND last_lead_created_at IS NULL
-    """))
-    await session.execute(text("""
-        CREATE TABLE IF NOT EXISTS cognilabsai_message (
+            )
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS client_avatar_url VARCHAR(1000) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS lead_created BOOLEAN NOT NULL DEFAULT FALSE
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS crm_customer_id INTEGER NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS lead_full_name VARCHAR(255) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS lead_phone_number VARCHAR(64) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS lead_business_field VARCHAR(255) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS lead_scheduled_time VARCHAR(255) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS last_lead_created_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS unread_count INTEGER NOT NULL DEFAULT 0
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS follow_up_enabled BOOLEAN NOT NULL DEFAULT FALSE
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS follow_up_mode VARCHAR(32) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS follow_up_delay_minutes INTEGER NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS follow_up_message TEXT NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS follow_up_due_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS follow_up_sent_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS default_follow_up_last_step INTEGER NOT NULL DEFAULT 0
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS default_follow_up_due_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS default_follow_up_last_sent_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            UPDATE cognilabsai_conversation
+            SET last_lead_created_at = updated_at
+            WHERE lead_created = TRUE
+              AND last_lead_created_at IS NULL
+        """))
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS cognilabsai_message (
             id SERIAL PRIMARY KEY,
             conversation_id INTEGER NOT NULL,
             channel VARCHAR(32) NOT NULL,
@@ -636,44 +645,44 @@ async def ensure_schema(session: AsyncSession):
             is_read BOOLEAN NOT NULL DEFAULT FALSE,
             read_at TIMESTAMP NULL,
             created_at TIMESTAMP DEFAULT NOW()
-        )
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_message
-        ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE
-    """))
-    await session.execute(text("""
-        ALTER TABLE cognilabsai_message
-        ADD COLUMN IF NOT EXISTS read_at TIMESTAMP NULL
-    """))
-    await session.execute(text("""
-        UPDATE cognilabsai_message
-        SET is_read = TRUE, read_at = COALESCE(read_at, created_at)
-        WHERE sender_type IN ('ai', 'operator', 'system')
-          AND is_read = FALSE
-    """))
-    await session.execute(text("""
-        UPDATE cognilabsai_conversation c
-        SET unread_count = COALESCE(sub.unread_count, 0)
-        FROM (
-            SELECT conversation_id, COUNT(*)::INTEGER AS unread_count
-            FROM cognilabsai_message
-            WHERE sender_type = 'client' AND is_read = FALSE
-            GROUP BY conversation_id
-        ) AS sub
-        WHERE c.id = sub.conversation_id
-    """))
-    await session.execute(text("""
-        UPDATE cognilabsai_conversation
-        SET unread_count = 0
-        WHERE id NOT IN (
-            SELECT DISTINCT conversation_id
-            FROM cognilabsai_message
-            WHERE sender_type = 'client' AND is_read = FALSE
-        )
-    """))
-    await session.execute(text("""
-        CREATE TABLE IF NOT EXISTS cognilabsai_pause_event (
+            )
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_message
+            ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_message
+            ADD COLUMN IF NOT EXISTS read_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            UPDATE cognilabsai_message
+            SET is_read = TRUE, read_at = COALESCE(read_at, created_at)
+            WHERE sender_type IN ('ai', 'operator', 'system')
+              AND is_read = FALSE
+        """))
+        await session.execute(text("""
+            UPDATE cognilabsai_conversation c
+            SET unread_count = COALESCE(sub.unread_count, 0)
+            FROM (
+                SELECT conversation_id, COUNT(*)::INTEGER AS unread_count
+                FROM cognilabsai_message
+                WHERE sender_type = 'client' AND is_read = FALSE
+                GROUP BY conversation_id
+            ) AS sub
+            WHERE c.id = sub.conversation_id
+        """))
+        await session.execute(text("""
+            UPDATE cognilabsai_conversation
+            SET unread_count = 0
+            WHERE id NOT IN (
+                SELECT DISTINCT conversation_id
+                FROM cognilabsai_message
+                WHERE sender_type = 'client' AND is_read = FALSE
+            )
+        """))
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS cognilabsai_pause_event (
             id SERIAL PRIMARY KEY,
             conversation_id INTEGER NOT NULL,
             action VARCHAR(32) NOT NULL,
@@ -682,20 +691,21 @@ async def ensure_schema(session: AsyncSession):
             operator_name VARCHAR(255) NULL,
             pause_until TIMESTAMP NULL,
             created_at TIMESTAMP DEFAULT NOW()
-        )
-    """))
-    await session.execute(text("""
-        CREATE TABLE IF NOT EXISTS cognilabsai_import_log (
+            )
+        """))
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS cognilabsai_import_log (
             id SERIAL PRIMARY KEY,
             source_file VARCHAR(500) NOT NULL,
             source_hash VARCHAR(128) NOT NULL UNIQUE,
             conversation_id INTEGER NULL,
             imported_at TIMESTAMP DEFAULT NOW()
-        )
-    """))
-    await ensure_permission_pages(session)
-    await ensure_global_integration_row(session)
-    await session.commit()
+            )
+        """))
+        await ensure_permission_pages(session)
+        await ensure_global_integration_row(session)
+        await session.commit()
+        schema_ready = True
 
 
 async def ensure_permission_pages(session: AsyncSession):
@@ -1132,66 +1142,60 @@ async def upsert_conversation(
     is_imported: bool = False,
 ) -> dict:
     await ensure_schema(session)
-    result = await session.execute(
-        select(cognilabsai_conversation).where(
-            cognilabsai_conversation.c.channel == channel,
-            cognilabsai_conversation.c.client_external_id == client_external_id,
-        )
+    now = utcnow()
+    insert_stmt = pg_insert(cognilabsai_conversation).values(
+        channel=channel,
+        client_external_id=client_external_id,
+        client_username=client_username,
+        client_full_name=client_full_name,
+        client_avatar_url=client_avatar_url,
+        instagram_business_id=instagram_business_id,
+        ai_enabled=True,
+        lead_created=False,
+        lead_full_name=None,
+        lead_phone_number=None,
+        lead_business_field=None,
+        lead_scheduled_time=None,
+        last_lead_created_at=None,
+        follow_up_enabled=False,
+        follow_up_mode=None,
+        follow_up_delay_minutes=None,
+        follow_up_message=None,
+        follow_up_due_at=None,
+        follow_up_sent_at=None,
+        default_follow_up_last_step=0,
+        default_follow_up_due_at=None,
+        default_follow_up_last_sent_at=None,
+        pause_reason=None,
+        paused_until=None,
+        last_message_at=None,
+        last_message_preview=None,
+        last_operator_user_id=None,
+        last_operator_name=None,
+        is_imported=is_imported,
+        created_at=now,
+        updated_at=now,
     )
-    existing = result.mappings().first()
-    if existing:
-        updates = {"updated_at": utcnow()}
-        if client_username:
-            updates["client_username"] = client_username
-        if client_full_name:
-            updates["client_full_name"] = client_full_name
-        if client_avatar_url:
-            updates["client_avatar_url"] = client_avatar_url
-        if instagram_business_id:
-            updates["instagram_business_id"] = instagram_business_id
-        if is_imported:
-            updates["is_imported"] = True
-        await session.execute(
-            update(cognilabsai_conversation)
-            .where(cognilabsai_conversation.c.id == existing["id"])
-            .values(**updates)
-        )
-        await session.commit()
-        return await get_conversation(session, existing["id"])
-
+    updates = {
+        "updated_at": now,
+    }
+    if client_username:
+        updates["client_username"] = insert_stmt.excluded.client_username
+    if client_full_name:
+        updates["client_full_name"] = insert_stmt.excluded.client_full_name
+    if client_avatar_url:
+        updates["client_avatar_url"] = insert_stmt.excluded.client_avatar_url
+    if instagram_business_id:
+        updates["instagram_business_id"] = insert_stmt.excluded.instagram_business_id
+    if is_imported:
+        updates["is_imported"] = True
     insert_result = await session.execute(
-        insert(cognilabsai_conversation).values(
-            channel=channel,
-            client_external_id=client_external_id,
-            client_username=client_username,
-            client_full_name=client_full_name,
-            client_avatar_url=client_avatar_url,
-            instagram_business_id=instagram_business_id,
-            ai_enabled=True,
-            lead_created=False,
-            lead_full_name=None,
-            lead_phone_number=None,
-            lead_business_field=None,
-            lead_scheduled_time=None,
-            last_lead_created_at=None,
-            follow_up_enabled=False,
-            follow_up_mode=None,
-            follow_up_delay_minutes=None,
-            follow_up_message=None,
-            follow_up_due_at=None,
-            follow_up_sent_at=None,
-            default_follow_up_last_step=0,
-            default_follow_up_due_at=None,
-            default_follow_up_last_sent_at=None,
-            pause_reason=None,
-            paused_until=None,
-            last_message_at=None,
-            last_message_preview=None,
-            last_operator_user_id=None,
-            last_operator_name=None,
-            is_imported=is_imported,
-            created_at=utcnow(),
-            updated_at=utcnow(),
+        insert_stmt.on_conflict_do_update(
+            index_elements=[
+                cognilabsai_conversation.c.channel,
+                cognilabsai_conversation.c.client_external_id,
+            ],
+            set_=updates,
         ).returning(cognilabsai_conversation.c.id)
     )
     conversation_id = insert_result.scalar_one()
