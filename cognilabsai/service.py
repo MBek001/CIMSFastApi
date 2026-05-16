@@ -753,6 +753,29 @@ async def ensure_global_integration_row(session: AsyncSession):
         )
 
 
+def build_env_integration_defaults() -> dict:
+    values = {}
+    if OPENAI_API_KEY:
+        values["openai_api_key"] = OPENAI_API_KEY
+    if OPENAI_MODEL:
+        values["openai_model"] = OPENAI_MODEL
+    if OPENAI_BASE_URL:
+        values["openai_base_url"] = OPENAI_BASE_URL
+    if INSTAGRAM_BUSINESS_ID:
+        values["instagram_business_id"] = INSTAGRAM_BUSINESS_ID
+    if INSTAGRAM_ACCESS_TOKEN:
+        values["instagram_access_token"] = INSTAGRAM_ACCESS_TOKEN
+    if INSTAGRAM_VERIFY_TOKEN:
+        values["instagram_verify_token"] = INSTAGRAM_VERIFY_TOKEN
+    if TELEGRAM_API_ID:
+        values["telegram_api_id"] = TELEGRAM_API_ID
+    if TELEGRAM_API_HASH:
+        values["telegram_api_hash"] = TELEGRAM_API_HASH
+    if TELEGRAM_SESSION:
+        values["telegram_session"] = TELEGRAM_SESSION
+    return values
+
+
 async def get_integration_config(session: AsyncSession) -> dict:
     await ensure_schema(session)
     result = await session.execute(
@@ -761,24 +784,20 @@ async def get_integration_config(session: AsyncSession) -> dict:
     )
     row = result.mappings().first()
     config = dict(row)
-    if not config.get("openai_api_key") and OPENAI_API_KEY:
-        config["openai_api_key"] = OPENAI_API_KEY
-    if not config.get("openai_model") and OPENAI_MODEL:
-        config["openai_model"] = OPENAI_MODEL
-    if not config.get("openai_base_url") and OPENAI_BASE_URL:
-        config["openai_base_url"] = OPENAI_BASE_URL
-    if not config.get("instagram_business_id") and INSTAGRAM_BUSINESS_ID:
-        config["instagram_business_id"] = INSTAGRAM_BUSINESS_ID
-    if not config.get("instagram_access_token") and INSTAGRAM_ACCESS_TOKEN:
-        config["instagram_access_token"] = INSTAGRAM_ACCESS_TOKEN
-    if not config.get("instagram_verify_token") and INSTAGRAM_VERIFY_TOKEN:
-        config["instagram_verify_token"] = INSTAGRAM_VERIFY_TOKEN
-    if not config.get("telegram_api_id") and TELEGRAM_API_ID:
-        config["telegram_api_id"] = TELEGRAM_API_ID
-    if not config.get("telegram_api_hash") and TELEGRAM_API_HASH:
-        config["telegram_api_hash"] = TELEGRAM_API_HASH
-    if not config.get("telegram_session") and TELEGRAM_SESSION:
-        config["telegram_session"] = TELEGRAM_SESSION
+    missing_updates = {
+        key: value
+        for key, value in build_env_integration_defaults().items()
+        if not config.get(key)
+    }
+    if missing_updates:
+        missing_updates["updated_at"] = utcnow()
+        await session.execute(
+            update(cognilabsai_global_integration)
+            .where(cognilabsai_global_integration.c.id == 1)
+            .values(**missing_updates)
+        )
+        await session.commit()
+        config.update(missing_updates)
     return config
 
 
