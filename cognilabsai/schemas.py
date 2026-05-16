@@ -24,6 +24,12 @@ class IntegrationConfigPayload(BaseModel):
     telegram_followup_enabled: Optional[bool] = None
     telegram_followup_delay_minutes: Optional[int] = None
     telegram_followup_message: Optional[str] = None
+    instagram_default_followup_step1_delay_minutes: Optional[int] = None
+    instagram_default_followup_step1_message: Optional[str] = None
+    instagram_default_followup_step2_delay_minutes: Optional[int] = None
+    instagram_default_followup_step2_message: Optional[str] = None
+    instagram_default_followup_step3_delay_minutes: Optional[int] = None
+    instagram_default_followup_step3_message: Optional[str] = None
     websocket_api_key: Optional[str] = None
 
 
@@ -57,6 +63,9 @@ class ConversationItem(BaseModel):
     follow_up_message: Optional[str] = None
     follow_up_due_at: Optional[datetime] = None
     follow_up_sent_at: Optional[datetime] = None
+    default_follow_up_last_step: int = 0
+    default_follow_up_due_at: Optional[datetime] = None
+    default_follow_up_last_sent_at: Optional[datetime] = None
     last_message_at: Optional[datetime] = None
     last_message_preview: Optional[str] = None
     last_operator_user_id: Optional[int] = None
