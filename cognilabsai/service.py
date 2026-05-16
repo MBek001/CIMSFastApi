@@ -2404,6 +2404,7 @@ async def startup_cognilabsai():
     global follow_up_scheduler_task
     async with async_session_maker() as session:
         await ensure_schema(session)
+        await get_integration_config(session)
         await backfill_instagram_client_names(session)
         await refresh_default_instagram_follow_up_schedules(session)
     await telegram_userbot_manager.start()
