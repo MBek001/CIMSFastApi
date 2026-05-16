@@ -145,6 +145,7 @@ def get_default_instagram_follow_up_steps(config: dict) -> list[tuple[int, int, 
 def is_default_instagram_follow_up_eligible(conversation: dict) -> bool:
     return (
         (conversation.get("channel") == "instagram")
+        and not conversation.get("is_imported")
         and not conversation.get("crm_customer_id")
         and not conversation.get("follow_up_enabled")
     )
