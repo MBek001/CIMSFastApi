@@ -8,6 +8,7 @@ import re
 import zipfile
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from uuid import uuid4
 
 import httpx
 from sqlalchemy import String, cast, delete, func, insert, select, text, update
@@ -56,6 +57,7 @@ DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES = 1200
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_MESSAGE = "Assalomu alaykum, siz yozgan masala bo'yicha yana bog'lanmoqchi edik. Agar sizga qulay bo'lsa, savollaringizni yozib qoldirishingiz mumkin."
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_MESSAGE = "Assalomu alaykum, eslatib o'tamiz, agar sizga xizmatlarimiz bo'yicha qo'shimcha ma'lumot kerak bo'lsa, bemalol yozishingiz mumkin."
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_MESSAGE = "Assalomu alaykum, siz bilan bog'lanish uchun yana bir bor yozdik. Agar hozir ham qiziqish bo'lsa, qulay vaqtingizda javob yozing."
+WEBSITE_AI_DISCOUNT_REPLY = "Bu bo'yicha operatorlarimiz sizga to'liq ma'lumot beradi."
 
 
 def utcnow() -> datetime:
@@ -103,6 +105,8 @@ def get_global_follow_up_fields(channel: str) -> tuple[str, str, str]:
 
 
 def get_conversation_follow_up_settings(conversation: dict, config: dict) -> tuple[bool, Optional[int], Optional[str]]:
+    if (conversation.get("channel") or "").strip().lower() == "website_ai":
+        return False, None, None
     if not conversation.get("follow_up_enabled"):
         return False, None, None
     mode = (conversation.get("follow_up_mode") or "").strip().lower()
@@ -172,6 +176,8 @@ def build_chat_mode(channel: Optional[str]) -> tuple[str, bool]:
         return "telegram_operator", False
     if normalized == "instagram":
         return "instagram_ai", True
+    if normalized == "website_ai":
+        return "website_ai", True
     return f"{normalized or 'unknown'}_operator", False
 
 
@@ -190,7 +196,27 @@ def build_client_display_name(payload: dict) -> str:
         return f"Instagram {external_id}" if external_id else "Instagram chat"
     if channel == "telegram":
         return f"Telegram {external_id}" if external_id else "Telegram chat"
+    if channel == "website_ai":
+        return full_name or "Website visitor"
     return external_id or "Unknown chat"
+
+
+def is_website_discount_question(text: Optional[str]) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    keywords = [
+        "chegirma",
+        "скидк",
+        "discount",
+        "10%",
+        "10 foiz",
+        "10%",
+        "aksiya",
+        "акция",
+        "promo",
+    ]
+    return any(keyword in normalized for keyword in keywords)
 
 
 def extract_client_name_from_text(text: str) -> Optional[str]:
@@ -804,6 +830,19 @@ async def get_messages(session: AsyncSession, conversation_id: int, limit: int =
     return [dict(row) for row in result.mappings().all()]
 
 
+async def get_latest_client_message_text(session: AsyncSession, conversation_id: int) -> Optional[str]:
+    result = await session.execute(
+        select(cognilabsai_message.c.text)
+        .where(
+            cognilabsai_message.c.conversation_id == conversation_id,
+            cognilabsai_message.c.sender_type == "client",
+        )
+        .order_by(cognilabsai_message.c.created_at.desc(), cognilabsai_message.c.id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_conversation_record(session: AsyncSession, conversation_id: int) -> Optional[dict]:
     result = await session.execute(
         select(cognilabsai_conversation).where(cognilabsai_conversation.c.id == conversation_id)
@@ -1125,6 +1164,43 @@ async def get_or_create_conversation(
     return conversation, existing is None
 
 
+def generate_website_session_id() -> str:
+    return uuid4().hex
+
+
+async def init_website_session(session: AsyncSession, session_id: Optional[str]) -> dict:
+    normalized_session_id = (session_id or "").strip() or generate_website_session_id()
+    conversation = await upsert_conversation(
+        session,
+        channel="website_ai",
+        client_external_id=normalized_session_id,
+    )
+    messages = await get_messages(session, conversation["id"], limit=500, offset=0)
+    return {
+        "session_id": normalized_session_id,
+        "conversation": conversation,
+        "messages": messages,
+    }
+
+
+async def send_website_message(session: AsyncSession, session_id: str, text_value: str) -> dict:
+    website_session = await init_website_session(session, session_id)
+    conversation = website_session["conversation"]
+    await create_message(
+        session,
+        conversation_id=conversation["id"],
+        channel="website_ai",
+        sender_type="client",
+        text_value=text_value,
+        client_external_id=website_session["session_id"],
+    )
+    try:
+        await maybe_send_ai_reply(session, conversation["id"])
+    except Exception as exc:
+        print(f"Website AI reply error for conversation {conversation['id']}: {exc}", flush=True)
+    return await init_website_session(session, website_session["session_id"])
+
+
 async def create_message(
     session: AsyncSession,
     *,
@@ -1339,6 +1415,17 @@ async def send_operator_message(session: AsyncSession, conversation_id: int, tex
             operator_name_snapshot=operator_name,
             client_external_id=conversation["client_external_id"],
             telegram_message_id=telegram_message_id,
+        )
+    elif conversation["channel"] == "website_ai":
+        message = await create_message(
+            session,
+            conversation_id=conversation_id,
+            channel="website_ai",
+            sender_type="operator",
+            text_value=text_value,
+            operator_user_id=current_user.id,
+            operator_name_snapshot=operator_name,
+            client_external_id=conversation["client_external_id"],
         )
     else:
         raise RuntimeError("Unsupported channel")
@@ -1614,11 +1701,15 @@ async def save_lead_state(
 
 
 async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Optional[str]:
+    conversation = await get_conversation(session, conversation_id)
+    if conversation and conversation.get("channel") == "website_ai":
+        latest_client_message = await get_latest_client_message_text(session, conversation_id)
+        if is_website_discount_question(latest_client_message):
+            return WEBSITE_AI_DISCOUNT_REPLY
     config = await get_integration_config(session)
     api_key = config.get("openai_api_key")
     if not api_key:
         return None
-    conversation = await get_conversation(session, conversation_id)
     base_url = (config.get("openai_base_url") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
     model = config.get("openai_model") or DEFAULT_OPENAI_MODEL
     prompt = config.get("system_prompt") or ""
@@ -1769,6 +1860,15 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
             text_value=reply_text,
             client_external_id=conversation["client_external_id"],
             telegram_message_id=telegram_message_id,
+        )
+    if conversation["channel"] == "website_ai":
+        return await create_message(
+            session,
+            conversation_id=conversation_id,
+            channel="website_ai",
+            sender_type="ai",
+            text_value=reply_text,
+            client_external_id=conversation["client_external_id"],
         )
     return None
 

@@ -21,6 +21,9 @@ from cognilabsai.schemas import (
     TelegramSearchListResponse,
     TelegramSearchResult,
     TelegramStartConversationRequest,
+    WebsiteMessageRequest,
+    WebsiteSessionInitRequest,
+    WebsiteSessionResponse,
 )
 from cognilabsai.service import (
     delete_conversation,
@@ -29,10 +32,12 @@ from cognilabsai.service import (
     get_messages,
     import_instagram_conversations,
     import_instagram_conversations_upload,
+    init_website_session,
     list_conversations,
     mark_conversation_read,
     maybe_send_ai_reply,
     process_instagram_webhook_payload,
+    send_website_message,
     send_operator_message,
     search_telegram_peer,
     search_telegram_peers,
@@ -48,6 +53,7 @@ router = APIRouter(prefix="/cognilabsai", tags=["CognilabsAI"])
 chat_router = APIRouter(prefix="/chat", tags=["CognilabsAI Chat"])
 integrations_router = APIRouter(prefix="/integrations", tags=["CognilabsAI Integrations"])
 webhook_router = APIRouter(prefix="/webhooks", tags=["CognilabsAI Webhooks"])
+public_router = APIRouter(prefix="/public", tags=["CognilabsAI Public"])
 
 
 @chat_router.get("/conversations", response_model=list[ConversationItem])
@@ -311,6 +317,41 @@ async def instagram_webhook_receive(
     return GenericMessageResponse(message="received")
 
 
+@public_router.post("/website/session", response_model=WebsiteSessionResponse)
+async def public_website_session_create(
+    request: WebsiteSessionInitRequest,
+    session: AsyncSession = Depends(get_async_session),
+):
+    return await init_website_session(session, request.session_id)
+
+
+@public_router.get("/website/session/{session_id}", response_model=WebsiteSessionResponse)
+async def public_website_session_get(
+    session_id: str,
+    session: AsyncSession = Depends(get_async_session),
+):
+    return await init_website_session(session, session_id)
+
+
+@public_router.get("/website/messages", response_model=WebsiteSessionResponse)
+async def public_website_messages(
+    session_id: str = Query(min_length=1),
+    session: AsyncSession = Depends(get_async_session),
+):
+    return await init_website_session(session, session_id)
+
+
+@public_router.post("/website/send-message", response_model=WebsiteSessionResponse)
+async def public_website_send_message(
+    request: WebsiteMessageRequest,
+    session: AsyncSession = Depends(get_async_session),
+):
+    try:
+        return await send_website_message(session, request.session_id, request.text)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.websocket("/ws/chat")
 async def cognilabsai_websocket(
     websocket: WebSocket,
@@ -334,6 +375,27 @@ async def cognilabsai_websocket(
         await manager.disconnect(websocket, conversation_id=conversation_id)
 
 
+@router.websocket("/ws/website")
+async def cognilabsai_website_websocket(
+    websocket: WebSocket,
+    session_id: str = Query(..., min_length=1),
+):
+    from database import async_session_maker
+
+    async with async_session_maker() as session:
+        website_session = await init_website_session(session, session_id)
+    conversation_id = website_session["conversation"]["id"]
+    await manager.connect(websocket, conversation_id=conversation_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await manager.disconnect(websocket, conversation_id=conversation_id)
+    except Exception:
+        await manager.disconnect(websocket, conversation_id=conversation_id)
+
+
 router.include_router(chat_router)
 router.include_router(integrations_router)
 router.include_router(webhook_router)
+router.include_router(public_router)

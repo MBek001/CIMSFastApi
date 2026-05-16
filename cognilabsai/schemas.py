@@ -96,6 +96,21 @@ class SendMessageRequest(BaseModel):
     text: str = Field(min_length=1)
 
 
+class WebsiteSessionInitRequest(BaseModel):
+    session_id: Optional[str] = None
+
+
+class WebsiteMessageRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+
+
+class WebsiteSessionResponse(BaseModel):
+    session_id: str
+    conversation: ConversationItem
+    messages: list[MessageItem]
+
+
 class PauseConversationRequest(BaseModel):
     conversation_id: int
 
