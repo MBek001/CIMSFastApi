@@ -58,7 +58,8 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
     "you must call the register_customer tool once. Otherwise continue the script and ask only one question per message. "
     "If the user gives a short Uzbekistan number like 991234567, normalize it to +998991234567. "
     "Always greet with 'Assalomu Alaykum' on first reply. Reply in the customer's language. "
-    "Do not mention you are an AI unless directly asked. Do not repeat the same confirmation twice."
+    "Do not mention you are an AI unless directly asked. Do not repeat the same confirmation twice. "
+    "Do not start replies with a speaker label or name like 'Alisher:', 'Assistant:', or 'Operator:'."
 )
 
 FOLLOW_UP_POLL_INTERVAL_SECONDS = 60
@@ -1554,6 +1555,19 @@ def normalize_uzbek_phone(phone_number: Optional[str]) -> str:
     return phone_number or ""
 
 
+def sanitize_ai_reply_text(reply_text: Optional[str]) -> str:
+    text_value = (reply_text or "").strip()
+    if not text_value:
+        return ""
+    text_value = re.sub(
+        r"^\s*(?:alisher|assistant|operator)\s*[:\-|]\s*",
+        "",
+        text_value,
+        flags=re.IGNORECASE,
+    ).strip()
+    return text_value
+
+
 def build_lead_confirmation(language: str) -> str:
     language = (language or "").lower()
     if "ru" in language:
@@ -1829,31 +1843,31 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
 
         if is_missing_required_value(full_name):
             if "ru" in language.lower():
-                return "Пожалуйста, напишите свое имя. Это нужно для регистрации."
+                return sanitize_ai_reply_text("Пожалуйста, напишите свое имя. Это нужно для регистрации.")
             if "en" in language.lower():
-                return "Please send your name too. We need it for registration."
-            return "Ismingizni ham yozib yuboring. To'liq ro'yxatdan o'tish uchun kerak bo'ladi."
+                return sanitize_ai_reply_text("Please send your name too. We need it for registration.")
+            return sanitize_ai_reply_text("Ismingizni ham yozib yuboring. To'liq ro'yxatdan o'tish uchun kerak bo'ladi.")
 
         if is_missing_required_value(business_field):
             if "ru" in language.lower():
-                return "Пожалуйста, напишите, в какой сфере вы работаете. Это нужно для регистрации."
+                return sanitize_ai_reply_text("Пожалуйста, напишите, в какой сфере вы работаете. Это нужно для регистрации.")
             if "en" in language.lower():
-                return "Please tell me what field you work in. We need it for registration."
-            return "Qaysi sohada ishlashingizni ham yozib yuboring. Bu ro'yxatdan o'tish uchun kerak bo'ladi."
+                return sanitize_ai_reply_text("Please tell me what field you work in. We need it for registration.")
+            return sanitize_ai_reply_text("Qaysi sohada ishlashingizni ham yozib yuboring. Bu ro'yxatdan o'tish uchun kerak bo'ladi.")
 
         if is_missing_required_value(scheduled_time):
             if "ru" in language.lower():
-                return "Во сколько мы можем с вами связаться?"
+                return sanitize_ai_reply_text("Во сколько мы можем с вами связаться?")
             if "en" in language.lower():
-                return "What time can we contact you?"
-            return "Qaysi vaqtda siz bilan bog'lansak bo'ladi?"
+                return sanitize_ai_reply_text("What time can we contact you?")
+            return sanitize_ai_reply_text("Qaysi vaqtda siz bilan bog'lansak bo'ladi?")
 
         if is_missing_required_value(phone_number):
             if "ru" in language.lower():
-                return "Пожалуйста, отправьте свой номер телефона. Он нужен, чтобы мы могли с вами связаться."
+                return sanitize_ai_reply_text("Пожалуйста, отправьте свой номер телефона. Он нужен, чтобы мы могли с вами связаться.")
             if "en" in language.lower():
-                return "Please send your phone number too. We need it to contact you."
-            return "Telefon raqamingizni ham yozib yuboring. Siz bilan bog'lanishimiz uchun kerak bo'ladi."
+                return sanitize_ai_reply_text("Please send your phone number too. We need it to contact you.")
+            return sanitize_ai_reply_text("Telefon raqamingizni ham yozib yuboring. Siz bilan bog'lanishimiz uchun kerak bo'ladi.")
 
         await save_lead_state(
             session,
@@ -1864,8 +1878,9 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             scheduled_time=scheduled_time,
             language=language,
         )
-        return build_lead_confirmation(language)
-    return (message.get("content") or "").strip() or None
+        return sanitize_ai_reply_text(build_lead_confirmation(language))
+    reply_text = sanitize_ai_reply_text((message.get("content") or "").strip())
+    return reply_text or None
 
 
 async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
