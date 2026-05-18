@@ -36,6 +36,8 @@ from cognilabsai.tables import (
 )
 from cognilabsai.telegram_userbot import telegram_userbot_manager
 from config import (
+    COGNILABS_CHANNEL_ID,
+    COGNILABS_TELEGRAM_TOKEN,
     INSTAGRAM_ACCESS_TOKEN,
     INSTAGRAM_BUSINESS_ID,
     INSTAGRAM_VERIFY_TOKEN,
@@ -784,6 +786,10 @@ def build_env_integration_defaults() -> dict:
         values["telegram_api_hash"] = TELEGRAM_API_HASH
     if TELEGRAM_SESSION:
         values["telegram_session"] = TELEGRAM_SESSION
+    if COGNILABS_TELEGRAM_TOKEN:
+        values["cognilabs_telegram_token"] = COGNILABS_TELEGRAM_TOKEN
+    if COGNILABS_CHANNEL_ID:
+        values["cognilabs_channel_id"] = COGNILABS_CHANNEL_ID
     return values
 
 
@@ -1691,7 +1697,7 @@ async def create_crm_customer_from_lead(
             platform=channel,
             username=client_username,
             phone_number=phone_number,
-            assistant_name="Alisher",
+            assistant_name="Cognilabs AI",
             chat_url=build_crm_chat_url(conversation_id),
             notes=notes_value,
             status="need_to_call",
