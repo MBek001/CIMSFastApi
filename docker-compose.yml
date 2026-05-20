@@ -23,6 +23,7 @@ services:
 
 
     ports:
+      - "8000:8000"
       - "8060:8000"
     command: >
       sh -c "uvicorn run:app --host 0.0.0.0 --port 8000 --workers 1"
@@ -31,4 +32,4 @@ services:
 
 volumes:
   pg_data:
-    name: cimsfastapi_pg_data
+    name: cimsfastapinew_pg_data

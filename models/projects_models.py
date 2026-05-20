@@ -25,6 +25,12 @@ class CardPriority(enum.Enum):
     high = "high"
 
 
+class ProjectAttachmentType(enum.Enum):
+    tz = "tz"
+    kp = "kp"
+    contracts = "contracts"
+
+
 project = Table(
     "project",
     metadata,
@@ -104,6 +110,23 @@ project_board_card_file = Table(
 )
 
 
+project_attachment = Table(
+    "project_attachment",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("project_id", Integer, ForeignKey("project.id", ondelete="CASCADE"), nullable=False),
+    Column("attachment_type", Enum(ProjectAttachmentType, name="projectattachmenttype"), nullable=False),
+    Column("file_name", String(255), nullable=False),
+    Column("url_path", String(500), nullable=False),
+    Column("mime_type", String(255), nullable=True),
+    Column("file_size", Integer, nullable=False, default=0),
+    Column("description", Text, nullable=True),
+    Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
+)
+
+
 Index("idx_project_member_project_id", project_member.c.project_id)
 Index("idx_project_member_user_id", project_member.c.user_id)
 Index("idx_project_board_project_id", project_board.c.project_id)
@@ -111,3 +134,5 @@ Index("idx_project_board_column_board_id", project_board_column.c.board_id)
 Index("idx_project_board_card_column_id", project_board_card.c.column_id)
 Index("idx_project_board_card_assignee_id", project_board_card.c.assignee_id)
 Index("idx_project_board_card_file_card_id", project_board_card_file.c.card_id)
+Index("idx_project_attachment_project_id", project_attachment.c.project_id)
+Index("idx_project_attachment_type", project_attachment.c.attachment_type)
