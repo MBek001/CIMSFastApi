@@ -26,6 +26,8 @@ from routers.audit import router as audit_router
 from cognilabsai.router import router as cognilabsai_router
 from cognilabsai.service import shutdown_cognilabsai, startup_cognilabsai
 from utils.file_storage import FILES_ROOT, IMAGES_ROOT, ensure_image_directories
+from utils.backup_service import send_daily_backup
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from uuid import uuid4
 
 from fastapi.responses import JSONResponse
@@ -121,14 +123,21 @@ async def root():
     }
 
 
+_scheduler = AsyncIOScheduler(timezone="Asia/Tashkent")
+
+
 @app.on_event("startup")
 async def app_startup():
     await startup_cognilabsai()
+    _scheduler.add_job(send_daily_backup, "cron", hour=3, minute=0)
+    _scheduler.start()
+    print("[backup] Scheduler ishga tushdi — har kuni 03:00 (Toshkent)")
 
 
 @app.on_event("shutdown")
 async def app_shutdown():
     await shutdown_cognilabsai()
+    _scheduler.shutdown(wait=False)
 
 
 # --------------------------------------------------
