@@ -37,11 +37,7 @@ from utils.page_permissions import (
 )
 from utils.audit import log_audit_event
 from utils.telegram_helper import upload_audio_to_telegram, get_audio_url_from_telegram, validate_audio_file
-from utils.ai_summary import (
-    generate_customer_ai_summary,
-    generate_customer_priority_insights,
-    infer_recall_time_from_notes_ai,
-)
+from utils.ai_summary import generate_customer_ai_summary, infer_recall_time_from_notes_ai
 from utils.google_calendar import sync_customer_recall_event, delete_customer_recall_event
 from config import CRM_CUSTOMER_API_KEY
 
@@ -64,32 +60,6 @@ def _safe_decrypt(value: Optional[str]) -> Optional[str]:
         return decrypt_text(value)
     except Exception:
         return value
-
-
-def _normalize_phone_for_match(value: Optional[str]) -> str:
-    if not value:
-        return ""
-    raw = value.strip()
-    has_plus = raw.startswith("+")
-    digits_only = "".join(ch for ch in raw if ch.isdigit())
-    if not digits_only:
-        return ""
-    return f"+{digits_only}" if has_plus else digits_only
-
-
-async def _find_customer_by_phone_number(session: AsyncSession, phone_number: str):
-    normalized_phone = _normalize_phone_for_match(phone_number)
-    if not normalized_phone:
-        return None
-
-    result = await session.execute(
-        select(customer.c.id, customer.c.phone_number, customer.c.is_archived)
-    )
-    for row in result.fetchall():
-        decrypted_phone = _safe_decrypt(row.phone_number)
-        if _normalize_phone_for_match(decrypted_phone) == normalized_phone:
-            return row
-    return None
 
 
 def _to_utc_naive_from_uz(value: Optional[datetime]) -> Optional[datetime]:
@@ -280,25 +250,6 @@ async def _ensure_customer_exists(session: AsyncSession, customer_id: int, curre
     return existing_customer
 
 
-async def _build_customer_priority_fields(
-    notes: Optional[str],
-    additional_notes: Optional[List[str]] = None,
-) -> dict:
-    return await generate_customer_priority_insights(notes, additional_notes)
-
-
-async def _recalculate_customer_priority(session: AsyncSession, customer_id: int) -> None:
-    customer_row = await _ensure_customer_exists(session, customer_id)
-    note_rows = await _fetch_customer_note_rows(session, customer_id)
-    additional_notes = [row.note for row in note_rows if getattr(row, "note", None)]
-    priority_fields = await _build_customer_priority_fields(customer_row.notes, additional_notes)
-    await session.execute(
-        update(customer)
-        .where(customer.c.id == customer_id)
-        .values(**priority_fields)
-    )
-
-
 def _serialize_customer_for_audit(row) -> dict:
     status_value = _get_customer_status_value(row)
     customer_type = getattr(row, "type", None)
@@ -313,12 +264,6 @@ def _serialize_customer_for_audit(row) -> dict:
         "chat_url": getattr(row, "chat_url", None),
         "notes": row.notes,
         "aisummary": row.aisummary,
-        "importance_score": getattr(row, "importance_score", None),
-        "priority_score": getattr(row, "priority_score", None),
-        "priority_level": getattr(row, "priority_level", None),
-        "priority_reason": getattr(row, "priority_reason", None),
-        "industry": getattr(row, "industry", None),
-        "business_age_years": getattr(row, "business_age_years", None),
         "audio_file_id": row.audio_file_id,
         "recall_time": _from_utc_naive_to_uz_iso(row.recall_time),
         "conversation_language": getattr(row, "conversation_language", None),
@@ -529,12 +474,6 @@ async def get_customer_detail(
             chat_url=c.chat_url,
             notes=c.notes,
             aisummary=c.aisummary,
-            importance_score=getattr(c, "importance_score", None),
-            priority_score=getattr(c, "priority_score", None),
-            priority_level=getattr(c, "priority_level", None),
-            priority_reason=getattr(c, "priority_reason", None),
-            industry=getattr(c, "industry", None),
-            business_age_years=getattr(c, "business_age_years", None),
             audio_file_id=c.audio_file_id,
             audio_url=audio_url,
             conversation_language=c.conversation_language,
@@ -608,7 +547,6 @@ async def create_customer_note(
         request=request,
         after_data=after_snapshot,
     )
-    await _recalculate_customer_priority(session, customer_id)
     await session.commit()
     return _serialize_customer_note(created_row)
 
@@ -661,7 +599,6 @@ async def update_customer_note(
         before_data=before_snapshot,
         after_data=after_snapshot,
     )
-    await _recalculate_customer_priority(session, customer_id)
     await session.commit()
     return _serialize_customer_note(updated_row)
 
@@ -703,7 +640,6 @@ async def delete_customer_note(
         request=request,
         before_data=before_snapshot,
     )
-    await _recalculate_customer_priority(session, customer_id)
     await session.commit()
     return SuccessResponse(message="Customer note muvaffaqiyatli o'chirildi")
 
@@ -836,12 +772,6 @@ async def crm_dashboard(
             "chat_url": c.chat_url,
             "notes": c.notes,
             "aisummary": c.aisummary,
-            "importance_score": getattr(c, "importance_score", None),
-            "priority_score": getattr(c, "priority_score", None),
-            "priority_level": getattr(c, "priority_level", None),
-            "priority_reason": getattr(c, "priority_reason", None),
-            "industry": getattr(c, "industry", None),
-            "business_age_years": getattr(c, "business_age_years", None),
             "audio_file_id": c.audio_file_id,
             "audio_url": audio_url,
             "conversation_language": c.conversation_language,
@@ -1105,7 +1035,6 @@ async def create_customer(
             parsed_type = CustomerType.local
 
     ai_summary = await generate_customer_ai_summary(notes)
-    priority_fields = await _build_customer_priority_fields(notes)
     normalized_chat_url = chat_url.strip() if chat_url and chat_url.strip() else None
     created_at_uz = datetime.now(UZBEKISTAN_TZ)
     created_at = created_at_uz.replace(tzinfo=None)
@@ -1133,7 +1062,6 @@ async def create_customer(
         "chat_url": normalized_chat_url,
         "notes": notes,
         "aisummary": ai_summary,
-        **priority_fields,
         "audio_file_id": audio_file_id,
         "recall_time": _to_utc_naive_from_uz(resolved_recall_time),
         "conversation_language": conversation_language.value.upper(),
@@ -1270,13 +1198,6 @@ async def update_customer(
     if notes is not None:
         update_data["notes"] = notes
         update_data["aisummary"] = await generate_customer_ai_summary(notes)
-        existing_note_rows = await _fetch_customer_note_rows(session, customer_id)
-        update_data.update(
-            await _build_customer_priority_fields(
-                notes,
-                [row.note for row in existing_note_rows if getattr(row, "note", None)],
-            )
-        )
     if clear_recall_time:
         update_data["recall_time"] = None
     elif recall_time is not None:
@@ -1436,13 +1357,6 @@ async def patch_customer(
     if notes is not None:
         update_data["notes"] = notes
         update_data["aisummary"] = await generate_customer_ai_summary(notes)
-        existing_note_rows = await _fetch_customer_note_rows(session, customer_id)
-        update_data.update(
-            await _build_customer_priority_fields(
-                notes,
-                [row.note for row in existing_note_rows if getattr(row, "note", None)],
-            )
-        )
     if clear_recall_time:
         update_data["recall_time"] = None
     elif recall_time is not None:
@@ -1801,13 +1715,6 @@ async def create_customer_api_record(
         f"request received platform={customer_data.platform} phone={customer_data.phone_number} notes='{(customer_data.notes or '')[:220]}' recall_time_input={customer_data.recall_time}"
     )
 
-    existing_customer = await _find_customer_by_phone_number(session, customer_data.phone_number)
-    if existing_customer:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Bu telefon raqami bilan lead allaqachon mavjud",
-        )
-
     created_at_uz = datetime.now(UZBEKISTAN_TZ)
     created_at = created_at_uz.replace(tzinfo=None)
     resolved_recall_time = customer_data.recall_time
@@ -1822,7 +1729,6 @@ async def create_customer_api_record(
     )
 
     ai_summary = await generate_customer_ai_summary(customer_data.notes)
-    priority_fields = await _build_customer_priority_fields(customer_data.notes)
 
     customer_dict = {
         "full_name": encrypt_text(customer_data.full_name),
@@ -1834,7 +1740,6 @@ async def create_customer_api_record(
         "chat_url": customer_data.chat_url,
         "notes": customer_data.notes,
         "aisummary": ai_summary,
-        **priority_fields,
         "recall_time": _to_utc_naive_from_uz(resolved_recall_time),
         "created_at": created_at
     }
@@ -1920,12 +1825,6 @@ async def filter_customers_by_status(
             chat_url=c.chat_url,
             notes=c.notes,
             aisummary=c.aisummary,
-            importance_score=getattr(c, "importance_score", None),
-            priority_score=getattr(c, "priority_score", None),
-            priority_level=getattr(c, "priority_level", None),
-            priority_reason=getattr(c, "priority_reason", None),
-            industry=getattr(c, "industry", None),
-            business_age_years=getattr(c, "business_age_years", None),
             audio_file_id=c.audio_file_id,
             conversation_language=c.conversation_language,
             recall_time=_from_utc_naive_to_uz_iso(c.recall_time),

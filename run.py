@@ -25,7 +25,7 @@ from routers.attendance import router as attendance_router
 from routers.audit import router as audit_router
 from cognilabsai.router import router as cognilabsai_router
 from cognilabsai.service import shutdown_cognilabsai, startup_cognilabsai
-from utils.file_storage import FILES_ROOT, IMAGES_ROOT, ensure_image_directories
+from utils.file_storage import IMAGES_ROOT, ensure_image_directories
 from uuid import uuid4
 
 from fastapi.responses import JSONResponse
@@ -41,7 +41,6 @@ app = FastAPI(
 
 ensure_image_directories()
 app.mount("/images", StaticFiles(directory=str(IMAGES_ROOT)), name="images")
-app.mount("/files", StaticFiles(directory=str(FILES_ROOT)), name="files")
 
 
 # --------------------------------------------------

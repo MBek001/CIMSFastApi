@@ -3,7 +3,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from models.projects_models import CardPriority, ProjectAttachmentType
+from models.projects_models import CardPriority
 
 
 class UserSummaryResponse(BaseModel):
@@ -18,21 +18,6 @@ class BoardCardFileResponse(BaseModel):
     card_id: int
     created_at: datetime
     url_path: str
-
-
-class ProjectAttachmentResponse(BaseModel):
-    id: int
-    project_id: int
-    attachment_type: ProjectAttachmentType
-    file_name: str
-    url_path: str
-    mime_type: Optional[str]
-    file_size: int
-    description: Optional[str]
-    created_by: Optional[int]
-    created_at: datetime
-    updated_at: datetime
-    created_by_user: Optional[UserSummaryResponse] = None
 
 
 class CardResponse(BaseModel):
@@ -127,7 +112,6 @@ class ProjectDetailResponse(BaseModel):
     created_by_user: Optional[UserSummaryResponse] = None
     members: List[UserSummaryResponse] = Field(default_factory=list)
     boards: List[BoardListItemResponse] = Field(default_factory=list)
-    attachments: List[ProjectAttachmentResponse] = Field(default_factory=list)
 
 
 class ProjectBoardsDetailResponse(BaseModel):
@@ -144,11 +128,6 @@ class CardListResponse(BaseModel):
 class ProjectListResponse(BaseModel):
     projects: List[ProjectSummaryResponse]
     total_count: int
-
-
-class ProjectAttachmentUpdateRequest(BaseModel):
-    attachment_type: Optional[ProjectAttachmentType] = None
-    description: Optional[str] = None
 
 
 class ProjectCreateRequest(BaseModel):

@@ -50,10 +50,7 @@ DUE_WINDOW_PAST_SECONDS = 120
 DUE_WINDOW_FUTURE_SECONDS = 20
 LOOKAHEAD_MINUTES = 61
 RECALL_BOT_REMINDER_MINUTES = 5
-try:
-    UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
-except Exception:
-    UZBEKISTAN_TZ = timezone(timedelta(hours=5), name="Asia/Tashkent")
+UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
 
 _scheduler_task: Optional[asyncio.Task] = None
 
