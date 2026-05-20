@@ -10,11 +10,13 @@ from database import get_async_session
 from models.projects_models import (
     CardPriority,
     project,
+    project_attachment,
     project_member,
     project_board,
     project_board_column,
     project_board_card,
     project_board_card_file,
+    ProjectAttachmentType,
 )
 from models.user_models import PageName, user, user_page_permission
 from schemes.projects_schemes import (
@@ -33,6 +35,7 @@ from schemes.projects_schemes import (
     ColumnCreateRequest,
     ColumnMoveRequest,
     ColumnUpdateRequest,
+    ProjectAttachmentResponse,
     ProjectBoardsDetailResponse,
     ProjectDetailResponse,
     ProjectListResponse,
@@ -40,7 +43,7 @@ from schemes.projects_schemes import (
     UserSummaryResponse,
 )
 from schemes.schemes_users import CreateResponse, SuccessResponse
-from utils.file_storage import delete_image_if_exists, save_image
+from utils.file_storage import delete_file_if_exists, delete_image_if_exists, save_image, save_project_attachment_file
 from utils.telegram_helper import send_card_assignment_notification
 
 router = APIRouter(tags=["Projects"])
@@ -373,6 +376,59 @@ def delete_card_file_paths(file_rows: Sequence) -> None:
         delete_image_if_exists(file_row.url_path)
 
 
+async def get_project_attachments_map(
+    session: AsyncSession, project_ids: Sequence[int]
+) -> Dict[int, List[ProjectAttachmentResponse]]:
+    if not project_ids:
+        return {}
+
+    result = await session.execute(
+        select(project_attachment)
+        .where(project_attachment.c.project_id.in_(list(project_ids)))
+        .order_by(
+            project_attachment.c.created_at.desc(),
+            project_attachment.c.id.desc(),
+        )
+    )
+    rows = result.fetchall()
+    user_map = await get_user_map(
+        session, {row.created_by for row in rows if row.created_by}
+    )
+
+    attachments_map: Dict[int, List[ProjectAttachmentResponse]] = {}
+    for row in rows:
+        attachments_map.setdefault(row.project_id, []).append(
+            ProjectAttachmentResponse(
+                id=row.id,
+                project_id=row.project_id,
+                attachment_type=row.attachment_type,
+                file_name=row.file_name,
+                url_path=row.url_path,
+                mime_type=row.mime_type,
+                file_size=row.file_size,
+                description=row.description,
+                created_by=row.created_by,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                created_by_user=user_map.get(row.created_by),
+            )
+        )
+    return attachments_map
+
+
+async def get_project_attachment_or_404(session: AsyncSession, attachment_id: int):
+    result = await session.execute(
+        select(project_attachment).where(project_attachment.c.id == attachment_id)
+    )
+    attachment_row = result.fetchone()
+    if not attachment_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project attachment topilmadi",
+        )
+    return attachment_row
+
+
 async def build_board_detail(
     session: AsyncSession,
     board_row,
@@ -623,6 +679,7 @@ async def get_project_detail(
     user_ids = {project_row.created_by} if project_row.created_by else set()
     user_ids.update({board_row.created_by for board_row in board_rows if board_row.created_by})
     user_map = await get_user_map(session, user_ids)
+    attachments_map = await get_project_attachments_map(session, [project_id])
 
     members = [
         UserSummaryResponse(id=row.id, name=row.name, surname=row.surname, email=row.email)
@@ -654,6 +711,7 @@ async def get_project_detail(
         created_by_user=user_map.get(project_row.created_by),
         members=members,
         boards=boards,
+        attachments=attachments_map.get(project_id, []),
     )
 
 
@@ -775,10 +833,205 @@ async def delete_project(
     for file_row in card_files_result.fetchall():
         delete_image_if_exists(file_row.url_path)
 
+    attachment_files_result = await session.execute(
+        select(project_attachment.c.url_path).where(project_attachment.c.project_id == project_id)
+    )
+    for file_row in attachment_files_result.fetchall():
+        delete_file_if_exists(file_row.url_path)
+
     delete_image_if_exists(project_row.project_image)
     await session.execute(delete(project).where(project.c.id == project_id))
     await session.commit()
     return SuccessResponse(message=f"Project '{project_row.project_name}' o'chirildi")
+
+
+@router.post(
+    "/projects/{project_id}/attachments",
+    response_model=ProjectAttachmentResponse,
+    summary="Projectga attachment yuklash",
+)
+async def create_project_attachment(
+    project_id: int,
+    attachment_type: ProjectAttachmentType = Form(...),
+    description: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_member_access(session, project_id, current_user)
+    url_path, file_name, file_size, mime_type = await save_project_attachment_file(file, project_id)
+    created_at = datetime.utcnow()
+
+    result = await session.execute(
+        insert(project_attachment)
+        .values(
+            project_id=project_id,
+            attachment_type=attachment_type,
+            file_name=file_name,
+            url_path=url_path,
+            mime_type=mime_type,
+            file_size=file_size,
+            description=description,
+            created_by=current_user.id,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        .returning(project_attachment.c.id)
+    )
+    attachment_id = result.scalar_one()
+    await session.commit()
+    attachment_row = await get_project_attachment_or_404(session, attachment_id)
+    user_map = await get_user_map(session, {current_user.id})
+    return ProjectAttachmentResponse(
+        id=attachment_row.id,
+        project_id=attachment_row.project_id,
+        attachment_type=attachment_row.attachment_type,
+        file_name=attachment_row.file_name,
+        url_path=attachment_row.url_path,
+        mime_type=attachment_row.mime_type,
+        file_size=attachment_row.file_size,
+        description=attachment_row.description,
+        created_by=attachment_row.created_by,
+        created_at=attachment_row.created_at,
+        updated_at=attachment_row.updated_at,
+        created_by_user=user_map.get(attachment_row.created_by),
+    )
+
+
+@router.get(
+    "/projects/{project_id}/attachments",
+    response_model=List[ProjectAttachmentResponse],
+    summary="Project attachmentlari ro'yxati",
+)
+async def list_project_attachments(
+    project_id: int,
+    attachment_type: Optional[ProjectAttachmentType] = Query(None),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_member_access(session, project_id, current_user)
+    attachments_map = await get_project_attachments_map(session, [project_id])
+    items = attachments_map.get(project_id, [])
+    if attachment_type is not None:
+        items = [item for item in items if item.attachment_type == attachment_type]
+    return items
+
+
+@router.get(
+    "/projects/attachments/{attachment_id}",
+    response_model=ProjectAttachmentResponse,
+    summary="Bitta project attachment detail",
+)
+async def get_project_attachment_detail(
+    attachment_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    attachment_row = await get_project_attachment_or_404(session, attachment_id)
+    await ensure_project_member_access(session, attachment_row.project_id, current_user)
+    user_map = await get_user_map(
+        session, {attachment_row.created_by} if attachment_row.created_by else set()
+    )
+    return ProjectAttachmentResponse(
+        id=attachment_row.id,
+        project_id=attachment_row.project_id,
+        attachment_type=attachment_row.attachment_type,
+        file_name=attachment_row.file_name,
+        url_path=attachment_row.url_path,
+        mime_type=attachment_row.mime_type,
+        file_size=attachment_row.file_size,
+        description=attachment_row.description,
+        created_by=attachment_row.created_by,
+        created_at=attachment_row.created_at,
+        updated_at=attachment_row.updated_at,
+        created_by_user=user_map.get(attachment_row.created_by),
+    )
+
+
+@router.patch(
+    "/projects/attachments/{attachment_id}",
+    response_model=ProjectAttachmentResponse,
+    summary="Project attachmentni yangilash",
+)
+async def update_project_attachment(
+    attachment_id: int,
+    attachment_type: Optional[ProjectAttachmentType] = Form(None),
+    description: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    attachment_row = await get_project_attachment_or_404(session, attachment_id)
+    await ensure_project_member_access(session, attachment_row.project_id, current_user)
+
+    update_values = {}
+    if attachment_type is not None:
+        update_values["attachment_type"] = attachment_type
+    if description is not None:
+        update_values["description"] = description
+    if file is not None:
+        url_path, file_name, file_size, mime_type = await save_project_attachment_file(
+            file, attachment_row.project_id
+        )
+        delete_file_if_exists(attachment_row.url_path)
+        update_values.update(
+            {
+                "url_path": url_path,
+                "file_name": file_name,
+                "file_size": file_size,
+                "mime_type": mime_type,
+            }
+        )
+
+    if not update_values:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Yangilanadigan attachment ma'lumoti topilmadi",
+        )
+
+    update_values["updated_at"] = datetime.utcnow()
+    await session.execute(
+        update(project_attachment)
+        .where(project_attachment.c.id == attachment_id)
+        .values(**update_values)
+    )
+    await session.commit()
+    updated_row = await get_project_attachment_or_404(session, attachment_id)
+    user_map = await get_user_map(
+        session, {updated_row.created_by} if updated_row.created_by else set()
+    )
+    return ProjectAttachmentResponse(
+        id=updated_row.id,
+        project_id=updated_row.project_id,
+        attachment_type=updated_row.attachment_type,
+        file_name=updated_row.file_name,
+        url_path=updated_row.url_path,
+        mime_type=updated_row.mime_type,
+        file_size=updated_row.file_size,
+        description=updated_row.description,
+        created_by=updated_row.created_by,
+        created_at=updated_row.created_at,
+        updated_at=updated_row.updated_at,
+        created_by_user=user_map.get(updated_row.created_by),
+    )
+
+
+@router.delete(
+    "/projects/attachments/{attachment_id}",
+    response_model=SuccessResponse,
+    summary="Project attachmentni o'chirish",
+)
+async def delete_project_attachment(
+    attachment_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    attachment_row = await get_project_attachment_or_404(session, attachment_id)
+    await ensure_project_member_access(session, attachment_row.project_id, current_user)
+    delete_file_if_exists(attachment_row.url_path)
+    await session.execute(delete(project_attachment).where(project_attachment.c.id == attachment_id))
+    await session.commit()
+    return SuccessResponse(message="Project attachment o'chirildi")
 
 
 @router.get("/projects/{project_id}/boards", response_model=BoardListResponse, summary="Project boardlari")
@@ -1204,6 +1457,7 @@ async def open_get_project_detail_by_user(
     user_ids = {project_row.created_by} if project_row.created_by else set()
     user_ids.update({board_row.created_by for board_row in board_rows if board_row.created_by})
     user_map = await get_user_map(session, user_ids)
+    attachments_map = await get_project_attachments_map(session, [project_id])
 
     members = [
         UserSummaryResponse(id=row.id, name=row.name, surname=row.surname, email=row.email)
@@ -1235,6 +1489,7 @@ async def open_get_project_detail_by_user(
         created_by_user=user_map.get(project_row.created_by),
         members=members,
         boards=boards,
+        attachments=attachments_map.get(project_id, []),
     )
 
 

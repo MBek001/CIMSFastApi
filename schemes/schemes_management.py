@@ -204,6 +204,49 @@ class SalesManagerInfo(BaseModel):
     assigned_leads_count: int
 
 
+class SalesManagerLeadItem(BaseModel):
+    id: int
+    full_name: Optional[str]
+    phone_number: Optional[str]
+    platform: str
+    username: Optional[str]
+    status: str
+    status_name: Optional[str]
+    priority_level: Optional[str]
+    priority_score: Optional[int]
+    importance_score: Optional[int]
+    industry: Optional[str]
+    is_archived: Optional[bool]
+    created_at: datetime
+    assigned_at: Optional[datetime]
+
+
+class SalesManagerShortInfo(BaseModel):
+    id: int
+    email: str
+    name: str
+    surname: str
+
+
+class SalesManagerStatusCount(BaseModel):
+    status: str
+    count: int
+
+
+class SalesManagerLeadListResponse(BaseModel):
+    sales_manager: SalesManagerShortInfo
+    total_count: int
+    page: int
+    limit: int
+    items: list[SalesManagerLeadItem] = Field(default_factory=list)
+
+
+class SalesManagerLeadStatsResponse(BaseModel):
+    sales_manager: SalesManagerShortInfo
+    summary: dict[str, int]
+    status_stats: list[SalesManagerStatusCount] = Field(default_factory=list)
+
+
 # ========================================
 # CONVERSION RATE SCHEMAS
 # ========================================

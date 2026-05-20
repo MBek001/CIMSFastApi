@@ -136,6 +136,12 @@ class CustomerResponse(BaseModel):
     chat_url: Optional[str]
     notes: Optional[str]
     aisummary: Optional[str] = None
+    importance_score: Optional[int] = None
+    priority_score: Optional[int] = None
+    priority_level: Optional[str] = None
+    priority_reason: Optional[str] = None
+    industry: Optional[str] = None
+    business_age_years: Optional[int] = None
     audio_file_id: Optional[str]
     audio_url: Optional[str] = None
     recall_time: Optional[str] = None
