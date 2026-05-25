@@ -178,21 +178,24 @@ def get_default_instagram_follow_up_steps(config: dict) -> list[tuple[int, int, 
     steps = [
         (
             1,
+            bool(config.get("instagram_default_followup_step1_enabled", True)),
             int(config.get("instagram_default_followup_step1_delay_minutes") or DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_DELAY_MINUTES),
             (config.get("instagram_default_followup_step1_message") or DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_MESSAGE).strip(),
         ),
         (
             2,
+            bool(config.get("instagram_default_followup_step2_enabled", True)),
             int(config.get("instagram_default_followup_step2_delay_minutes") or DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_DELAY_MINUTES),
             (config.get("instagram_default_followup_step2_message") or DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_MESSAGE).strip(),
         ),
         (
             3,
+            bool(config.get("instagram_default_followup_step3_enabled", True)),
             int(config.get("instagram_default_followup_step3_delay_minutes") or DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES),
             (config.get("instagram_default_followup_step3_message") or DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_MESSAGE).strip(),
         ),
     ]
-    return [(step, delay, message) for step, delay, message in steps if delay > 0 and message]
+    return [(step, delay, message) for step, enabled, delay, message in steps if enabled and delay > 0 and message]
 
 
 def is_default_instagram_follow_up_globally_enabled(config: dict) -> bool:
@@ -497,10 +500,13 @@ async def ensure_schema(session: AsyncSession):
             telegram_followup_delay_minutes INTEGER NULL,
             telegram_followup_message TEXT NULL,
             instagram_default_followup_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            instagram_default_followup_step1_enabled BOOLEAN NOT NULL DEFAULT TRUE,
             instagram_default_followup_step1_delay_minutes INTEGER NULL,
             instagram_default_followup_step1_message TEXT NULL,
+            instagram_default_followup_step2_enabled BOOLEAN NOT NULL DEFAULT TRUE,
             instagram_default_followup_step2_delay_minutes INTEGER NULL,
             instagram_default_followup_step2_message TEXT NULL,
+            instagram_default_followup_step3_enabled BOOLEAN NOT NULL DEFAULT TRUE,
             instagram_default_followup_step3_delay_minutes INTEGER NULL,
             instagram_default_followup_step3_message TEXT NULL,
             websocket_api_key VARCHAR(255),
@@ -550,6 +556,10 @@ async def ensure_schema(session: AsyncSession):
         """))
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step1_enabled BOOLEAN NOT NULL DEFAULT TRUE
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
             ADD COLUMN IF NOT EXISTS instagram_default_followup_step1_delay_minutes INTEGER NULL
         """))
         await session.execute(text("""
@@ -558,11 +568,19 @@ async def ensure_schema(session: AsyncSession):
         """))
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step2_enabled BOOLEAN NOT NULL DEFAULT TRUE
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
             ADD COLUMN IF NOT EXISTS instagram_default_followup_step2_delay_minutes INTEGER NULL
         """))
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
             ADD COLUMN IF NOT EXISTS instagram_default_followup_step2_message TEXT NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_step3_enabled BOOLEAN NOT NULL DEFAULT TRUE
         """))
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
@@ -810,10 +828,13 @@ async def ensure_global_integration_row(session: AsyncSession):
                 instagram_followup_enabled=False,
                 telegram_followup_enabled=False,
                 instagram_default_followup_enabled=True,
+                instagram_default_followup_step1_enabled=True,
                 instagram_default_followup_step1_delay_minutes=DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_DELAY_MINUTES,
                 instagram_default_followup_step1_message=DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_MESSAGE,
+                instagram_default_followup_step2_enabled=True,
                 instagram_default_followup_step2_delay_minutes=DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_DELAY_MINUTES,
                 instagram_default_followup_step2_message=DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_MESSAGE,
+                instagram_default_followup_step3_enabled=True,
                 instagram_default_followup_step3_delay_minutes=DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES,
                 instagram_default_followup_step3_message=DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_MESSAGE,
                 websocket_api_key=DEFAULT_WS_KEY,
