@@ -24,6 +24,7 @@ class IntegrationConfigPayload(BaseModel):
     telegram_followup_enabled: Optional[bool] = None
     telegram_followup_delay_minutes: Optional[int] = None
     telegram_followup_message: Optional[str] = None
+    instagram_default_followup_enabled: Optional[bool] = None
     instagram_default_followup_step1_delay_minutes: Optional[int] = None
     instagram_default_followup_step1_message: Optional[str] = None
     instagram_default_followup_step2_delay_minutes: Optional[int] = None

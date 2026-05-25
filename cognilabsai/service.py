@@ -75,6 +75,42 @@ DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_MESSAGE = "Assalomu alaykum, siz yozgan masala 
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_MESSAGE = "Assalomu alaykum, eslatib o'tamiz, agar sizga xizmatlarimiz bo'yicha qo'shimcha ma'lumot kerak bo'lsa, bemalol yozishingiz mumkin."
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_MESSAGE = "Assalomu alaykum, siz bilan bog'lanish uchun yana bir bor yozdik. Agar hozir ham qiziqish bo'lsa, qulay vaqtingizda javob yozing."
 WEBSITE_AI_DISCOUNT_REPLY = "Bu bo'yicha operatorlarimiz sizga to'liq ma'lumot beradi."
+FOLLOW_UP_STOP_PHRASES = (
+    "yoq",
+    "yo'q",
+    "yo‘q",
+    "kerak emas",
+    "qiziq emas",
+    "bezovta qilmang",
+    "yozmang",
+    "to'xtating",
+    "to‘xtating",
+    "stop",
+    "unsubscribe",
+    "not interested",
+    "no thanks",
+    "rahmat",
+    "thanks",
+    "thank you",
+    "spasibo",
+    "спасибо",
+    "ne nado",
+    "не надо",
+    "не интересно",
+    "не пишите",
+    "otmen",
+    "отмена",
+    "yomon",
+    "yoqmadi",
+    "yoqmadi",
+    "noroziman",
+    "noroziman",
+    "complaint",
+    "bad service",
+    "плохо",
+    "жалоба",
+    "недоволен",
+)
 
 
 def utcnow() -> datetime:
@@ -159,6 +195,10 @@ def get_default_instagram_follow_up_steps(config: dict) -> list[tuple[int, int, 
     return [(step, delay, message) for step, delay, message in steps if delay > 0 and message]
 
 
+def is_default_instagram_follow_up_globally_enabled(config: dict) -> bool:
+    return bool(config.get("instagram_default_followup_enabled"))
+
+
 def is_default_instagram_follow_up_eligible(conversation: dict) -> bool:
     return (
         (conversation.get("channel") == "instagram")
@@ -166,6 +206,17 @@ def is_default_instagram_follow_up_eligible(conversation: dict) -> bool:
         and not conversation.get("crm_customer_id")
         and not conversation.get("follow_up_enabled")
     )
+
+
+def should_disable_follow_up_from_client_reply(conversation: Optional[dict], text_value: Optional[str]) -> bool:
+    if not conversation:
+        return False
+    normalized = " ".join((text_value or "").strip().lower().split())
+    if not normalized:
+        return False
+    if not any(phrase in normalized for phrase in FOLLOW_UP_STOP_PHRASES):
+        return False
+    return bool(conversation.get("follow_up_sent_at") or conversation.get("default_follow_up_last_sent_at"))
 
 
 def map_conversation_language(value: Optional[str]) -> str:
@@ -445,6 +496,7 @@ async def ensure_schema(session: AsyncSession):
             telegram_followup_enabled BOOLEAN NOT NULL DEFAULT FALSE,
             telegram_followup_delay_minutes INTEGER NULL,
             telegram_followup_message TEXT NULL,
+            instagram_default_followup_enabled BOOLEAN NOT NULL DEFAULT TRUE,
             instagram_default_followup_step1_delay_minutes INTEGER NULL,
             instagram_default_followup_step1_message TEXT NULL,
             instagram_default_followup_step2_delay_minutes INTEGER NULL,
@@ -491,6 +543,10 @@ async def ensure_schema(session: AsyncSession):
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
             ADD COLUMN IF NOT EXISTS telegram_followup_message TEXT NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_default_followup_enabled BOOLEAN NOT NULL DEFAULT TRUE
         """))
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
@@ -753,6 +809,7 @@ async def ensure_global_integration_row(session: AsyncSession):
                 instagram_verify_token=DEFAULT_VERIFY_TOKEN,
                 instagram_followup_enabled=False,
                 telegram_followup_enabled=False,
+                instagram_default_followup_enabled=True,
                 instagram_default_followup_step1_delay_minutes=DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_DELAY_MINUTES,
                 instagram_default_followup_step1_message=DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_MESSAGE,
                 instagram_default_followup_step2_delay_minutes=DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_DELAY_MINUTES,
@@ -946,15 +1003,15 @@ async def recalculate_default_instagram_follow_up_schedule(session: AsyncSession
     conversation = await get_conversation_record(session, conversation_id)
     if not conversation:
         return None
+    config = await get_integration_config(session)
     values = {
         "default_follow_up_last_step": 0,
         "default_follow_up_last_sent_at": None,
         "updated_at": utcnow(),
     }
-    if not is_default_instagram_follow_up_eligible(conversation):
+    if not is_default_instagram_follow_up_eligible(conversation) or not is_default_instagram_follow_up_globally_enabled(config):
         values["default_follow_up_due_at"] = None
     else:
-        config = await get_integration_config(session)
         steps = get_default_instagram_follow_up_steps(config)
         anchor_time = normalize_datetime(base_time) or normalize_datetime(conversation.get("last_message_at")) or utcnow()
         values["default_follow_up_due_at"] = anchor_time + timedelta(minutes=steps[0][1]) if steps else None
@@ -1278,6 +1335,8 @@ async def create_message(
 ) -> dict:
     ts = normalize_datetime(created_at) or utcnow()
     is_client_message = sender_type == "client"
+    conversation_before = await get_conversation_record(session, conversation_id)
+    disable_follow_ups = is_client_message and should_disable_follow_up_from_client_reply(conversation_before, text_value)
     previous_ai_text = None
     if channel == "instagram" and sender_type == "client":
         previous_result = await session.execute(
@@ -1307,15 +1366,30 @@ async def create_message(
         ).returning(cognilabsai_message.c.id)
     )
     message_id = result.scalar_one()
+    conversation_updates = {
+        "last_message_at": ts,
+        "last_message_preview": text_value[:1000],
+        "unread_count": (cognilabsai_conversation.c.unread_count + 1) if is_client_message else cognilabsai_conversation.c.unread_count,
+        "updated_at": utcnow(),
+    }
+    if disable_follow_ups:
+        conversation_updates.update(
+            {
+                "follow_up_enabled": False,
+                "follow_up_mode": None,
+                "follow_up_delay_minutes": None,
+                "follow_up_message": None,
+                "follow_up_due_at": None,
+                "follow_up_sent_at": None,
+                "default_follow_up_last_step": 0,
+                "default_follow_up_due_at": None,
+                "default_follow_up_last_sent_at": None,
+            }
+        )
     await session.execute(
         update(cognilabsai_conversation)
         .where(cognilabsai_conversation.c.id == conversation_id)
-        .values(
-            last_message_at=ts,
-            last_message_preview=text_value[:1000],
-            unread_count=(cognilabsai_conversation.c.unread_count + 1) if is_client_message else cognilabsai_conversation.c.unread_count,
-            updated_at=utcnow(),
-        )
+        .values(**conversation_updates)
     )
     if channel == "instagram" and sender_type == "client":
         inferred_name = extract_client_name_from_text(text_value)
@@ -1344,6 +1418,17 @@ async def create_message(
         conversation_id=conversation_id,
     )
     if sender_type != "system":
+        if disable_follow_ups:
+            updated_conversation = await get_conversation(session, conversation_id)
+            if updated_conversation:
+                await manager.broadcast(
+                    {
+                        "type": "conversation.updated",
+                        "conversation": updated_conversation,
+                    },
+                    conversation_id=conversation_id,
+                )
+            return message
         default_updated_conversation = await recalculate_default_instagram_follow_up_schedule(session, conversation_id, base_time=ts)
         if default_updated_conversation:
             await manager.broadcast(
@@ -2173,6 +2258,8 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
     if not conversation or not is_default_instagram_follow_up_eligible(conversation):
         return False
     config = await get_integration_config(session)
+    if not is_default_instagram_follow_up_globally_enabled(config):
+        return False
     steps = get_default_instagram_follow_up_steps(config)
     current_step = int(conversation.get("default_follow_up_last_step") or 0)
     next_step = current_step + 1

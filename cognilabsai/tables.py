@@ -32,6 +32,7 @@ cognilabsai_global_integration = Table(
     Column("telegram_followup_enabled", Boolean, nullable=False, default=False),
     Column("telegram_followup_delay_minutes", Integer, nullable=True),
     Column("telegram_followup_message", Text, nullable=True),
+    Column("instagram_default_followup_enabled", Boolean, nullable=False, default=True),
     Column("instagram_default_followup_step1_delay_minutes", Integer, nullable=True),
     Column("instagram_default_followup_step1_message", Text, nullable=True),
     Column("instagram_default_followup_step2_delay_minutes", Integer, nullable=True),
