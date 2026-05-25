@@ -211,7 +211,7 @@ def is_default_instagram_follow_up_eligible(conversation: dict) -> bool:
     )
 
 
-def should_disable_follow_up_from_client_reply(conversation: Optional[dict], text_value: Optional[str]) -> bool:
+def should_disable_follow_up_from_client_reply_fallback(conversation: Optional[dict], text_value: Optional[str]) -> bool:
     if not conversation:
         return False
     normalized = " ".join((text_value or "").strip().lower().split())
@@ -988,6 +988,88 @@ async def get_latest_client_message_text(session: AsyncSession, conversation_id:
     return result.scalar_one_or_none()
 
 
+async def should_disable_follow_up_from_client_reply(
+    session: AsyncSession,
+    conversation: Optional[dict],
+    text_value: Optional[str],
+) -> bool:
+    if not conversation:
+        return False
+    if not (conversation.get("follow_up_sent_at") or conversation.get("default_follow_up_last_sent_at")):
+        return False
+    normalized = (text_value or "").strip()
+    if not normalized:
+        return False
+    config = await get_integration_config(session)
+    api_key = (config.get("openai_api_key") or "").strip()
+    if not api_key:
+        return should_disable_follow_up_from_client_reply_fallback(conversation, normalized)
+    base_url = (config.get("openai_base_url") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
+    model = config.get("openai_model") or DEFAULT_OPENAI_MODEL
+    recent_messages = await get_messages(session, conversation["id"], limit=6, offset=0)
+    recent_lines: list[str] = []
+    for item in recent_messages[-6:]:
+        sender_type = item.get("sender_type")
+        if sender_type == "client":
+            role = "Client"
+        elif sender_type == "system":
+            role = "Follow-up"
+        elif sender_type == "ai":
+            role = "AI"
+        else:
+            role = "Operator"
+        recent_lines.append(f"{role}: {item.get('text', '')}")
+    classification_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You classify whether future follow-up messages should be stopped for this client. "
+                "Return only STOP or CONTINUE. "
+                "Return STOP if the client's latest message means no need, thanks that's enough, not interested, "
+                "do not write/call, complaint, dissatisfaction, or any clear signal that further follow-up should stop. "
+                "Return CONTINUE if the client is still interested, asking a question, wants more details, or the intent is unclear."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Conversation channel: {conversation.get('channel')}\n"
+                f"Recent conversation:\n{chr(10).join(recent_lines)}\n\n"
+                f"Latest client message:\n{normalized}"
+            ),
+        },
+    ]
+    payload = {
+        "model": model,
+        "messages": classification_messages,
+        "max_tokens": 3,
+        "temperature": 0,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+            if response.status_code >= 400:
+                print(f"Follow-up classifier error {response.status_code}: {response.text}", flush=True)
+                return should_disable_follow_up_from_client_reply_fallback(conversation, normalized)
+            data = response.json()
+    except Exception as exc:
+        print(f"Follow-up classifier request error: {exc}", flush=True)
+        return should_disable_follow_up_from_client_reply_fallback(conversation, normalized)
+    choices = data.get("choices") or []
+    if not choices:
+        return should_disable_follow_up_from_client_reply_fallback(conversation, normalized)
+    content = ((choices[0].get("message") or {}).get("content") or "").strip().upper()
+    if "STOP" in content:
+        return True
+    if "CONTINUE" in content:
+        return False
+    return should_disable_follow_up_from_client_reply_fallback(conversation, normalized)
+
+
 async def get_conversation_record(session: AsyncSession, conversation_id: int) -> Optional[dict]:
     result = await session.execute(
         select(cognilabsai_conversation).where(cognilabsai_conversation.c.id == conversation_id)
@@ -1357,7 +1439,9 @@ async def create_message(
     ts = normalize_datetime(created_at) or utcnow()
     is_client_message = sender_type == "client"
     conversation_before = await get_conversation_record(session, conversation_id)
-    disable_follow_ups = is_client_message and should_disable_follow_up_from_client_reply(conversation_before, text_value)
+    disable_follow_ups = False
+    if is_client_message:
+        disable_follow_ups = await should_disable_follow_up_from_client_reply(session, conversation_before, text_value)
     previous_ai_text = None
     if channel == "instagram" and sender_type == "client":
         previous_result = await session.execute(
