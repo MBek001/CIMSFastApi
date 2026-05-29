@@ -1102,22 +1102,43 @@ async def recalculate_follow_up_schedule(session: AsyncSession, conversation_id:
     return await get_conversation(session, conversation_id)
 
 
-async def recalculate_default_instagram_follow_up_schedule(session: AsyncSession, conversation_id: int, base_time: Optional[datetime] = None) -> Optional[dict]:
+async def recalculate_default_instagram_follow_up_schedule(
+    session: AsyncSession,
+    conversation_id: int,
+    base_time: Optional[datetime] = None,
+    preserve_progress: bool = False,
+) -> Optional[dict]:
     conversation = await get_conversation_record(session, conversation_id)
     if not conversation:
         return None
     config = await get_integration_config(session)
-    values = {
-        "default_follow_up_last_step": 0,
-        "default_follow_up_last_sent_at": None,
-        "updated_at": utcnow(),
-    }
+    values = {"updated_at": utcnow()}
     if not is_default_instagram_follow_up_eligible(conversation) or not is_default_instagram_follow_up_globally_enabled(config):
+        if not preserve_progress:
+            values["default_follow_up_last_step"] = 0
+            values["default_follow_up_last_sent_at"] = None
         values["default_follow_up_due_at"] = None
     else:
         steps = get_default_instagram_follow_up_steps(config)
-        anchor_time = normalize_datetime(base_time) or normalize_datetime(conversation.get("last_message_at")) or utcnow()
-        values["default_follow_up_due_at"] = anchor_time + timedelta(minutes=steps[0][1]) if steps else None
+        if not preserve_progress:
+            values["default_follow_up_last_step"] = 0
+            values["default_follow_up_last_sent_at"] = None
+            anchor_time = normalize_datetime(base_time) or normalize_datetime(conversation.get("last_message_at")) or utcnow()
+            values["default_follow_up_due_at"] = anchor_time + timedelta(minutes=steps[0][1]) if steps else None
+        else:
+            current_step = int(conversation.get("default_follow_up_last_step") or 0)
+            current_index = -1
+            for index, (step_number, _, _) in enumerate(steps):
+                if step_number == current_step:
+                    current_index = index
+                    break
+            if current_step and current_index == -1:
+                values["default_follow_up_due_at"] = None
+            elif current_index + 1 >= len(steps):
+                values["default_follow_up_due_at"] = None
+            else:
+                anchor_time = normalize_datetime(base_time) or normalize_datetime(conversation.get("last_message_at")) or utcnow()
+                values["default_follow_up_due_at"] = anchor_time + timedelta(minutes=steps[current_index + 1][1])
     await session.execute(
         update(cognilabsai_conversation)
         .where(cognilabsai_conversation.c.id == conversation_id)
@@ -1149,7 +1170,7 @@ async def refresh_default_instagram_follow_up_schedules(session: AsyncSession) -
         )
     )
     for row in result.all():
-        await recalculate_default_instagram_follow_up_schedule(session, row[0])
+        await recalculate_default_instagram_follow_up_schedule(session, row[0], preserve_progress=True)
 
 
 async def update_conversation_follow_up(session: AsyncSession, conversation_id: int, payload: dict) -> Optional[dict]:
@@ -2372,6 +2393,17 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
         if step_number == current_step:
             current_index = index
             break
+    if current_step and current_index == -1:
+        await session.execute(
+            update(cognilabsai_conversation)
+            .where(cognilabsai_conversation.c.id == conversation_id)
+            .values(
+                default_follow_up_due_at=None,
+                updated_at=utcnow(),
+            )
+        )
+        await session.commit()
+        return False
     next_index = current_index + 1
     if next_index >= len(steps):
         await session.execute(
