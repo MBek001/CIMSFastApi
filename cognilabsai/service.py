@@ -2367,9 +2367,13 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
         return False
     steps = get_default_instagram_follow_up_steps(config)
     current_step = int(conversation.get("default_follow_up_last_step") or 0)
-    next_step = current_step + 1
-    step_map = {step: (delay, message) for step, delay, message in steps}
-    if next_step not in step_map:
+    current_index = -1
+    for index, (step_number, _, _) in enumerate(steps):
+        if step_number == current_step:
+            current_index = index
+            break
+    next_index = current_index + 1
+    if next_index >= len(steps):
         await session.execute(
             update(cognilabsai_conversation)
             .where(cognilabsai_conversation.c.id == conversation_id)
@@ -2377,11 +2381,11 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
         )
         await session.commit()
         return False
+    next_step_number, _, message = steps[next_index]
     access_token = config.get("instagram_access_token")
     if not access_token:
         return False
     sent_at = utcnow()
-    _, message = step_map[next_step]
     instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
     await create_message(
         session,
@@ -2395,13 +2399,14 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
     )
     base_last_message_at = normalize_datetime(conversation.get("last_message_at")) or sent_at
     next_due_at = None
-    if (next_step + 1) in step_map:
-        next_due_at = base_last_message_at + timedelta(minutes=int(step_map[next_step + 1][0]))
+    if next_index + 1 < len(steps):
+        _, next_delay_minutes, _ = steps[next_index + 1]
+        next_due_at = base_last_message_at + timedelta(minutes=int(next_delay_minutes))
     await session.execute(
         update(cognilabsai_conversation)
         .where(cognilabsai_conversation.c.id == conversation_id)
         .values(
-            default_follow_up_last_step=next_step,
+            default_follow_up_last_step=next_step_number,
             default_follow_up_due_at=next_due_at,
             default_follow_up_last_sent_at=sent_at,
             updated_at=utcnow(),
