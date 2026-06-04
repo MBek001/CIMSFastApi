@@ -339,8 +339,8 @@ def _serialize_customer_note(row) -> CustomerNoteResponse:
             if getattr(row, "author_name", None) or getattr(row, "author_surname", None)
             else None
         ),
-        created_at=row.created_at.isoformat(),
-        updated_at=row.updated_at.isoformat(),
+        created_at=_from_utc_naive_to_uz_iso(row.created_at) or row.created_at.isoformat(),
+        updated_at=_from_utc_naive_to_uz_iso(row.updated_at) or row.updated_at.isoformat(),
     )
 
 
@@ -355,8 +355,8 @@ def _serialize_customer_note_for_audit(row) -> dict:
             if getattr(row, "author_name", None) or getattr(row, "author_surname", None)
             else None
         ),
-        "created_at": row.created_at.isoformat(),
-        "updated_at": row.updated_at.isoformat(),
+        "created_at": _from_utc_naive_to_uz_iso(row.created_at) or row.created_at.isoformat(),
+        "updated_at": _from_utc_naive_to_uz_iso(row.updated_at) or row.updated_at.isoformat(),
     }
 
 
