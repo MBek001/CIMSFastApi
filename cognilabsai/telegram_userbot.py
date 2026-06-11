@@ -74,7 +74,7 @@ class TelegramUserbotManager:
                     await process_telegram_userbot_message(
                         peer_id=snapshot["external_id"],
                         sender_id=str(event.sender_id) if event.sender_id else None,
-                        text=event.raw_text or "",
+                        text=self._build_incoming_text(event),
                         username=snapshot.get("username"),
                         full_name=snapshot.get("full_name"),
                         avatar_url=snapshot.get("avatar_url"),
@@ -113,6 +113,27 @@ class TelegramUserbotManager:
         entity = await client.get_entity(self._normalize_peer(peer))
         message = await client.send_message(entity=entity, message=text)
         return str(message.id) if message else None
+
+    def _build_incoming_text(self, event) -> str:
+        text_value = (getattr(event, "raw_text", None) or "").strip()
+        if text_value:
+            return text_value
+        message = getattr(event, "message", None)
+        if message is None:
+            return ""
+        if getattr(message, "sticker", False):
+            emoji = None
+            file_obj = getattr(message, "file", None)
+            if file_obj is not None:
+                emoji = getattr(file_obj, "emoji", None)
+            label = "Sticker"
+            mime_type = (getattr(file_obj, "mime_type", None) or "").lower() if file_obj is not None else ""
+            if mime_type == "application/x-tgsticker":
+                label = "Animated Sticker"
+            elif mime_type == "video/webm":
+                label = "Video Sticker"
+            return f"[{label}{f' {emoji}' if emoji else ''}]"
+        return ""
 
     def _serialize_presence(self, status) -> dict:
         if status is None:
