@@ -104,6 +104,8 @@ cognilabsai_message = Table(
     Column("instagram_message_id", String(255), nullable=True),
     Column("telegram_message_id", String(255), nullable=True),
     Column("text", Text, nullable=False),
+    Column("media_type", String(64), nullable=True),
+    Column("media_url", String(1000), nullable=True),
     Column("is_read", Boolean, nullable=False, default=False),
     Column("read_at", DateTime, nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),

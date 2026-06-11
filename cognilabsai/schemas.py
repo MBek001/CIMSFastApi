@@ -90,6 +90,8 @@ class MessageItem(BaseModel):
     instagram_message_id: Optional[str] = None
     telegram_message_id: Optional[str] = None
     text: str
+    media_type: Optional[str] = None
+    media_url: Optional[str] = None
     is_read: bool = False
     read_at: Optional[datetime] = None
     created_at: datetime

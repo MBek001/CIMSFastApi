@@ -11,11 +11,13 @@ FILES_ROOT = PROJECT_ROOT / "files"
 PROJECT_IMAGES_DIR = IMAGES_ROOT / "project_images"
 PROFILE_IMAGES_DIR = IMAGES_ROOT / "profil_images"
 CARD_IMAGES_DIR = IMAGES_ROOT / "card_images"
+TELEGRAM_STICKERS_DIR = IMAGES_ROOT / "telegram_stickers"
 PROJECT_ATTACHMENTS_DIR = FILES_ROOT / "project_attachments"
 IMAGE_CATEGORY_DIRS = {
     "project_images": PROJECT_IMAGES_DIR,
     "profil_images": PROFILE_IMAGES_DIR,
     "card_images": CARD_IMAGES_DIR,
+    "telegram_stickers": TELEGRAM_STICKERS_DIR,
 }
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
@@ -49,6 +51,7 @@ def ensure_image_directories() -> None:
     PROJECT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     PROFILE_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     CARD_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    TELEGRAM_STICKERS_DIR.mkdir(parents=True, exist_ok=True)
     PROJECT_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 

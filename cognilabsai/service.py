@@ -719,6 +719,8 @@ async def ensure_schema(session: AsyncSession):
             instagram_message_id VARCHAR(255) NULL,
             telegram_message_id VARCHAR(255) NULL,
             text TEXT NOT NULL,
+            media_type VARCHAR(64) NULL,
+            media_url VARCHAR(1000) NULL,
             is_read BOOLEAN NOT NULL DEFAULT FALSE,
             read_at TIMESTAMP NULL,
             created_at TIMESTAMP DEFAULT NOW()
@@ -731,6 +733,14 @@ async def ensure_schema(session: AsyncSession):
         await session.execute(text("""
             ALTER TABLE cognilabsai_message
             ADD COLUMN IF NOT EXISTS read_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_message
+            ADD COLUMN IF NOT EXISTS media_type VARCHAR(64) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_message
+            ADD COLUMN IF NOT EXISTS media_url VARCHAR(1000) NULL
         """))
         await session.execute(text("""
             UPDATE cognilabsai_message
@@ -1450,6 +1460,8 @@ async def create_message(
     channel: str,
     sender_type: str,
     text_value: str,
+    media_type: Optional[str] = None,
+    media_url: Optional[str] = None,
     operator_user_id: Optional[int] = None,
     operator_name_snapshot: Optional[str] = None,
     client_external_id: Optional[str] = None,
@@ -1486,6 +1498,8 @@ async def create_message(
             instagram_message_id=instagram_message_id,
             telegram_message_id=telegram_message_id,
             text=text_value,
+            media_type=media_type,
+            media_url=media_url,
             is_read=not is_client_message,
             read_at=None if is_client_message else ts,
             created_at=ts,
@@ -2201,11 +2215,13 @@ async def process_telegram_userbot_message(
     peer_id: str,
     sender_id: Optional[str],
     text: str,
+    media_type: Optional[str],
+    media_url: Optional[str],
     username: Optional[str],
     full_name: Optional[str],
     avatar_url: Optional[str],
 ):
-    if not text:
+    if not text and not media_url:
         return
     async with async_session_maker() as session:
         await ensure_schema(session)
@@ -2222,7 +2238,9 @@ async def process_telegram_userbot_message(
             conversation_id=conversation["id"],
             channel="telegram",
             sender_type="client",
-            text_value=text,
+            text_value=text or "",
+            media_type=media_type,
+            media_url=media_url,
             client_external_id=sender_id or peer_id,
         )
 

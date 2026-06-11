@@ -10,7 +10,7 @@ from sqlalchemy import select
 from database import async_session_maker
 
 from cognilabsai.tables import cognilabsai_conversation, cognilabsai_global_integration
-from utils.file_storage import PROFILE_IMAGES_DIR
+from utils.file_storage import PROFILE_IMAGES_DIR, TELEGRAM_STICKERS_DIR
 
 
 class TelegramUserbotManager:
@@ -70,11 +70,14 @@ class TelegramUserbotManager:
                         "full_name": None,
                         "avatar_url": None,
                     }
+                    text_value, media_type, media_url = await self._build_incoming_payload(event)
 
                     await process_telegram_userbot_message(
                         peer_id=snapshot["external_id"],
                         sender_id=str(event.sender_id) if event.sender_id else None,
-                        text=self._build_incoming_text(event),
+                        text=text_value,
+                        media_type=media_type,
+                        media_url=media_url,
                         username=snapshot.get("username"),
                         full_name=snapshot.get("full_name"),
                         avatar_url=snapshot.get("avatar_url"),
@@ -114,26 +117,74 @@ class TelegramUserbotManager:
         message = await client.send_message(entity=entity, message=text)
         return str(message.id) if message else None
 
-    def _build_incoming_text(self, event) -> str:
+    async def _build_incoming_payload(self, event) -> tuple[str, Optional[str], Optional[str]]:
         text_value = (getattr(event, "raw_text", None) or "").strip()
         if text_value:
-            return text_value
+            return text_value, None, None
         message = getattr(event, "message", None)
         if message is None:
-            return ""
+            return "", None, None
         if getattr(message, "sticker", False):
-            emoji = None
-            file_obj = getattr(message, "file", None)
-            if file_obj is not None:
-                emoji = getattr(file_obj, "emoji", None)
-            label = "Sticker"
-            mime_type = (getattr(file_obj, "mime_type", None) or "").lower() if file_obj is not None else ""
-            if mime_type == "application/x-tgsticker":
-                label = "Animated Sticker"
-            elif mime_type == "video/webm":
-                label = "Video Sticker"
-            return f"[{label}{f' {emoji}' if emoji else ''}]"
-        return ""
+            return await self._build_sticker_payload(message)
+        return "", None, None
+
+    async def _build_sticker_payload(self, message) -> tuple[str, Optional[str], Optional[str]]:
+        file_obj = getattr(message, "file", None)
+        emoji = getattr(file_obj, "emoji", None) if file_obj is not None else None
+        mime_type = (getattr(file_obj, "mime_type", None) or "").lower() if file_obj is not None else ""
+        label = "Sticker"
+        media_type = "sticker"
+        if mime_type == "application/x-tgsticker":
+            label = "Animated Sticker"
+            media_type = "animated_sticker"
+        elif mime_type == "video/webm":
+            label = "Video Sticker"
+            media_type = "video_sticker"
+        media_url = await self._download_sticker_preview(message, media_type, mime_type)
+        return f"[{label}{f' {emoji}' if emoji else ''}]", media_type, media_url
+
+    async def _download_sticker_preview(self, message, media_type: str, mime_type: str) -> Optional[str]:
+        client = self.client
+        if client is None:
+            return None
+        TELEGRAM_STICKERS_DIR.mkdir(parents=True, exist_ok=True)
+        payload = None
+        try:
+            if media_type == "sticker":
+                payload = await client.download_media(message, file=bytes)
+            else:
+                try:
+                    payload = await client.download_media(message, file=bytes, thumb=-1)
+                except Exception:
+                    payload = await client.download_media(message, file=bytes, thumb=0)
+        except Exception:
+            payload = None
+        if not isinstance(payload, (bytes, bytearray)) or not payload:
+            return None
+        suffix = self._detect_sticker_suffix(bytes(payload), mime_type, media_type)
+        file_name = f"cognilabsai_telegram_sticker_{getattr(message, 'id', uuid.uuid4().hex)}_{uuid.uuid4().hex}{suffix}"
+        destination = TELEGRAM_STICKERS_DIR / file_name
+        destination.write_bytes(bytes(payload))
+        return f"/images/telegram_stickers/{destination.name}"
+
+    def _detect_sticker_suffix(self, payload: bytes, mime_type: str, media_type: str) -> str:
+        if payload.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if payload.startswith((b"GIF87a", b"GIF89a")):
+            return ".gif"
+        if payload.startswith(b"RIFF") and len(payload) >= 12 and payload[8:12] == b"WEBP":
+            return ".webp"
+        if "png" in mime_type:
+            return ".png"
+        if "jpeg" in mime_type or "jpg" in mime_type:
+            return ".jpg"
+        if "gif" in mime_type:
+            return ".gif"
+        if "webp" in mime_type:
+            return ".webp"
+        return ".webp" if media_type == "sticker" else ".jpg"
 
     def _serialize_presence(self, status) -> dict:
         if status is None:
