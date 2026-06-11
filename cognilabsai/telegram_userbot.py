@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import gzip
 from pathlib import Path
 from typing import Optional
 import uuid
@@ -150,7 +151,7 @@ class TelegramUserbotManager:
         TELEGRAM_STICKERS_DIR.mkdir(parents=True, exist_ok=True)
         payload = None
         try:
-            if media_type == "sticker":
+            if media_type in {"sticker", "animated_sticker"}:
                 payload = await client.download_media(message, file=bytes)
             else:
                 try:
@@ -161,10 +162,24 @@ class TelegramUserbotManager:
             payload = None
         if not isinstance(payload, (bytes, bytearray)) or not payload:
             return None
+        if media_type == "animated_sticker":
+            return self._save_animated_sticker_json(bytes(payload), message)
         suffix = self._detect_sticker_suffix(bytes(payload), mime_type, media_type)
         file_name = f"cognilabsai_telegram_sticker_{getattr(message, 'id', uuid.uuid4().hex)}_{uuid.uuid4().hex}{suffix}"
         destination = TELEGRAM_STICKERS_DIR / file_name
         destination.write_bytes(bytes(payload))
+        return f"/images/telegram_stickers/{destination.name}"
+
+    def _save_animated_sticker_json(self, payload: bytes, message) -> Optional[str]:
+        try:
+            json_bytes = gzip.decompress(payload)
+        except Exception:
+            json_bytes = payload
+        if not json_bytes:
+            return None
+        file_name = f"cognilabsai_telegram_sticker_{getattr(message, 'id', uuid.uuid4().hex)}_{uuid.uuid4().hex}.json"
+        destination = TELEGRAM_STICKERS_DIR / file_name
+        destination.write_bytes(json_bytes)
         return f"/images/telegram_stickers/{destination.name}"
 
     def _detect_sticker_suffix(self, payload: bytes, mime_type: str, media_type: str) -> str:
