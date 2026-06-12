@@ -63,7 +63,7 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
     "Do not mention you are an AI unless directly asked. Do not repeat the same confirmation twice. "
     "Do not start replies with a speaker label or name like 'Alisher:', 'Assistant:', or 'Operator:'. "
     "CRITICAL: The client's_job field must be the client's BUSINESS FIELD/INDUSTRY (e.g. 'futbol', 'restoran', 'qurilish', 'savdo'), "
-    "NOT the name of the IT system they want (e.g. 'futbol klubi tizimi' is a service request, NOT a business field). "
+    "NOT the name of the IT system they want. "
     "Always ask 'Qaysi sohada faoliyat yuritasiz?' as a separate step before asking for phone number. "
     "Never skip the business field question even if the client already described the IT system they need. "
     "IMPORTANT: Do NOT call register_customer unless the client has explicitly provided a preferred call time in the conversation. "
@@ -2100,10 +2100,16 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             {"role": "system", "content": prompt},
             {"role": "system", "content": COGNILABSAI_BEHAVIOR_PROMPT},
         ]
-        if is_lead_cooldown_active(conversation):
+        if is_lead_cooldown_active(conversation) or lead_created:
             messages.append({
                 "role": "system",
-                "content": f"Lead was already created in the last {LEAD_COOLDOWN_HOURS} hours for this conversation. Do not call register_customer again and do not repeat confirmation.",
+                "content": (
+                    "LEAD ALREADY CREATED for this conversation. "
+                    "Do NOT call register_customer again. "
+                    "Do NOT repeat the greeting or ask for name/phone/field again. "
+                    "Do NOT ask 'qanday xizmatlar qiziqtiradi' or restart the script. "
+                    "Simply reply as a friendly consultant — answer questions if any, or say goodbye politely."
+                ),
             })
         for item in history:
             role = "assistant" if item["sender_type"] in ("ai", "operator") else "user"
@@ -2175,31 +2181,31 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
 
             if is_missing_required_value(full_name):
                 if "uz" in language:
-                    return "Ismingizni ham yozib yuboring. To'liq ro'yxatdan o'tish uchun kerak bo'ladi."
+                    return "Ismingizni ham yozib yuboring."
                 if "ru" in language:
-                    return "Пожалуйста, напишите свое имя. Это нужно для регистрации."
-                return "Please also send your name. We need it to register you."
+                    return "Пожалуйста, напишите своё имя."
+                return "Please also send your name."
 
             if is_missing_required_value(business_field):
                 if "uz" in language:
-                    return "Qaysi sohada ishlashingizni ham yozib yuboring. Bu ro'yxatdan o'tish uchun kerak bo'ladi."
+                    return "Qaysi sohada faoliyat yuritasiz?"
                 if "ru" in language:
-                    return "Пожалуйста, напишите, в какой сфере вы работаете. Это нужно для регистрации."
-                return "Please also tell us what field you work in. We need it for registration."
+                    return "В какой сфере вы работаете?"
+                return "What field do you work in?"
 
             if is_missing_required_value(scheduled_time):
                 if "uz" in language:
-                    return "Qaysi vaqtda siz bilan bog'lansak bo'ladi?"
+                    return "Qo'ng'iroq uchun qaysi vaqt qulay bo'ladi?"
                 if "ru" in language:
-                    return "Во сколько мы можем с вами связаться?"
-                return "What time can we contact you?"
+                    return "Во сколько вам удобно позвонить?"
+                return "What time is convenient for a call?"
 
             if is_missing_required_value(phone_number):
                 if "uz" in language:
-                    return "Telefon raqamingizni ham yozib yuboring. Siz bilan bog'lanishimiz uchun kerak bo'ladi."
+                    return "Telefon raqamingizni yuboring."
                 if "ru" in language:
-                    return "Пожалуйста, отправьте свой номер телефона. Он нужен, чтобы мы могли с вами связаться."
-                return "Please send your phone number too. We need it to contact you."
+                    return "Пожалуйста, отправьте номер телефона."
+                return "Please send your phone number."
 
             try:
                 await save_lead_state(
@@ -2213,9 +2219,11 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                 )
             except Exception as lead_exc:
                 print(f"[cognilabsai] save_lead_state error (conversation {conversation_id}): {lead_exc}", flush=True)
+            # Tool call topildi — faqat confirmation qaytariladi, boshqa hech narsa emas
             return build_lead_confirmation(language)
 
-        reply_text = extract_chat_message_text(message)
+        # Tool call yo'q — oddiy text reply
+        reply_text = sanitize_ai_reply_text(extract_chat_message_text(message))
         if reply_text:
             return reply_text
         return "😓 Botdan javob olinmadi. Iltimos, operatorga yozing."
