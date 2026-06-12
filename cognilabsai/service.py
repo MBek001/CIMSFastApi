@@ -2091,9 +2091,9 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         base_url = (config.get("openai_base_url") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
         model = config.get("openai_model") or DEFAULT_OPENAI_MODEL
         prompt = config.get("system_prompt") or "You are Cognilabs company's AI sales bot"
-        legacy_context = await build_legacy_user_context(session, conversation_id)
         lead_created = bool(conversation and conversation.get("lead_created"))
 
+        history = await get_messages(session, conversation_id, limit=30, offset=0)
         messages = [
             {"role": "system", "content": prompt},
             {"role": "system", "content": COGNILABSAI_BEHAVIOR_PROMPT},
@@ -2101,8 +2101,13 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         if is_lead_cooldown_active(conversation):
             messages.append({
                 "role": "system",
-                "content": f"Lead was already created in the last {LEAD_COOLDOWN_HOURS} hours. Do not call register_customer again.",
+                "content": f"Lead was already created in the last {LEAD_COOLDOWN_HOURS} hours for this conversation. Do not call register_customer again and do not repeat confirmation.",
             })
+        for item in history:
+            role = "assistant" if item["sender_type"] in ("ai", "operator") else "user"
+            messages.append({"role": role, "content": item["text"]})
+
+
         history = await get_messages(session, conversation_id, limit=30, offset=0)
         for item in history:
             role = "assistant" if item["sender_type"] in ("ai", "operator") else "user"
@@ -2212,8 +2217,10 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         if reply_text:
             return reply_text
         return "😓 Botdan javob olinmadi. Iltimos, operatorga yozing."
-    except Exception:
-        print("Error in generate_ai_reply", flush=True)
+    except Exception as exc:
+        import traceback
+        print(f"[cognilabsai] Error in generate_ai_reply (conversation {conversation_id}): {exc}", flush=True)
+        traceback.print_exc()
         return "😓 Uzr, operator hozir aloqada emas edi. Iltimos, keyinroq urinib ko'ring."
 
 
