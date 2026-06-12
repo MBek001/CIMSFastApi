@@ -1718,6 +1718,8 @@ async def _call_llm(
             {"role": "user", "content": user},
         ],
     }
+    if str(model).strip().lower().startswith("gpt-5"):
+        payload["reasoning_effort"] = "low"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     url = f"{base_url.rstrip('/')}/chat/completions"
     try:

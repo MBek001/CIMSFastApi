@@ -1049,12 +1049,12 @@ async def should_disable_follow_up_from_client_reply(
             ),
         },
     ]
-    payload = {
+    payload = apply_reasoning_defaults({
         "model": model,
         "messages": classification_messages,
-        "max_completion_tokens": 3,
+        "max_completion_tokens": 32,
         "temperature": 0,
-    }
+    }, model)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -1072,7 +1072,7 @@ async def should_disable_follow_up_from_client_reply(
     choices = data.get("choices") or []
     if not choices:
         return should_disable_follow_up_from_client_reply_fallback(conversation, normalized)
-    content = ((choices[0].get("message") or {}).get("content") or "").strip().upper()
+    content = extract_chat_message_text(choices[0].get("message") or {}).upper()
     if "STOP" in content:
         return True
     if "CONTINUE" in content:
@@ -1799,6 +1799,50 @@ def sanitize_ai_reply_text(reply_text: Optional[str]) -> str:
     return text_value
 
 
+def is_gpt5_model(model: Optional[str]) -> bool:
+    return (model or "").strip().lower().startswith("gpt-5")
+
+
+def apply_reasoning_defaults(payload: dict, model: Optional[str]) -> dict:
+    if is_gpt5_model(model):
+        payload["reasoning_effort"] = "low"
+    return payload
+
+
+def extract_chat_message_text(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str) and text_value.strip():
+                    parts.append(text_value.strip())
+        return "\n".join(parts).strip()
+    return ""
+
+
+def extract_register_customer_arguments(message: dict) -> Optional[dict]:
+    function_call = message.get("function_call")
+    if function_call:
+        try:
+            return json.loads(function_call.get("arguments") or "{}")
+        except Exception:
+            return {}
+    tool_calls = message.get("tool_calls") or []
+    for tool_call in tool_calls:
+        function_obj = tool_call.get("function") or {}
+        if function_obj.get("name") != "register_customer":
+            continue
+        try:
+            return json.loads(function_obj.get("arguments") or "{}")
+        except Exception:
+            return {}
+    return None
+
+
 def build_lead_confirmation(language: str) -> str:
     language = (language or "").lower()
     if "ru" in language:
@@ -2022,35 +2066,38 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         ]
 
         if lead_created:
-            payload = {
+            payload = apply_reasoning_defaults({
                 "model": model,
                 "messages": messages,
-                "max_completion_tokens": 350,
-            }
+                "max_completion_tokens": 1200,
+            }, model)
         else:
-            payload = {
+            payload = apply_reasoning_defaults({
                 "model": model,
                 "messages": messages,
-                "functions": [
+                "tools": [
                     {
-                        "name": "register_customer",
-                        "description": "Register new interested customer into CRM",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "language": {"type": "string"},
-                                "scheduled_time": {"type": "string"},
-                                "client's_job": {"type": "string"},
-                                "full_name": {"type": "string"},
-                                "phone_number": {"type": "string"},
+                        "type": "function",
+                        "function": {
+                            "name": "register_customer",
+                            "description": "Register new interested customer into CRM",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "language": {"type": "string"},
+                                    "scheduled_time": {"type": "string"},
+                                    "client's_job": {"type": "string"},
+                                    "full_name": {"type": "string"},
+                                    "phone_number": {"type": "string"},
+                                },
+                                "required": ["language", "scheduled_time", "client's_job", "full_name", "phone_number"],
                             },
-                            "required": ["language", "scheduled_time", "client's_job", "full_name", "phone_number"],
                         },
                     }
                 ],
-                "function_call": "auto",
-                "max_completion_tokens": 350,
-            }
+                "tool_choice": "auto",
+                "max_completion_tokens": 1200,
+            }, model)
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -2068,11 +2115,8 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         message = choices[0].get("message") or {}
         print("GPT Message Structure:", json.dumps(message, indent=2, ensure_ascii=False), flush=True)
 
-        if message.get("function_call"):
-            try:
-                tool_data = json.loads(message["function_call"].get("arguments") or "{}")
-            except Exception:
-                tool_data = {}
+        tool_data = extract_register_customer_arguments(message)
+        if tool_data is not None:
             language = (tool_data.get("language") or "uzbek").lower()
             scheduled_time = (tool_data.get("scheduled_time") or "").strip()
             business_field = (tool_data.get("client's_job") or "").strip()
@@ -2118,8 +2162,9 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             )
             return build_lead_confirmation(language)
 
-        if message.get("content"):
-            return (message.get("content") or "").strip() or None
+        reply_text = extract_chat_message_text(message)
+        if reply_text:
+            return reply_text
         return "😓 Botdan javob olinmadi. Iltimos, operatorga yozing."
     except Exception:
         print("Error in generate_ai_reply", flush=True)
