@@ -1052,7 +1052,7 @@ async def should_disable_follow_up_from_client_reply(
     payload = {
         "model": model,
         "messages": classification_messages,
-        "max_tokens": 3,
+        "max_completion_tokens": 3,
         "temperature": 0,
     }
     headers = {
@@ -1804,7 +1804,7 @@ def build_lead_confirmation(language: str) -> str:
     if "ru" in language:
         return "😊 Спасибо! Мы получили ваш номер и скоро свяжемся с вами."
     if "en" in language:
-        return "😊 Thank you! We have received your number and will contact you very soon."
+        return "😊 Thank you! We've received your number. Our team will call you very soon."
     return "😊 Raqamingizni oldik! Jamoamiz tez orada siz bilan bog'lanadi."
 
 
@@ -2000,118 +2000,130 @@ async def save_lead_state(
 
 
 async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Optional[str]:
-    conversation = await get_conversation(session, conversation_id)
-    if conversation and conversation.get("channel") == "website_ai":
-        latest_client_message = await get_latest_client_message_text(session, conversation_id)
-        if is_website_discount_question(latest_client_message):
-            return WEBSITE_AI_DISCOUNT_REPLY
-    config = await get_integration_config(session)
-    api_key = config.get("openai_api_key")
-    if not api_key:
-        return None
-    base_url = (config.get("openai_base_url") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
-    model = config.get("openai_model") or DEFAULT_OPENAI_MODEL
-    prompt = config.get("system_prompt") or ""
-    legacy_context = await build_legacy_user_context(session, conversation_id)
-    messages = [
-        {"role": "system", "content": prompt},
-        {
-            "role": "system",
-            "content": "When the user provides all needed details (name, job, phone, time), use the register_customer function. Otherwise, keep asking. If user give short form of number like 991234567 fill it yourself and format like +998991234567",
-        },
-        {"role": "user", "content": legacy_context},
-    ]
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": 350,
-    }
-    if not is_lead_cooldown_active(conversation):
-        payload["functions"] = [
-            {
-                "name": "register_customer",
-                "description": "Register new interested customer into CRM",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "language": {"type": "string"},
-                        "scheduled_time": {"type": "string"},
-                        "client's_job": {"type": "string"},
-                        "full_name": {"type": "string"},
-                        "phone_number": {"type": "string"},
-                    },
-                    "required": ["language", "scheduled_time", "client's_job", "full_name", "phone_number"],
-                },
-            }
-        ]
-        payload["function_call"] = "auto"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
-        if response.status_code >= 400:
-            print(f"OpenAI error {response.status_code}: {response.text}")
+    try:
+        conversation = await get_conversation(session, conversation_id)
+        config = await get_integration_config(session)
+        api_key = config.get("openai_api_key")
+        if not api_key:
             return None
-        data = response.json()
-    choices = data.get("choices") or []
-    if not choices:
-        return None
-    message = choices[0].get("message") or {}
-    function_call = message.get("function_call")
-    if function_call:
-        arguments = function_call.get("arguments") or "{}"
-        try:
-            tool_data = json.loads(arguments)
-        except Exception:
-            tool_data = {}
-        language = tool_data.get("language", "uzbek")
-        scheduled_time = (tool_data.get("scheduled_time") or "").strip()
-        business_field = (tool_data.get("client's_job") or "").strip()
-        full_name = (tool_data.get("full_name") or "").strip()
-        phone_number = normalize_uzbek_phone((tool_data.get("phone_number") or "").strip())
+        base_url = (config.get("openai_base_url") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
+        model = config.get("openai_model") or DEFAULT_OPENAI_MODEL
+        prompt = config.get("system_prompt") or "You are Cognilabs company's AI sales bot"
+        legacy_context = await build_legacy_user_context(session, conversation_id)
+        lead_created = bool(conversation and conversation.get("lead_created"))
 
-        if is_missing_required_value(full_name):
-            if "ru" in language.lower():
-                return sanitize_ai_reply_text("Пожалуйста, напишите свое имя. Это нужно для регистрации.")
-            if "en" in language.lower():
-                return sanitize_ai_reply_text("Please send your name too. We need it for registration.")
-            return sanitize_ai_reply_text("Ismingizni ham yozib yuboring. To'liq ro'yxatdan o'tish uchun kerak bo'ladi.")
+        messages = [
+            {"role": "system", "content": prompt},
+            {
+                "role": "system",
+                "content": "When the user provides all needed details (name, job, phone, time), use the register_customer function. Otherwise, keep asking. If user give short form of number like 991234567 fill it yourself and format like +998991234567",
+            },
+            {"role": "user", "content": legacy_context},
+        ]
 
-        if is_missing_required_value(business_field):
-            if "ru" in language.lower():
-                return sanitize_ai_reply_text("Пожалуйста, напишите, в какой сфере вы работаете. Это нужно для регистрации.")
-            if "en" in language.lower():
-                return sanitize_ai_reply_text("Please tell me what field you work in. We need it for registration.")
-            return sanitize_ai_reply_text("Qaysi sohada ishlashingizni ham yozib yuboring. Bu ro'yxatdan o'tish uchun kerak bo'ladi.")
+        if lead_created:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_completion_tokens": 350,
+            }
+        else:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "functions": [
+                    {
+                        "name": "register_customer",
+                        "description": "Register new interested customer into CRM",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "language": {"type": "string"},
+                                "scheduled_time": {"type": "string"},
+                                "client's_job": {"type": "string"},
+                                "full_name": {"type": "string"},
+                                "phone_number": {"type": "string"},
+                            },
+                            "required": ["language", "scheduled_time", "client's_job", "full_name", "phone_number"],
+                        },
+                    }
+                ],
+                "function_call": "auto",
+                "max_completion_tokens": 350,
+            }
 
-        if is_missing_required_value(scheduled_time):
-            if "ru" in language.lower():
-                return sanitize_ai_reply_text("Во сколько мы можем с вами связаться?")
-            if "en" in language.lower():
-                return sanitize_ai_reply_text("What time can we contact you?")
-            return sanitize_ai_reply_text("Qaysi vaqtda siz bilan bog'lansak bo'ladi?")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+            if response.status_code >= 400:
+                print(f"OpenAI error {response.status_code}: {response.text}")
+                return None
+            data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return None
+        message = choices[0].get("message") or {}
+        print("GPT Message Structure:", json.dumps(message, indent=2, ensure_ascii=False), flush=True)
 
-        if is_missing_required_value(phone_number):
-            if "ru" in language.lower():
-                return sanitize_ai_reply_text("Пожалуйста, отправьте свой номер телефона. Он нужен, чтобы мы могли с вами связаться.")
-            if "en" in language.lower():
-                return sanitize_ai_reply_text("Please send your phone number too. We need it to contact you.")
-            return sanitize_ai_reply_text("Telefon raqamingizni ham yozib yuboring. Siz bilan bog'lanishimiz uchun kerak bo'ladi.")
+        if message.get("function_call"):
+            try:
+                tool_data = json.loads(message["function_call"].get("arguments") or "{}")
+            except Exception:
+                tool_data = {}
+            language = (tool_data.get("language") or "uzbek").lower()
+            scheduled_time = (tool_data.get("scheduled_time") or "").strip()
+            business_field = (tool_data.get("client's_job") or "").strip()
+            full_name = (tool_data.get("full_name") or "").strip()
+            phone_number = normalize_uzbek_phone((tool_data.get("phone_number") or "").strip())
 
-        await save_lead_state(
-            session,
-            conversation_id,
-            full_name=full_name,
-            phone_number=phone_number,
-            business_field=business_field,
-            scheduled_time=scheduled_time,
-            language=language,
-        )
-        return sanitize_ai_reply_text(build_lead_confirmation(language))
-    reply_text = sanitize_ai_reply_text((message.get("content") or "").strip())
-    return reply_text or None
+            if is_missing_required_value(full_name):
+                if "uz" in language:
+                    return "Ismingizni ham yozib yuboring. To'liq ro'yxatdan o'tish uchun kerak bo'ladi."
+                if "ru" in language:
+                    return "Пожалуйста, напишите свое имя. Это нужно для регистрации."
+                return "Please also send your name. We need it to register you."
+
+            if is_missing_required_value(business_field):
+                if "uz" in language:
+                    return "Qaysi sohada ishlashingizni ham yozib yuboring. Bu ro'yxatdan o'tish uchun kerak bo'ladi."
+                if "ru" in language:
+                    return "Пожалуйста, напишите, в какой сфере вы работаете. Это нужно для регистрации."
+                return "Please also tell us what field you work in. We need it for registration."
+
+            if is_missing_required_value(scheduled_time):
+                if "uz" in language:
+                    return "Qaysi vaqtda siz bilan bog'lansak bo'ladi?"
+                if "ru" in language:
+                    return "Во сколько мы можем с вами связаться?"
+                return "What time can we contact you?"
+
+            if is_missing_required_value(phone_number):
+                if "uz" in language:
+                    return "Telefon raqamingizni ham yozib yuboring. Siz bilan bog'lanishimiz uchun kerak bo'ladi."
+                if "ru" in language:
+                    return "Пожалуйста, отправьте свой номер телефона. Он нужен, чтобы мы могли с вами связаться."
+                return "Please send your phone number too. We need it to contact you."
+
+            await save_lead_state(
+                session,
+                conversation_id,
+                full_name=full_name,
+                phone_number=phone_number,
+                business_field=business_field,
+                scheduled_time=scheduled_time,
+                language=language,
+            )
+            return build_lead_confirmation(language)
+
+        if message.get("content"):
+            return (message.get("content") or "").strip() or None
+        return "😓 Botdan javob olinmadi. Iltimos, operatorga yozing."
+    except Exception:
+        print("Error in generate_ai_reply", flush=True)
+        return "😓 Uzr, operator hozir aloqada emas edi. Iltimos, keyinroq urinib ko'ring."
 
 
 async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
