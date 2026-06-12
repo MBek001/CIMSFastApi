@@ -61,7 +61,11 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
     "If the user gives a short Uzbekistan number like 991234567, normalize it to +998991234567. "
     "Always greet with 'Assalomu Alaykum' on first reply. Reply in the customer's language. "
     "Do not mention you are an AI unless directly asked. Do not repeat the same confirmation twice. "
-    "Do not start replies with a speaker label or name like 'Alisher:', 'Assistant:', or 'Operator:'."
+    "Do not start replies with a speaker label or name like 'Alisher:', 'Assistant:', or 'Operator:'. "
+    "CRITICAL: The client's_job field must be the client's BUSINESS FIELD/INDUSTRY (e.g. 'futbol', 'restoran', 'qurilish', 'savdo'), "
+    "NOT the name of the IT system they want (e.g. 'futbol klubi tizimi' is a service request, NOT a business field). "
+    "Always ask 'Qaysi sohada faoliyat yuritasiz?' as a separate step before asking for phone number. "
+    "Never skip the business field question even if the client already described the IT system they need."
 )
 
 FOLLOW_UP_POLL_INTERVAL_SECONDS = 60
@@ -111,6 +115,24 @@ FOLLOW_UP_STOP_PHRASES = (
     "жалоба",
     "недоволен",
 )
+
+INSTAGRAM_RECIPIENT_NOT_FOUND_SUBCODE = 2534014
+INSTAGRAM_OUTSIDE_WINDOW_SUBCODE = 2534022
+
+
+class InstagramSendError(Exception):
+    def __init__(self, message: str, *, status_code: int, error_code: Optional[int] = None, error_subcode: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.error_subcode = error_subcode
+
+    @property
+    def is_permanent(self) -> bool:
+        return self.error_subcode in {
+            INSTAGRAM_RECIPIENT_NOT_FOUND_SUBCODE,
+            INSTAGRAM_OUTSIDE_WINDOW_SUBCODE,
+        }
 
 
 def utcnow() -> datetime:
@@ -1661,8 +1683,24 @@ async def send_instagram_message(access_token: str, recipient_id: str, text_valu
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code >= 400:
-            print(f"Instagram send error {response.status_code}: {response.text}")
-            response.raise_for_status()
+            error_code = None
+            error_subcode = None
+            error_message = response.text
+            with contextlib.suppress(Exception):
+                error_payload = response.json().get("error") or {}
+                error_code = error_payload.get("code")
+                error_subcode = error_payload.get("error_subcode")
+                error_message = error_payload.get("message") or response.text
+            print(
+                f"Instagram send error status={response.status_code} code={error_code} subcode={error_subcode}: {error_message}",
+                flush=True,
+            )
+            raise InstagramSendError(
+                error_message,
+                status_code=response.status_code,
+                error_code=error_code,
+                error_subcode=error_subcode,
+            )
         data = response.json()
         return data.get("message_id")
 
@@ -2058,12 +2096,17 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
 
         messages = [
             {"role": "system", "content": prompt},
-            {
-                "role": "system",
-                "content": "When the user provides all needed details (name, job, phone, time), use the register_customer function. Otherwise, keep asking. If user give short form of number like 991234567 fill it yourself and format like +998991234567",
-            },
-            {"role": "user", "content": legacy_context},
+            {"role": "system", "content": COGNILABSAI_BEHAVIOR_PROMPT},
         ]
+        if is_lead_cooldown_active(conversation):
+            messages.append({
+                "role": "system",
+                "content": f"Lead was already created in the last {LEAD_COOLDOWN_HOURS} hours. Do not call register_customer again.",
+            })
+        history = await get_messages(session, conversation_id, limit=30, offset=0)
+        for item in history:
+            role = "assistant" if item["sender_type"] in ("ai", "operator") else "user"
+            messages.append({"role": role, "content": item["text"]})
 
         if lead_created:
             payload = apply_reasoning_defaults({
@@ -2151,15 +2194,18 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                     return "Пожалуйста, отправьте свой номер телефона. Он нужен, чтобы мы могли с вами связаться."
                 return "Please send your phone number too. We need it to contact you."
 
-            await save_lead_state(
-                session,
-                conversation_id,
-                full_name=full_name,
-                phone_number=phone_number,
-                business_field=business_field,
-                scheduled_time=scheduled_time,
-                language=language,
-            )
+            try:
+                await save_lead_state(
+                    session,
+                    conversation_id,
+                    full_name=full_name,
+                    phone_number=phone_number,
+                    business_field=business_field,
+                    scheduled_time=scheduled_time,
+                    language=language,
+                )
+            except Exception as lead_exc:
+                print(f"[cognilabsai] save_lead_state error (conversation {conversation_id}): {lead_exc}", flush=True)
             return build_lead_confirmation(language)
 
         reply_text = extract_chat_message_text(message)
@@ -2416,7 +2462,23 @@ async def send_follow_up_message(session: AsyncSession, conversation_id: int) ->
         access_token = config.get("instagram_access_token")
         if not access_token:
             return False
-        instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
+        try:
+            instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
+        except InstagramSendError as exc:
+            if exc.is_permanent:
+                await session.execute(
+                    update(cognilabsai_conversation)
+                    .where(cognilabsai_conversation.c.id == conversation_id)
+                    .values(
+                        follow_up_enabled=False,
+                        follow_up_due_at=None,
+                        follow_up_sent_at=None,
+                        updated_at=utcnow(),
+                    )
+                )
+                await session.commit()
+                return False
+            raise
     elif conversation["channel"] == "telegram":
         telegram_message_id = await telegram_userbot_manager.send_message(conversation["client_external_id"], message)
     else:
@@ -2493,7 +2555,22 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
     if not access_token:
         return False
     sent_at = utcnow()
-    instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
+    try:
+        instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
+    except InstagramSendError as exc:
+        if exc.is_permanent:
+            await session.execute(
+                update(cognilabsai_conversation)
+                .where(cognilabsai_conversation.c.id == conversation_id)
+                .values(
+                    default_follow_up_due_at=None,
+                    default_follow_up_last_sent_at=None,
+                    updated_at=utcnow(),
+                )
+            )
+            await session.commit()
+            return False
+        raise
     await create_message(
         session,
         conversation_id=conversation_id,
