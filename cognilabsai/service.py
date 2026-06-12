@@ -65,7 +65,9 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
     "CRITICAL: The client's_job field must be the client's BUSINESS FIELD/INDUSTRY (e.g. 'futbol', 'restoran', 'qurilish', 'savdo'), "
     "NOT the name of the IT system they want (e.g. 'futbol klubi tizimi' is a service request, NOT a business field). "
     "Always ask 'Qaysi sohada faoliyat yuritasiz?' as a separate step before asking for phone number. "
-    "Never skip the business field question even if the client already described the IT system they need."
+    "Never skip the business field question even if the client already described the IT system they need. "
+    "IMPORTANT: Do NOT call register_customer unless the client has explicitly provided a preferred call time in the conversation. "
+    "If scheduled_time is missing or empty, ask for it first: 'Qo\'ng\'iroq uchun qaysi vaqt qulay bo\'ladi?' — then call register_customer only after receiving the answer."
 )
 
 FOLLOW_UP_POLL_INTERVAL_SECONDS = 60
