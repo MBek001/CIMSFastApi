@@ -1588,14 +1588,69 @@ def generate_website_session_id() -> str:
     return uuid4().hex
 
 
+async def get_conversation_by_channel_and_client_external_id(
+    session: AsyncSession,
+    *,
+    channel: str,
+    client_external_id: str,
+) -> Optional[dict]:
+    await ensure_schema(session)
+    result = await session.execute(
+        select(cognilabsai_conversation).where(
+            cognilabsai_conversation.c.channel == channel,
+            cognilabsai_conversation.c.client_external_id == client_external_id,
+        )
+    )
+    row = result.mappings().first()
+    return decorate_conversation_payload(dict(row)) if row else None
+
+
+def build_virtual_website_conversation(session_id: str) -> dict:
+    return decorate_conversation_payload(
+        {
+            "id": 0,
+            "channel": "website_ai",
+            "client_external_id": session_id,
+            "client_username": None,
+            "client_full_name": None,
+            "client_avatar_url": None,
+            "instagram_business_id": None,
+            "unread_count": 0,
+            "ai_enabled": True,
+            "pause_reason": None,
+            "paused_until": None,
+            "follow_up_enabled": False,
+            "follow_up_mode": None,
+            "follow_up_delay_minutes": None,
+            "follow_up_message": None,
+            "follow_up_due_at": None,
+            "follow_up_sent_at": None,
+            "default_follow_up_last_step": 0,
+            "default_follow_up_due_at": None,
+            "default_follow_up_last_sent_at": None,
+            "last_message_at": None,
+            "last_message_preview": None,
+            "last_operator_user_id": None,
+            "last_operator_name": None,
+            "is_imported": False,
+            "created_at": None,
+            "updated_at": None,
+        }
+    )
+
+
 async def init_website_session(session: AsyncSession, session_id: Optional[str]) -> dict:
     normalized_session_id = (session_id or "").strip() or generate_website_session_id()
-    conversation = await upsert_conversation(
+    conversation = await get_conversation_by_channel_and_client_external_id(
         session,
         channel="website_ai",
         client_external_id=normalized_session_id,
     )
-    messages = await get_messages(session, conversation["id"], limit=500, offset=0)
+    if conversation:
+        messages = await get_messages(session, conversation["id"], limit=500, offset=0)
+    else:
+        conversation = build_virtual_website_conversation(normalized_session_id)
+        messages = []
     return {
         "session_id": normalized_session_id,
         "conversation": conversation,
@@ -1604,21 +1659,25 @@ async def init_website_session(session: AsyncSession, session_id: Optional[str])
 
 
 async def send_website_message(session: AsyncSession, session_id: str, text_value: str) -> dict:
-    website_session = await init_website_session(session, session_id)
-    conversation = website_session["conversation"]
+    normalized_session_id = (session_id or "").strip() or generate_website_session_id()
+    conversation = await upsert_conversation(
+        session,
+        channel="website_ai",
+        client_external_id=normalized_session_id,
+    )
     await create_message(
         session,
         conversation_id=conversation["id"],
         channel="website_ai",
         sender_type="client",
         text_value=text_value,
-        client_external_id=website_session["session_id"],
+        client_external_id=normalized_session_id,
     )
     try:
         await maybe_send_ai_reply(session, conversation["id"])
     except Exception as exc:
         print(f"Website AI reply error for conversation {conversation['id']}: {exc}", flush=True)
-    return await init_website_session(session, website_session["session_id"])
+    return await init_website_session(session, normalized_session_id)
 
 
 async def create_message(
