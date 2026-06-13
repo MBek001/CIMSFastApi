@@ -74,6 +74,7 @@ FOLLOW_UP_POLL_INTERVAL_SECONDS = 60
 follow_up_scheduler_task: Optional[asyncio.Task] = None
 schema_ready = False
 schema_lock = asyncio.Lock()
+FOLLOW_UPS_ENABLED = False
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_DELAY_MINUTES = 180
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_DELAY_MINUTES = 360
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES = 1200
@@ -182,6 +183,8 @@ def get_global_follow_up_fields(channel: str) -> tuple[str, str, str]:
 
 
 def get_conversation_follow_up_settings(conversation: dict, config: dict) -> tuple[bool, Optional[int], Optional[str]]:
+    if not FOLLOW_UPS_ENABLED:
+        return False, None, None
     if (conversation.get("channel") or "").strip().lower() == "website_ai":
         return False, None, None
     if not conversation.get("follow_up_enabled"):
@@ -199,6 +202,8 @@ def get_conversation_follow_up_settings(conversation: dict, config: dict) -> tup
 
 
 def get_default_instagram_follow_up_steps(config: dict) -> list[tuple[int, int, str]]:
+    if not FOLLOW_UPS_ENABLED:
+        return []
     steps = [
         (
             1,
@@ -223,6 +228,8 @@ def get_default_instagram_follow_up_steps(config: dict) -> list[tuple[int, int, 
 
 
 def is_default_instagram_follow_up_globally_enabled(config: dict) -> bool:
+    if not FOLLOW_UPS_ENABLED:
+        return False
     return bool(config.get("instagram_default_followup_enabled"))
 
 
@@ -236,6 +243,8 @@ def is_default_instagram_follow_up_eligible(conversation: dict) -> bool:
 
 
 def should_disable_follow_up_from_client_reply_fallback(conversation: Optional[dict], text_value: Optional[str]) -> bool:
+    if not FOLLOW_UPS_ENABLED:
+        return False
     if not conversation:
         return False
     normalized = " ".join((text_value or "").strip().lower().split())
@@ -1027,6 +1036,8 @@ async def should_disable_follow_up_from_client_reply(
     conversation: Optional[dict],
     text_value: Optional[str],
 ) -> bool:
+    if not FOLLOW_UPS_ENABLED:
+        return False
     if not conversation:
         return False
     if not (conversation.get("follow_up_sent_at") or conversation.get("default_follow_up_last_sent_at")):
@@ -1116,6 +1127,22 @@ async def recalculate_follow_up_schedule(session: AsyncSession, conversation_id:
     conversation = await get_conversation_record(session, conversation_id)
     if not conversation:
         return None
+    if not FOLLOW_UPS_ENABLED:
+        await session.execute(
+            update(cognilabsai_conversation)
+            .where(cognilabsai_conversation.c.id == conversation_id)
+            .values(
+                follow_up_enabled=False,
+                follow_up_mode=None,
+                follow_up_delay_minutes=None,
+                follow_up_message=None,
+                follow_up_due_at=None,
+                follow_up_sent_at=None,
+                updated_at=utcnow(),
+            )
+        )
+        await session.commit()
+        return await get_conversation(session, conversation_id)
     config = await get_integration_config(session)
     enabled, delay_minutes, message = get_conversation_follow_up_settings(conversation, config)
     values = {
@@ -1145,6 +1172,19 @@ async def recalculate_default_instagram_follow_up_schedule(
     conversation = await get_conversation_record(session, conversation_id)
     if not conversation:
         return None
+    if not FOLLOW_UPS_ENABLED:
+        await session.execute(
+            update(cognilabsai_conversation)
+            .where(cognilabsai_conversation.c.id == conversation_id)
+            .values(
+                default_follow_up_last_step=0,
+                default_follow_up_due_at=None,
+                default_follow_up_last_sent_at=None,
+                updated_at=utcnow(),
+            )
+        )
+        await session.commit()
+        return await get_conversation(session, conversation_id)
     config = await get_integration_config(session)
     values = {"updated_at": utcnow()}
     if not is_default_instagram_follow_up_eligible(conversation) or not is_default_instagram_follow_up_globally_enabled(config):
@@ -1183,6 +1223,20 @@ async def recalculate_default_instagram_follow_up_schedule(
 
 
 async def refresh_global_follow_up_schedules(session: AsyncSession) -> None:
+    if not FOLLOW_UPS_ENABLED:
+        await session.execute(
+            update(cognilabsai_conversation).values(
+                follow_up_enabled=False,
+                follow_up_mode=None,
+                follow_up_delay_minutes=None,
+                follow_up_message=None,
+                follow_up_due_at=None,
+                follow_up_sent_at=None,
+                updated_at=utcnow(),
+            )
+        )
+        await session.commit()
+        return
     result = await session.execute(
         select(cognilabsai_conversation.c.id)
         .where(
@@ -1195,6 +1249,17 @@ async def refresh_global_follow_up_schedules(session: AsyncSession) -> None:
 
 
 async def refresh_default_instagram_follow_up_schedules(session: AsyncSession) -> None:
+    if not FOLLOW_UPS_ENABLED:
+        await session.execute(
+            update(cognilabsai_conversation).values(
+                default_follow_up_last_step=0,
+                default_follow_up_due_at=None,
+                default_follow_up_last_sent_at=None,
+                updated_at=utcnow(),
+            )
+        )
+        await session.commit()
+        return
     result = await session.execute(
         select(cognilabsai_conversation.c.id)
         .where(
@@ -1211,6 +1276,35 @@ async def update_conversation_follow_up(session: AsyncSession, conversation_id: 
     conversation = await get_conversation_record(session, conversation_id)
     if not conversation:
         return None
+    if not FOLLOW_UPS_ENABLED:
+        values = {
+            "follow_up_enabled": False,
+            "follow_up_mode": None,
+            "follow_up_delay_minutes": None,
+            "follow_up_message": None,
+            "follow_up_due_at": None,
+            "follow_up_sent_at": None,
+            "default_follow_up_last_step": 0,
+            "default_follow_up_due_at": None,
+            "default_follow_up_last_sent_at": None,
+            "updated_at": utcnow(),
+        }
+        await session.execute(
+            update(cognilabsai_conversation)
+            .where(cognilabsai_conversation.c.id == conversation_id)
+            .values(**values)
+        )
+        await session.commit()
+        updated = await get_conversation(session, conversation_id)
+        if updated:
+            await manager.broadcast(
+                {
+                    "type": "conversation.updated",
+                    "conversation": updated,
+                },
+                conversation_id=conversation_id,
+            )
+        return updated
     enabled = bool(payload.get("enabled"))
     mode = (payload.get("mode") or "").strip().lower() or None
     if enabled and mode not in {"global", "custom"}:
@@ -2115,12 +2209,6 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             role = "assistant" if item["sender_type"] in ("ai", "operator") else "user"
             messages.append({"role": role, "content": item["text"]})
 
-
-        history = await get_messages(session, conversation_id, limit=30, offset=0)
-        for item in history:
-            role = "assistant" if item["sender_type"] in ("ai", "operator") else "user"
-            messages.append({"role": role, "content": item["text"]})
-
         if lead_created:
             payload = apply_reasoning_defaults({
                 "model": model,
@@ -2459,6 +2547,8 @@ async def search_telegram_peers(session: AsyncSession, query: str, limit: int = 
 
 
 async def send_follow_up_message(session: AsyncSession, conversation_id: int) -> bool:
+    if not FOLLOW_UPS_ENABLED:
+        return False
     conversation = await get_conversation(session, conversation_id)
     if not conversation:
         return False
@@ -2534,6 +2624,8 @@ async def send_follow_up_message(session: AsyncSession, conversation_id: int) ->
 
 
 async def send_default_instagram_follow_up_message(session: AsyncSession, conversation_id: int) -> bool:
+    if not FOLLOW_UPS_ENABLED:
+        return False
     conversation = await get_conversation(session, conversation_id)
     if not conversation or not is_default_instagram_follow_up_eligible(conversation):
         return False
@@ -2627,6 +2719,8 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
 
 
 async def process_pending_follow_ups():
+    if not FOLLOW_UPS_ENABLED:
+        return
     async with async_session_maker() as session:
         now = utcnow()
         manual_result = await session.execute(
@@ -2666,6 +2760,8 @@ async def process_pending_follow_ups():
 
 
 async def follow_up_scheduler_loop():
+    if not FOLLOW_UPS_ENABLED:
+        return
     while True:
         try:
             await process_pending_follow_ups()
@@ -2829,9 +2925,10 @@ async def startup_cognilabsai():
         await ensure_schema(session)
         await get_integration_config(session)
         await backfill_instagram_client_names(session)
+        await refresh_global_follow_up_schedules(session)
         await refresh_default_instagram_follow_up_schedules(session)
     await telegram_userbot_manager.start()
-    if follow_up_scheduler_task is None or follow_up_scheduler_task.done():
+    if FOLLOW_UPS_ENABLED and (follow_up_scheduler_task is None or follow_up_scheduler_task.done()):
         follow_up_scheduler_task = asyncio.create_task(follow_up_scheduler_loop())
 
 
