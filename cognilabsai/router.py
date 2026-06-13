@@ -7,6 +7,7 @@ from database import get_async_session
 from cognilabsai.permissions import require_cognilabsai_chat, require_cognilabsai_integrations
 from cognilabsai.realtime import manager
 from cognilabsai.schemas import (
+    AIGlobalToggleRequest,
     ConversationItem,
     FollowUpConfigRequest,
     GenericMessageResponse,
@@ -43,6 +44,7 @@ from cognilabsai.service import (
     search_telegram_peers,
     set_conversation_pause,
     update_conversation_follow_up,
+    update_global_ai_state,
     update_integration_config,
     verify_websocket_api_key,
     start_telegram_outbound_conversation,
@@ -293,6 +295,15 @@ async def integrations_update(
 ):
     payload = request.model_dump(exclude_unset=True)
     return await update_integration_config(session, payload)
+
+
+@integrations_router.post("/ai-toggle", response_model=IntegrationConfigResponse)
+async def integrations_ai_toggle(
+    request: AIGlobalToggleRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_integrations),
+):
+    return await update_global_ai_state(session, request.enabled)
 
 
 @webhook_router.get("/instagram")

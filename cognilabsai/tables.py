@@ -42,6 +42,8 @@ cognilabsai_global_integration = Table(
     Column("instagram_default_followup_step3_enabled", Boolean, nullable=False, default=True),
     Column("instagram_default_followup_step3_delay_minutes", Integer, nullable=True),
     Column("instagram_default_followup_step3_message", Text, nullable=True),
+    Column("ai_globally_enabled", Boolean, nullable=False, default=True),
+    Column("ai_enabled_since", DateTime, nullable=True),
     Column("websocket_api_key", String(255), nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),

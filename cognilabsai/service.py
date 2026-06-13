@@ -542,6 +542,8 @@ async def ensure_schema(session: AsyncSession):
             instagram_default_followup_step3_enabled BOOLEAN NOT NULL DEFAULT TRUE,
             instagram_default_followup_step3_delay_minutes INTEGER NULL,
             instagram_default_followup_step3_message TEXT NULL,
+            ai_globally_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            ai_enabled_since TIMESTAMP NULL,
             websocket_api_key VARCHAR(255),
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
@@ -622,6 +624,14 @@ async def ensure_schema(session: AsyncSession):
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
             ADD COLUMN IF NOT EXISTS instagram_default_followup_step3_message TEXT NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS ai_globally_enabled BOOLEAN NOT NULL DEFAULT TRUE
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS ai_enabled_since TIMESTAMP NULL
         """))
         await session.execute(text("""
             CREATE TABLE IF NOT EXISTS cognilabsai_conversation (
@@ -880,6 +890,8 @@ async def ensure_global_integration_row(session: AsyncSession):
                 instagram_default_followup_step3_enabled=True,
                 instagram_default_followup_step3_delay_minutes=DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES,
                 instagram_default_followup_step3_message=DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_MESSAGE,
+                ai_globally_enabled=True,
+                ai_enabled_since=None,
                 websocket_api_key=DEFAULT_WS_KEY,
                 created_at=utcnow(),
                 updated_at=utcnow(),
@@ -939,8 +951,24 @@ async def get_integration_config(session: AsyncSession) -> dict:
     return config
 
 
+def apply_global_ai_toggle_to_payload(current_config: dict, payload: dict) -> dict:
+    if "ai_enabled_since" in payload:
+        payload.pop("ai_enabled_since", None)
+    if "ai_globally_enabled" not in payload:
+        return payload
+    enabled = bool(payload.get("ai_globally_enabled"))
+    current_enabled = bool(current_config.get("ai_globally_enabled", True))
+    if enabled and not current_enabled:
+        payload["ai_enabled_since"] = utcnow()
+    elif not enabled:
+        payload["ai_enabled_since"] = None
+    return payload
+
+
 async def update_integration_config(session: AsyncSession, payload: dict) -> dict:
     await ensure_schema(session)
+    current_config = await get_integration_config(session)
+    payload = apply_global_ai_toggle_to_payload(current_config, payload)
     payload["updated_at"] = utcnow()
     await session.execute(
         update(cognilabsai_global_integration)
@@ -952,6 +980,15 @@ async def update_integration_config(session: AsyncSession, payload: dict) -> dic
     await refresh_default_instagram_follow_up_schedules(session)
     await telegram_userbot_manager.restart()
     return await get_integration_config(session)
+
+
+async def update_global_ai_state(session: AsyncSession, enabled: bool) -> dict:
+    return await update_integration_config(
+        session,
+        {
+            "ai_globally_enabled": bool(enabled),
+        },
+    )
 
 
 async def verify_websocket_api_key(session: AsyncSession, api_key: str) -> bool:
@@ -1029,6 +1066,19 @@ async def get_latest_client_message_text(session: AsyncSession, conversation_id:
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def get_latest_client_message_created_at(session: AsyncSession, conversation_id: int) -> Optional[datetime]:
+    result = await session.execute(
+        select(cognilabsai_message.c.created_at)
+        .where(
+            cognilabsai_message.c.conversation_id == conversation_id,
+            cognilabsai_message.c.sender_type == "client",
+        )
+        .order_by(cognilabsai_message.c.created_at.desc(), cognilabsai_message.c.id.desc())
+        .limit(1)
+    )
+    return normalize_datetime(result.scalar_one_or_none())
 
 
 async def should_disable_follow_up_from_client_reply(
@@ -2326,6 +2376,14 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
     conversation = await get_conversation(session, conversation_id)
     if not conversation:
         return None
+    config = await get_integration_config(session)
+    if not bool(config.get("ai_globally_enabled", True)):
+        return None
+    ai_enabled_since = normalize_datetime(config.get("ai_enabled_since"))
+    if ai_enabled_since is not None:
+        latest_client_message_at = await get_latest_client_message_created_at(session, conversation_id)
+        if latest_client_message_at is None or latest_client_message_at < ai_enabled_since:
+            return None
     if not conversation["ai_enabled"]:
         if conversation.get("pause_reason") == "timed" and conversation.get("paused_until") and normalize_datetime(conversation["paused_until"]) <= utcnow():
             await set_conversation_pause(
@@ -2343,7 +2401,6 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
     reply_text = await generate_ai_reply(session, conversation_id)
     if not reply_text:
         return None
-    config = await get_integration_config(session)
     if conversation["channel"] == "instagram":
         access_token = config.get("instagram_access_token")
         if not access_token:

@@ -34,6 +34,8 @@ class IntegrationConfigPayload(BaseModel):
     instagram_default_followup_step3_enabled: Optional[bool] = None
     instagram_default_followup_step3_delay_minutes: Optional[int] = None
     instagram_default_followup_step3_message: Optional[str] = None
+    ai_globally_enabled: Optional[bool] = None
+    ai_enabled_since: Optional[datetime] = None
     websocket_api_key: Optional[str] = None
 
 
@@ -131,6 +133,10 @@ class FollowUpConfigRequest(BaseModel):
     mode: Optional[str] = None
     delay_minutes: Optional[int] = None
     message: Optional[str] = None
+
+
+class AIGlobalToggleRequest(BaseModel):
+    enabled: bool
 
 
 class TelegramStartConversationRequest(BaseModel):
