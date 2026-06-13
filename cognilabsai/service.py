@@ -2303,15 +2303,37 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             {"role": "system", "content": prompt},
             {"role": "system", "content": COGNILABSAI_BEHAVIOR_PROMPT},
         ]
-        if is_lead_cooldown_active(conversation) or lead_created:
+        if is_lead_cooldown_active(conversation):
+            # Cooldown aktiv — lead yaratilgan va hali vaqt o'tmagan
             messages.append({
                 "role": "system",
                 "content": (
-                    "LEAD ALREADY CREATED for this conversation. "
+                    "LEAD ALREADY CREATED recently for this conversation. "
                     "Do NOT call register_customer again. "
                     "Do NOT repeat the greeting or ask for name/phone/field again. "
                     "Do NOT ask 'qanday xizmatlar qiziqtiradi' or restart the script. "
                     "Simply reply as a friendly consultant — answer questions if any, or say goodbye politely."
+                ),
+            })
+        elif lead_created and not is_lead_cooldown_active(conversation):
+            # Cooldown o'tdi — mijoz qayta yozdi, yangi suhbat boshlash kerak
+            prev_name = (conversation.get("full_name") or "").strip()
+            prev_phone = (conversation.get("phone_number") or "").strip()
+            prev_field = (conversation.get("business_field") or "").strip()
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"This client contacted us before. Their saved details: "
+                    f"name={prev_name}, phone={prev_phone}, business_field={prev_field}. "
+                    "The client has returned after some time. Start a NEW conversation round. "
+                    "Greet them briefly as a returning client (do NOT use the full first-time greeting). "
+                    "Example: 'Assalomu alaykum, men Alisher — bu safar qaysi xizmatlarimiz qiziqtirdi?' "
+                    "Ask what service they are interested in THIS TIME. "
+                    "Once they answer, you already have their name, phone, and business field from before — "
+                    "use those saved values. Only ask for NEW information: the new service interest and preferred call time. "
+                    "Then call register_customer with: "
+                    f"full_name={prev_name}, phone_number={prev_phone}, client's_job={prev_field}, "
+                    "scheduled_time=<new time from client>, and updated service interest in the notes if possible."
                 ),
             })
         for item in history:
