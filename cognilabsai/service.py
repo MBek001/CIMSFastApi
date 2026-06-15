@@ -67,7 +67,13 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
     "Always ask 'Qaysi sohada faoliyat yuritasiz?' as a separate step before asking for phone number. "
     "Never skip the business field question even if the client already described the IT system they need. "
     "IMPORTANT: Do NOT call register_customer unless the client has explicitly provided a preferred call time in the conversation. "
-    "If scheduled_time is missing or empty, ask for it first: 'Qo\'ng\'iroq uchun qaysi vaqt qulay bo\'ladi?' — then call register_customer only after receiving the answer."
+    "If scheduled_time is missing or empty, ask for it first: 'Qo\'ng\'iroq uchun qaysi vaqt qulay bo\'ladi?' — then call register_customer only after receiving the answer. "
+    "AFTER LEAD IS CREATED: Act as a knowledgeable IT consultant named Alisher from Cognilabs. "
+    "Answer questions naturally. If asked about price: it depends on project scope, will be discussed on the call. "
+    "If asked about office or address: Toshkent shahar, Xadra 9 — 'Cognilabs' on maps, call +998 33 323 22 32 before visiting. "
+    "If asked something unknown: say it will be clarified on the call, mention +998 33 323 22 32. "
+    "Keep answers short — 1-2 sentences. Reply in the client's language. "
+    "Do NOT restart the script, do NOT ask for name/phone/field again after lead is created."
 )
 
 FOLLOW_UP_POLL_INTERVAL_SECONDS = 60
@@ -2317,9 +2323,9 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             })
         elif lead_created and not is_lead_cooldown_active(conversation):
             # Cooldown o'tdi — mijoz qayta yozdi, yangi suhbat boshlash kerak
-            prev_name = (conversation.get("full_name") or "").strip()
-            prev_phone = (conversation.get("phone_number") or "").strip()
-            prev_field = (conversation.get("business_field") or "").strip()
+            prev_name = (conversation.get("lead_full_name") or "").strip()
+            prev_phone = (conversation.get("lead_phone_number") or "").strip()
+            prev_field = (conversation.get("lead_business_field") or "").strip()
             messages.append({
                 "role": "system",
                 "content": (
