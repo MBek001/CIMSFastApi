@@ -18,7 +18,6 @@ class TelegramUserbotManager:
     def __init__(self):
         self.client = None
         self._lock = asyncio.Lock()
-        self._handler_registered = False
 
     async def start(self):
         async with self._lock:
@@ -51,40 +50,7 @@ class TelegramUserbotManager:
                 await client.disconnect()
                 return False
 
-            if not self._handler_registered:
-                @client.on(events.NewMessage(incoming=True))
-                async def on_new_message(event):
-                    from cognilabsai.service import process_telegram_userbot_message
-                    sender = None
-                    try:
-                        sender = await event.get_sender()
-                    except Exception:
-                        sender = None
-                    if sender is None:
-                        try:
-                            sender = await client.get_entity(event.sender_id or event.chat_id)
-                        except Exception:
-                            sender = None
-                    snapshot = await self._build_snapshot(sender, fallback_external_id=str(event.chat_id)) if sender is not None else {
-                        "external_id": str(event.chat_id),
-                        "username": None,
-                        "full_name": None,
-                        "avatar_url": None,
-                    }
-                    text_value, media_type, media_url = await self._build_incoming_payload(event)
-
-                    await process_telegram_userbot_message(
-                        peer_id=snapshot["external_id"],
-                        sender_id=str(event.sender_id) if event.sender_id else None,
-                        text=text_value,
-                        media_type=media_type,
-                        media_url=media_url,
-                        username=snapshot.get("username"),
-                        full_name=snapshot.get("full_name"),
-                        avatar_url=snapshot.get("avatar_url"),
-                    )
-
-                self._handler_registered = True
+            self._register_handlers(client, events)
 
             self.client = client
             return True
@@ -117,6 +83,39 @@ class TelegramUserbotManager:
         entity = await client.get_entity(self._normalize_peer(peer))
         message = await client.send_message(entity=entity, message=text)
         return str(message.id) if message else None
+
+    def _register_handlers(self, client, events) -> None:
+        @client.on(events.NewMessage(incoming=True))
+        async def on_new_message(event):
+            from cognilabsai.service import process_telegram_userbot_message
+            sender = None
+            try:
+                sender = await event.get_sender()
+            except Exception:
+                sender = None
+            if sender is None:
+                try:
+                    sender = await client.get_entity(event.sender_id or event.chat_id)
+                except Exception:
+                    sender = None
+            snapshot = await self._build_snapshot(sender, fallback_external_id=str(event.chat_id)) if sender is not None else {
+                "external_id": str(event.chat_id),
+                "username": None,
+                "full_name": None,
+                "avatar_url": None,
+            }
+            text_value, media_type, media_url = await self._build_incoming_payload(event)
+
+            await process_telegram_userbot_message(
+                peer_id=snapshot["external_id"],
+                sender_id=str(event.sender_id) if event.sender_id else None,
+                text=text_value,
+                media_type=media_type,
+                media_url=media_url,
+                username=snapshot.get("username"),
+                full_name=snapshot.get("full_name"),
+                avatar_url=snapshot.get("avatar_url"),
+            )
 
     async def _build_incoming_payload(self, event) -> tuple[str, Optional[str], Optional[str]]:
         text_value = (getattr(event, "raw_text", None) or "").strip()
