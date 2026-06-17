@@ -178,6 +178,38 @@ def _normalize_status_value(value) -> Optional[str]:
     return raw_value
 
 
+async def _resolve_customer_status_input(session: AsyncSession, status: Optional[str]):
+    if status is None:
+        return None, None
+
+    raw_status = str(status).strip()
+    if not raw_status:
+        return None, None
+
+    from models.admin_models import customer_status_table
+
+    status_result = await session.execute(
+        select(customer_status_table).where(
+            (customer_status_table.c.name == raw_status)
+            & (customer_status_table.c.is_active == True)
+        )
+    )
+    status_obj = status_result.fetchone()
+
+    if status_obj:
+        normalized_enum = _normalize_customer_status(raw_status)
+        return normalized_enum, raw_status
+
+    normalized_enum = _normalize_customer_status(raw_status)
+    if normalized_enum is not None:
+        return normalized_enum, normalized_enum.value
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Status '{raw_status}' topilmadi. Mavjud statuslarni /management/statuses endpointidan oling",
+    )
+
+
 def _get_customer_status_value(row) -> Optional[str]:
     return _normalize_status_value(getattr(row, "status_name", None)) or _normalize_status_value(
         getattr(row, "status", None)
@@ -1196,7 +1228,7 @@ async def update_customer(
         full_name: Optional[str] = Form(None),
         platform: Optional[str] = Form(None),
         phone_number: Optional[str] = Form(None),
-        customer_status: Optional[CustomerStatus] = Form(None),
+        customer_status: Optional[str] = Form(None),
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
         chat_url: Optional[str] = Form(None),
@@ -1244,6 +1276,7 @@ async def update_customer(
     if getattr(existing_customer, "is_archived", None) and current_user.company_code != "ceo":
         raise HTTPException(status_code=404, detail="Mijoz topilmadi")
     previous_status = existing_customer.status
+    resolved_customer_status, resolved_status_name = await _resolve_customer_status_input(session, customer_status)
     current_full_name = _safe_decrypt(existing_customer.full_name)
     current_phone_number = _safe_decrypt(existing_customer.phone_number)
     before_snapshot = _serialize_customer_for_audit(existing_customer)
@@ -1260,9 +1293,9 @@ async def update_customer(
         update_data["username"] = username
     if phone_number is not None:
         update_data["phone_number"] = encrypt_text(phone_number)
-    if customer_status is not None:
-        update_data["status"] = customer_status
-        update_data["status_name"] = customer_status.value
+    if resolved_status_name is not None:
+        update_data["status"] = resolved_customer_status or existing_customer.status
+        update_data["status_name"] = resolved_status_name
     if assistant_name is not None:
         update_data["assistant_name"] = assistant_name
     if chat_url is not None:
@@ -1322,12 +1355,12 @@ async def update_customer(
         before_data=before_snapshot,
         after_data=after_snapshot,
     )
-    if customer_status is not None:
+    if resolved_status_name is not None:
         await _log_customer_status_change(
             session=session,
             customer_id=customer_id,
             from_status=previous_status,
-            to_status=customer_status
+            to_status=resolved_customer_status
         )
         await log_audit_event(
             session,
@@ -1346,7 +1379,7 @@ async def update_customer(
 
     calendar_recall_time = None if clear_recall_time else update_data.get("recall_time", existing_customer.recall_time)
     calendar_status = (
-        customer_status.value if customer_status is not None
+        resolved_status_name if resolved_status_name is not None
         else existing_customer.status_name or existing_customer.status.value
     )
     await _sync_customer_calendar_best_effort(
@@ -1372,7 +1405,7 @@ async def patch_customer(
         full_name: Optional[str] = Form(None),
         platform: Optional[str] = Form(None),
         phone_number: Optional[str] = Form(None),
-        customer_status: Optional[CustomerStatus] = Form(None),
+        customer_status: Optional[str] = Form(None),
         username: Optional[str] = Form(None),
         assistant_name: Optional[str] = Form(None),
         chat_url: Optional[str] = Form(None),
@@ -1411,6 +1444,7 @@ async def patch_customer(
     if getattr(existing, "is_archived", None) and current_user.company_code != "ceo":
         raise HTTPException(status_code=404, detail="Mijoz topilmadi")
     previous_status = existing.status
+    resolved_customer_status, resolved_status_name = await _resolve_customer_status_input(session, customer_status)
     current_full_name = _safe_decrypt(existing.full_name)
     current_phone_number = _safe_decrypt(existing.phone_number)
     before_snapshot = _serialize_customer_for_audit(existing)
@@ -1424,9 +1458,9 @@ async def patch_customer(
         update_data["platform"] = platform
     if phone_number:
         update_data["phone_number"] = encrypt_text(phone_number)
-    if customer_status:
-        update_data["status"] = customer_status
-        update_data["status_name"] = customer_status.value
+    if resolved_status_name is not None:
+        update_data["status"] = resolved_customer_status or existing.status
+        update_data["status_name"] = resolved_status_name
     if username:
         update_data["username"] = username
     if assistant_name:
@@ -1482,12 +1516,12 @@ async def patch_customer(
         before_data=before_snapshot,
         after_data=after_snapshot,
     )
-    if customer_status is not None:
+    if resolved_status_name is not None:
         await _log_customer_status_change(
             session=session,
             customer_id=customer_id,
             from_status=previous_status,
-            to_status=customer_status
+            to_status=resolved_customer_status
         )
         await log_audit_event(
             session,
@@ -1506,7 +1540,7 @@ async def patch_customer(
 
     calendar_recall_time = None if clear_recall_time else update_data.get("recall_time", existing.recall_time)
     calendar_status = (
-        customer_status.value if customer_status is not None
+        resolved_status_name if resolved_status_name is not None
         else existing.status_name or existing.status.value
     )
     await _sync_customer_calendar_best_effort(
