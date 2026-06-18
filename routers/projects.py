@@ -2,11 +2,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Form, Query
-from sqlalchemy import delete, exists, func, insert, select, update
+from sqlalchemy import delete, exists, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_utils.auth_func import get_current_active_user
-from database import get_async_session
+from database import engine, get_async_session
 from models.projects_models import (
     CardPriority,
     project,
@@ -57,6 +57,8 @@ DEFAULT_BOARD_COLUMNS = [
     {"name": "Refix", "color": "#EF4444"},
 ]
 
+_project_card_schema_ready = False
+
 
 def is_ceo_user(current_user) -> bool:
     role = getattr(current_user, "role", None)
@@ -99,6 +101,84 @@ async def get_project_or_404(session: AsyncSession, project_id: int):
     if not project_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project topilmadi")
     return project_row
+
+
+async def ensure_project_card_schema() -> None:
+    global _project_card_schema_ready
+    if _project_card_schema_ready:
+        return
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS project_board_card_assignee (
+                    id SERIAL PRIMARY KEY,
+                    card_id INTEGER NOT NULL REFERENCES project_board_card(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    CONSTRAINT uq_project_board_card_assignee UNIQUE (card_id, user_id)
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_board_card_assignee_card_id
+                ON project_board_card_assignee(card_id)
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_board_card_assignee_user_id
+                ON project_board_card_assignee(user_id)
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO project_board_card_assignee (card_id, user_id, created_at)
+                SELECT card.id, card.assignee_id, COALESCE(card.updated_at, card.created_at, NOW())
+                FROM project_board_card AS card
+                WHERE card.assignee_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM project_board_card_assignee AS existing
+                    WHERE existing.card_id = card.id
+                      AND existing.user_id = card.assignee_id
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'project_board_card'
+                          AND column_name = 'due_date'
+                          AND data_type = 'date'
+                    ) THEN
+                        ALTER TABLE project_board_card
+                        ALTER COLUMN due_date TYPE TIMESTAMP
+                        USING CASE
+                            WHEN due_date IS NULL THEN NULL
+                            ELSE due_date::timestamp
+                        END;
+                    END IF;
+                END $$;
+                """
+            )
+        )
+
+    _project_card_schema_ready = True
 
 
 async def is_project_member(session: AsyncSession, project_id: int, user_id: int) -> bool:
@@ -728,11 +808,17 @@ async def build_card_detail(session: AsyncSession, card_row) -> CardDetailRespon
     )
 
 
+@router.on_event("startup")
+async def warm_project_card_schema() -> None:
+    await ensure_project_card_schema()
+
+
 @router.get("/projects", response_model=ProjectListResponse, summary="Projectlar ro'yxati")
 async def list_projects(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_projects_page_access(session, current_user)
     result = await session.execute(
         select(project)
@@ -772,6 +858,7 @@ async def list_all_users_for_assignment(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_projects_page_access(session, current_user)
 
     result = await session.execute(
@@ -800,6 +887,7 @@ async def create_project(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_projects_page_access(session, current_user)
     project_name = project_name.strip()
     if not project_name:
@@ -850,6 +938,7 @@ async def get_project_detail(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     project_row = await ensure_project_member_access(session, project_id, current_user)
 
     members_result = await session.execute(
@@ -914,6 +1003,7 @@ async def get_project_boards_detail(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_project_member_access(session, project_id, current_user)
 
     boards_result = await session.execute(
@@ -945,6 +1035,7 @@ async def update_project(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     project_row = await ensure_project_member_access(session, project_id, current_user)
 
     update_values = {}
@@ -1007,6 +1098,7 @@ async def delete_project(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     project_row = await ensure_project_member_access(session, project_id, current_user)
 
     card_files_result = await session.execute(
@@ -1047,6 +1139,7 @@ async def create_project_attachment(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_project_member_access(session, project_id, current_user)
     url_path, file_name, file_size, mime_type = await save_project_attachment_file(file, project_id)
     created_at = datetime.utcnow()
@@ -1098,6 +1191,7 @@ async def list_project_attachments(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_project_member_access(session, project_id, current_user)
     attachments_map = await get_project_attachments_map(session, [project_id])
     items = attachments_map.get(project_id, [])
@@ -1116,6 +1210,7 @@ async def get_project_attachment_detail(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     attachment_row = await get_project_attachment_or_404(session, attachment_id)
     await ensure_project_member_access(session, attachment_row.project_id, current_user)
     user_map = await get_user_map(
@@ -1150,6 +1245,7 @@ async def update_project_attachment(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     attachment_row = await get_project_attachment_or_404(session, attachment_id)
     await ensure_project_member_access(session, attachment_row.project_id, current_user)
 
@@ -1215,6 +1311,7 @@ async def delete_project_attachment(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     attachment_row = await get_project_attachment_or_404(session, attachment_id)
     await ensure_project_member_access(session, attachment_row.project_id, current_user)
     delete_file_if_exists(attachment_row.url_path)
@@ -1229,6 +1326,7 @@ async def list_project_boards(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_project_member_access(session, project_id, current_user)
     result = await session.execute(
         select(project_board)
@@ -1263,6 +1361,7 @@ async def create_board(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_project_member_access(session, project_id, current_user)
 
     result = await session.execute(
@@ -1304,6 +1403,7 @@ async def get_board_detail(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     board_row = await get_board_or_404(session, board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
     return await build_board_detail(session, board_row)
@@ -1316,6 +1416,7 @@ async def update_board(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     board_row = await get_board_or_404(session, board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
 
@@ -1337,6 +1438,7 @@ async def archive_board(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     board_row = await get_board_or_404(session, board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
     await session.execute(
@@ -1353,6 +1455,7 @@ async def create_column(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     board_row = await get_board_or_404(session, board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
 
@@ -1385,6 +1488,7 @@ async def update_column(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     column_row = await get_column_or_404(session, column_id)
     board_row = await get_board_or_404(session, column_row.board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
@@ -1410,6 +1514,7 @@ async def move_column(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     column_row = await get_column_or_404(session, column_id)
     board_row = await get_board_or_404(session, column_row.board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
@@ -1434,6 +1539,7 @@ async def delete_column(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     column_row = await get_column_or_404(session, column_id)
     board_row = await get_board_or_404(session, column_row.board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
@@ -1477,6 +1583,7 @@ async def create_card(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     column_row = await get_column_or_404(session, column_id)
     board_row = await get_board_or_404(session, column_row.board_id)
     await ensure_project_member_access(session, board_row.project_id, current_user)
@@ -1574,6 +1681,7 @@ async def get_card_detail(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     card_row = await get_card_or_404(session, card_id)
     await ensure_card_access(session, card_row, current_user)
     return await build_card_detail(session, card_row)
@@ -1585,6 +1693,7 @@ async def open_list_projects_by_user(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_user_exists(session, user_id, "User topilmadi")
 
     result = await session.execute(
@@ -1637,6 +1746,7 @@ async def open_get_project_detail_by_user(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_user_exists(session, user_id, "User topilmadi")
     project_row = await ensure_project_visible_for_user(session, project_id, user_id)
 
@@ -1703,6 +1813,7 @@ async def open_get_project_boards_detail_by_user(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_user_exists(session, user_id, "User topilmadi")
     await ensure_project_visible_for_user(session, project_id, user_id)
 
@@ -1731,6 +1842,7 @@ async def open_list_cards_by_user(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_user_exists(session, user_id, "User topilmadi")
 
     if project_id is not None:
@@ -1813,6 +1925,7 @@ async def open_get_card_detail_by_user(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     await ensure_user_exists(session, user_id, "User topilmadi")
 
     card_row = await get_card_or_404(session, card_id)
@@ -1839,6 +1952,7 @@ async def update_card(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     card_row = await get_card_or_404(session, card_id)
     column_row, board_row = await ensure_card_access(session, card_row, current_user)
     old_assignee_ids_map = await get_card_assignee_ids_map(session, [card_row.id])
@@ -1947,6 +2061,7 @@ async def move_card(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     card_row = await get_card_or_404(session, card_id)
     source_column, source_board = await ensure_card_access(session, card_row, current_user)
 
@@ -2013,6 +2128,7 @@ async def delete_card(
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
+    await ensure_project_card_schema()
     card_row = await get_card_or_404(session, card_id)
     column_row, _board_row = await ensure_card_access(session, card_row, current_user)
 
