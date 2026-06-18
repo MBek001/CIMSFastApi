@@ -1571,7 +1571,7 @@ async def create_card(
     await ensure_project_card_schema()
     column_row = await get_column_or_404(session, column_id)
     board_row = await get_board_or_404(session, column_row.board_id)
-    await ensure_project_member_access(session, board_row.project_id, current_user)
+    await ensure_projects_page_access(session, current_user)
     title = title.strip()
     if not title:
         raise HTTPException(
