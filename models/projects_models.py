@@ -92,11 +92,22 @@ project_board_card = Table(
     Column("order", Integer, nullable=False, default=0),
     Column("priority", Enum(CardPriority, name="cardpriority"), default=CardPriority.medium, nullable=False),
     Column("assignee_id", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
-    Column("due_date", Date, nullable=True),
+    Column("due_date", DateTime, nullable=True),
     Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
     UniqueConstraint("column_id", "order", name="uq_project_board_card_order"),
+)
+
+
+project_board_card_assignee = Table(
+    "project_board_card_assignee",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("card_id", Integer, ForeignKey("project_board_card.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    UniqueConstraint("card_id", "user_id", name="uq_project_board_card_assignee"),
 )
 
 
@@ -133,6 +144,8 @@ Index("idx_project_board_project_id", project_board.c.project_id)
 Index("idx_project_board_column_board_id", project_board_column.c.board_id)
 Index("idx_project_board_card_column_id", project_board_card.c.column_id)
 Index("idx_project_board_card_assignee_id", project_board_card.c.assignee_id)
+Index("idx_project_board_card_assignee_card_id", project_board_card_assignee.c.card_id)
+Index("idx_project_board_card_assignee_user_id", project_board_card_assignee.c.user_id)
 Index("idx_project_board_card_file_card_id", project_board_card_file.c.card_id)
 Index("idx_project_attachment_project_id", project_attachment.c.project_id)
 Index("idx_project_attachment_type", project_attachment.c.attachment_type)

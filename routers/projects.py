@@ -1,8 +1,8 @@
-from datetime import date, datetime
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Form, Query
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, exists, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_utils.auth_func import get_current_active_user
@@ -15,6 +15,7 @@ from models.projects_models import (
     project_board,
     project_board_column,
     project_board_card,
+    project_board_card_assignee,
     project_board_card_file,
     ProjectAttachmentType,
 )
@@ -100,16 +101,20 @@ async def get_project_or_404(session: AsyncSession, project_id: int):
     return project_row
 
 
-async def ensure_project_member_access(session: AsyncSession, project_id: int, current_user):
-    await ensure_projects_page_access(session, current_user)
-    project_row = await get_project_or_404(session, project_id)
+async def is_project_member(session: AsyncSession, project_id: int, user_id: int) -> bool:
     membership = await session.execute(
         select(project_member.c.id).where(
             project_member.c.project_id == project_id,
-            project_member.c.user_id == current_user.id,
+            project_member.c.user_id == user_id,
         )
     )
-    if not membership.fetchone():
+    return membership.fetchone() is not None
+
+
+async def ensure_project_member_access(session: AsyncSession, project_id: int, current_user):
+    await ensure_projects_page_access(session, current_user)
+    project_row = await get_project_or_404(session, project_id)
+    if not await is_project_member(session, project_id, current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Siz bu project a'zosi emassiz",
@@ -202,6 +207,28 @@ def parse_member_ids_form(raw_member_ids: Optional[Sequence[str]]) -> Optional[L
     return parsed_ids
 
 
+def parse_assignee_ids_form(raw_assignee_ids: Optional[Sequence[str]]) -> Optional[List[int]]:
+    if raw_assignee_ids is None:
+        return None
+
+    parsed_ids: List[int] = []
+    for raw_value in raw_assignee_ids:
+        if raw_value is None:
+            continue
+        for piece in str(raw_value).split(","):
+            normalized_piece = piece.strip()
+            if not normalized_piece:
+                continue
+            try:
+                parsed_ids.append(int(normalized_piece))
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"assignee_ids ichida noto'g'ri qiymat bor: '{normalized_piece}'",
+                )
+    return parsed_ids
+
+
 async def ensure_user_exists(
     session: AsyncSession,
     user_id: Optional[int],
@@ -220,22 +247,177 @@ async def ensure_user_exists(
         )
 
 
+async def ensure_user_ids_exist(
+    session: AsyncSession,
+    user_ids: Sequence[int],
+    detail_message: str = "Assignee user topilmadi",
+) -> List[int]:
+    normalized_ids: List[int] = []
+    seen_ids: Set[int] = set()
+    for user_id in user_ids:
+        if user_id is None or user_id in seen_ids:
+            continue
+        seen_ids.add(user_id)
+        normalized_ids.append(user_id)
+
+    if not normalized_ids:
+        return []
+
+    result = await session.execute(
+        select(user.c.id).where(user.c.id.in_(normalized_ids))
+    )
+    existing_ids = {row.id for row in result.fetchall()}
+    missing_ids = [user_id for user_id in normalized_ids if user_id not in existing_ids]
+    if missing_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{detail_message}: {missing_ids}",
+        )
+
+    return normalized_ids
+
+
+def resolve_assignee_input(
+    assignee_id: Optional[int],
+    assignee_ids: Optional[Sequence[int]],
+) -> Optional[List[int]]:
+    if assignee_ids is None:
+        if assignee_id is None:
+            return None
+        return [assignee_id]
+
+    resolved_ids: List[int] = []
+    seen_ids: Set[int] = set()
+    if assignee_id is not None:
+        seen_ids.add(assignee_id)
+        resolved_ids.append(assignee_id)
+    for target_id in assignee_ids:
+        if target_id is None or target_id in seen_ids:
+            continue
+        seen_ids.add(target_id)
+        resolved_ids.append(target_id)
+    return resolved_ids
+
+
+async def get_card_assignee_ids_map(
+    session: AsyncSession,
+    card_ids: Sequence[int],
+) -> Dict[int, List[int]]:
+    if not card_ids:
+        return {}
+
+    result = await session.execute(
+        select(
+            project_board_card_assignee.c.card_id,
+            project_board_card_assignee.c.user_id,
+        )
+        .where(project_board_card_assignee.c.card_id.in_(list(card_ids)))
+        .order_by(
+            project_board_card_assignee.c.card_id.asc(),
+            project_board_card_assignee.c.created_at.asc(),
+            project_board_card_assignee.c.id.asc(),
+        )
+    )
+
+    assignee_ids_map: Dict[int, List[int]] = {}
+    for row in result.fetchall():
+        assignee_ids_map.setdefault(row.card_id, []).append(row.user_id)
+    return assignee_ids_map
+
+
+def get_card_assignee_ids(card_row, assignee_ids_map: Dict[int, List[int]]) -> List[int]:
+    assignee_ids = list(assignee_ids_map.get(card_row.id, []))
+    if card_row.assignee_id is not None and card_row.assignee_id not in assignee_ids:
+        assignee_ids.insert(0, card_row.assignee_id)
+    return assignee_ids
+
+
+async def sync_card_assignees(
+    session: AsyncSession,
+    card_id: int,
+    assignee_ids: Sequence[int],
+) -> List[int]:
+    normalized_ids: List[int] = []
+    seen_ids: Set[int] = set()
+    for assignee_id in assignee_ids:
+        if assignee_id is None or assignee_id in seen_ids:
+            continue
+        seen_ids.add(assignee_id)
+        normalized_ids.append(assignee_id)
+
+    await session.execute(
+        delete(project_board_card_assignee).where(project_board_card_assignee.c.card_id == card_id)
+    )
+    if normalized_ids:
+        await session.execute(
+            insert(project_board_card_assignee).values(
+                [
+                    {
+                        "card_id": card_id,
+                        "user_id": assignee_id,
+                        "created_at": datetime.utcnow(),
+                    }
+                    for assignee_id in normalized_ids
+                ]
+            )
+        )
+
+    await session.execute(
+        update(project_board_card)
+        .where(project_board_card.c.id == card_id)
+        .values(assignee_id=normalized_ids[0] if normalized_ids else None)
+    )
+    return normalized_ids
+
+
 def build_card_user_filter(target_user_id: int):
-    return (project_board_card.c.assignee_id == target_user_id) | (
-        project_board_card.c.assignee_id.is_(None) & (project_board_card.c.created_by == target_user_id)
+    assigned_to_user = exists(
+        select(project_board_card_assignee.c.id).where(
+            project_board_card_assignee.c.card_id == project_board_card.c.id,
+            project_board_card_assignee.c.user_id == target_user_id,
+        )
+    )
+    has_any_assignee = exists(
+        select(project_board_card_assignee.c.id).where(
+            project_board_card_assignee.c.card_id == project_board_card.c.id,
+        )
+    )
+
+    return assigned_to_user | (
+        ~has_any_assignee
+        & (
+            (project_board_card.c.assignee_id == target_user_id)
+            | (project_board_card.c.assignee_id.is_(None) & (project_board_card.c.created_by == target_user_id))
+        )
+    )
+
+
+async def ensure_card_access(session: AsyncSession, card_row, current_user):
+    await ensure_projects_page_access(session, current_user)
+    column_row = await get_column_or_404(session, card_row.column_id)
+    board_row = await get_board_or_404(session, column_row.board_id, include_archived=True)
+
+    if await is_project_member(session, board_row.project_id, current_user.id):
+        return column_row, board_row
+
+    assignee_ids_map = await get_card_assignee_ids_map(session, [card_row.id])
+    visible_assignee_ids = set(get_card_assignee_ids(card_row, assignee_ids_map))
+    if current_user.id in visible_assignee_ids:
+        return column_row, board_row
+
+    if not visible_assignee_ids and card_row.created_by == current_user.id:
+        return column_row, board_row
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Siz bu taskni tahrir qila olmaysiz",
     )
 
 
 async def ensure_project_visible_for_user(session: AsyncSession, project_id: int, user_id: int):
     project_row = await get_project_or_404(session, project_id)
 
-    membership = await session.execute(
-        select(project_member.c.id).where(
-            project_member.c.project_id == project_id,
-            project_member.c.user_id == user_id,
-        )
-    )
-    if membership.fetchone():
+    if await is_project_member(session, project_id, user_id):
         return project_row
 
     visible_card = await session.execute(
@@ -454,20 +636,21 @@ async def build_board_detail(
         cards_result = await session.execute(cards_query)
         card_rows = cards_result.fetchall()
 
+    assignee_ids_map = await get_card_assignee_ids_map(session, [card.id for card in card_rows])
     user_ids: Set[int] = set()
     if board_row.created_by:
         user_ids.add(board_row.created_by)
     for card_row in card_rows:
         if card_row.created_by:
             user_ids.add(card_row.created_by)
-        if card_row.assignee_id:
-            user_ids.add(card_row.assignee_id)
+        user_ids.update(get_card_assignee_ids(card_row, assignee_ids_map))
 
     user_map = await get_user_map(session, user_ids)
     files_map = await get_card_files_map(session, [card.id for card in card_rows])
 
     cards_by_column: Dict[int, List[CardResponse]] = {}
     for card_row in card_rows:
+        assignee_ids = get_card_assignee_ids(card_row, assignee_ids_map)
         cards_by_column.setdefault(card_row.column_id, []).append(
             CardResponse(
                 id=card_row.id,
@@ -476,12 +659,14 @@ async def build_board_detail(
                 description=card_row.description,
                 order=card_row.order,
                 priority=card_row.priority,
-                assignee_id=card_row.assignee_id,
+                assignee_id=assignee_ids[0] if assignee_ids else None,
+                assignee_ids=assignee_ids,
                 due_date=card_row.due_date,
                 created_by=card_row.created_by,
                 created_at=card_row.created_at,
                 updated_at=card_row.updated_at,
-                assignee=user_map.get(card_row.assignee_id),
+                assignee=user_map.get(assignee_ids[0]) if assignee_ids else None,
+                assignees=[user_map[assignee_id] for assignee_id in assignee_ids if assignee_id in user_map],
                 created_by_user=user_map.get(card_row.created_by),
                 files=files_map.get(card_row.id, []),
             )
@@ -515,7 +700,9 @@ async def build_card_detail(session: AsyncSession, card_row) -> CardDetailRespon
     column_row = await get_column_or_404(session, card_row.column_id)
     board_row = await get_board_or_404(session, column_row.board_id, include_archived=True)
 
-    user_ids = {user_id for user_id in [card_row.assignee_id, card_row.created_by] if user_id}
+    assignee_ids_map = await get_card_assignee_ids_map(session, [card_row.id])
+    assignee_ids = get_card_assignee_ids(card_row, assignee_ids_map)
+    user_ids = {user_id for user_id in [card_row.created_by, *assignee_ids] if user_id}
     user_map = await get_user_map(session, user_ids)
     files_map = await get_card_files_map(session, [card_row.id])
 
@@ -528,12 +715,14 @@ async def build_card_detail(session: AsyncSession, card_row) -> CardDetailRespon
         description=card_row.description,
         order=card_row.order,
         priority=card_row.priority,
-        assignee_id=card_row.assignee_id,
+        assignee_id=assignee_ids[0] if assignee_ids else None,
+        assignee_ids=assignee_ids,
         due_date=card_row.due_date,
         created_by=card_row.created_by,
         created_at=card_row.created_at,
         updated_at=card_row.updated_at,
-        assignee=user_map.get(card_row.assignee_id),
+        assignee=user_map.get(assignee_ids[0]) if assignee_ids else None,
+        assignees=[user_map[assignee_id] for assignee_id in assignee_ids if assignee_id in user_map],
         created_by_user=user_map.get(card_row.created_by),
         files=files_map.get(card_row.id, []),
     )
@@ -1282,7 +1471,8 @@ async def create_card(
     order: Optional[int] = Form(None),
     priority: str = Form("medium"),
     assignee_id: Optional[int] = Form(None),
-    due_date: Optional[date] = Form(None),
+    assignee_ids: Optional[List[str]] = Form(None),
+    due_date: Optional[datetime] = Form(None),
     images: Optional[List[UploadFile]] = File(None),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
@@ -1305,7 +1495,14 @@ async def create_card(
             detail="Priority faqat low, medium yoki high bo'lishi kerak",
         )
 
-    await ensure_user_exists(session, assignee_id)
+    resolved_assignee_ids = resolve_assignee_input(
+        assignee_id=assignee_id,
+        assignee_ids=parse_assignee_ids_form(assignee_ids),
+    )
+    validated_assignee_ids = await ensure_user_ids_exist(
+        session,
+        resolved_assignee_ids or [],
+    )
 
     siblings_result = await session.execute(
         select(project_board_card.c.id)
@@ -1327,7 +1524,7 @@ async def create_card(
             description=description,
             order=insert_order,
             priority=priority_value,
-            assignee_id=assignee_id,
+            assignee_id=validated_assignee_ids[0] if validated_assignee_ids else None,
             due_date=due_date,
             created_by=current_user.id,
             created_at=datetime.utcnow(),
@@ -1337,25 +1534,29 @@ async def create_card(
     )
     card_id = result.scalar_one()
 
+    await sync_card_assignees(session, card_id, validated_assignee_ids)
     await save_card_images(session, card_id, images)
     sibling_ids.insert(target_order, card_id)
     await resequence_cards(session, sibling_ids)
     await session.commit()
 
-    if assignee_id is not None:
+    if validated_assignee_ids:
         assignee_result = await session.execute(
-            select(user.c.chat_id).where(user.c.id == assignee_id)
+            select(user.c.id, user.c.chat_id).where(user.c.id.in_(validated_assignee_ids))
         )
-        assignee_row = assignee_result.fetchone()
-        if assignee_row and assignee_row.chat_id:
-            project_result = await session.execute(
-                select(project.c.project_name).where(project.c.id == board_row.project_id)
-            )
-            project_row = project_result.fetchone()
-            assigner_name = f"{current_user.name} {current_user.surname}".strip()
+        assignee_chat_map = {row.id: row.chat_id for row in assignee_result.fetchall() if row.chat_id}
+        project_result = await session.execute(
+            select(project.c.project_name).where(project.c.id == board_row.project_id)
+        )
+        project_row = project_result.fetchone()
+        assigner_name = f"{current_user.name} {current_user.surname}".strip()
+        for target_assignee_id in validated_assignee_ids:
+            chat_id = assignee_chat_map.get(target_assignee_id)
+            if not chat_id:
+                continue
             background_tasks.add_task(
                 send_card_assignment_notification,
-                assignee_row.chat_id,
+                chat_id,
                 title,
                 description,
                 priority,
@@ -1374,9 +1575,7 @@ async def get_card_detail(
     current_user=Depends(get_current_active_user),
 ):
     card_row = await get_card_or_404(session, card_id)
-    column_row = await get_column_or_404(session, card_row.column_id)
-    board_row = await get_board_or_404(session, column_row.board_id, include_archived=True)
-    await ensure_project_member_access(session, board_row.project_id, current_user)
+    await ensure_card_access(session, card_row, current_user)
     return await build_card_detail(session, card_row)
 
 
@@ -1562,39 +1761,43 @@ async def open_list_cards_by_user(
     result = await session.execute(cards_query)
     card_rows = result.fetchall()
 
+    assignee_ids_map = await get_card_assignee_ids_map(session, [row.id for row in card_rows])
     user_ids: Set[int] = set()
     for row in card_rows:
         if row.created_by:
             user_ids.add(row.created_by)
-        if row.assignee_id:
-            user_ids.add(row.assignee_id)
+        user_ids.update(get_card_assignee_ids(row, assignee_ids_map))
     user_map = await get_user_map(session, user_ids)
     files_map = await get_card_files_map(session, [row.id for row in card_rows])
 
-    cards_payload = [
-        CardListItemResponse(
-            id=row.id,
-            board_id=row.board_id,
-            project_id=row.project_id,
-            column_id=row.column_id,
-            title=row.title,
-            description=row.description,
-            order=row.order,
-            priority=row.priority,
-            assignee_id=row.assignee_id,
-            due_date=row.due_date,
-            created_by=row.created_by,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-            assignee=user_map.get(row.assignee_id),
-            created_by_user=user_map.get(row.created_by),
-            files=files_map.get(row.id, []),
-            project_name=row.project_name,
-            board_name=row.board_name,
-            column_name=row.column_name,
+    cards_payload = []
+    for row in card_rows:
+        assignee_ids = get_card_assignee_ids(row, assignee_ids_map)
+        cards_payload.append(
+            CardListItemResponse(
+                id=row.id,
+                board_id=row.board_id,
+                project_id=row.project_id,
+                column_id=row.column_id,
+                title=row.title,
+                description=row.description,
+                order=row.order,
+                priority=row.priority,
+                assignee_id=assignee_ids[0] if assignee_ids else None,
+                assignee_ids=assignee_ids,
+                due_date=row.due_date,
+                created_by=row.created_by,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                assignee=user_map.get(assignee_ids[0]) if assignee_ids else None,
+                assignees=[user_map[assignee_user_id] for assignee_user_id in assignee_ids if assignee_user_id in user_map],
+                created_by_user=user_map.get(row.created_by),
+                files=files_map.get(row.id, []),
+                project_name=row.project_name,
+                board_name=row.board_name,
+                column_name=row.column_name,
+            )
         )
-        for row in card_rows
-    ]
 
     return CardListResponse(cards=cards_payload, total_count=len(cards_payload))
 
@@ -1613,10 +1816,9 @@ async def open_get_card_detail_by_user(
     await ensure_user_exists(session, user_id, "User topilmadi")
 
     card_row = await get_card_or_404(session, card_id)
-    if not (
-        card_row.assignee_id == user_id
-        or (card_row.assignee_id is None and card_row.created_by == user_id)
-    ):
+    assignee_ids_map = await get_card_assignee_ids_map(session, [card_row.id])
+    visible_assignee_ids = set(get_card_assignee_ids(card_row, assignee_ids_map))
+    if not (user_id in visible_assignee_ids or (not visible_assignee_ids and card_row.created_by == user_id)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bu userga tegishli card topilmadi")
 
     return await build_card_detail(session, card_row)
@@ -1630,17 +1832,17 @@ async def update_card(
     description: Optional[str] = Form(None),
     priority: Optional[str] = Form(None),
     assignee_id: Optional[int] = Form(None),
-    due_date: Optional[date] = Form(None),
+    assignee_ids: Optional[List[str]] = Form(None),
+    due_date: Optional[datetime] = Form(None),
     clear_existing_images: bool = Form(False),
     images: Optional[List[UploadFile]] = File(None),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_active_user),
 ):
     card_row = await get_card_or_404(session, card_id)
-    old_assignee_id = card_row.assignee_id
-    column_row = await get_column_or_404(session, card_row.column_id)
-    board_row = await get_board_or_404(session, column_row.board_id)
-    await ensure_project_member_access(session, board_row.project_id, current_user)
+    column_row, board_row = await ensure_card_access(session, card_row, current_user)
+    old_assignee_ids_map = await get_card_assignee_ids_map(session, [card_row.id])
+    old_assignee_ids = get_card_assignee_ids(card_row, old_assignee_ids_map)
 
     update_values = {}
     if title is not None:
@@ -1661,23 +1863,33 @@ async def update_card(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Priority faqat low, medium yoki high bo'lishi kerak",
             )
-    if assignee_id is not None:
-        update_values["assignee_id"] = assignee_id
     if due_date is not None:
         update_values["due_date"] = due_date
 
-    if not update_values and not clear_existing_images and not images:
+    resolved_assignee_ids = resolve_assignee_input(
+        assignee_id=assignee_id,
+        assignee_ids=parse_assignee_ids_form(assignee_ids),
+    )
+
+    if not update_values and resolved_assignee_ids is None and not clear_existing_images and not images:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Yangilanadigan ma'lumot topilmadi",
         )
 
-    await ensure_user_exists(session, update_values.get("assignee_id"))
+    validated_assignee_ids: Optional[List[int]] = None
+    if resolved_assignee_ids is not None:
+        validated_assignee_ids = await ensure_user_ids_exist(session, resolved_assignee_ids)
+        update_values["assignee_id"] = validated_assignee_ids[0] if validated_assignee_ids else None
+
     if update_values:
         update_values["updated_at"] = datetime.utcnow()
         await session.execute(
             update(project_board_card).where(project_board_card.c.id == card_id).values(**update_values)
         )
+
+    if validated_assignee_ids is not None:
+        await sync_card_assignees(session, card_id, validated_assignee_ids)
 
     if clear_existing_images:
         existing_files_result = await session.execute(
@@ -1692,27 +1904,31 @@ async def update_card(
     await save_card_images(session, card_id, images)
     await session.commit()
 
-    new_assignee_id = update_values.get("assignee_id") if update_values else None
-    if new_assignee_id is not None and new_assignee_id != old_assignee_id:
+    new_assignee_ids = validated_assignee_ids if validated_assignee_ids is not None else old_assignee_ids
+    added_assignee_ids = [assignee for assignee in new_assignee_ids if assignee not in old_assignee_ids]
+    if added_assignee_ids:
         assignee_result = await session.execute(
-            select(user.c.chat_id, user.c.name, user.c.surname).where(user.c.id == new_assignee_id)
+            select(user.c.id, user.c.chat_id).where(user.c.id.in_(added_assignee_ids))
         )
-        assignee_row = assignee_result.fetchone()
-        if assignee_row and assignee_row.chat_id:
-            project_result = await session.execute(
-                select(project.c.project_name).where(project.c.id == board_row.project_id)
-            )
-            project_row = project_result.fetchone()
-            assigner_name = f"{current_user.name} {current_user.surname}".strip()
-            card_title = update_values.get("title", card_row.title)
-            card_description = update_values.get("description", card_row.description)
-            card_priority = str(update_values.get("priority", card_row.priority).value
-                                if hasattr(update_values.get("priority", card_row.priority), "value")
-                                else update_values.get("priority", card_row.priority))
-            card_due_date = update_values.get("due_date", card_row.due_date)
+        assignee_chat_map = {row.id: row.chat_id for row in assignee_result.fetchall() if row.chat_id}
+        project_result = await session.execute(
+            select(project.c.project_name).where(project.c.id == board_row.project_id)
+        )
+        project_row = project_result.fetchone()
+        assigner_name = f"{current_user.name} {current_user.surname}".strip()
+        card_title = update_values.get("title", card_row.title)
+        card_description = update_values.get("description", card_row.description)
+        card_priority = str(update_values.get("priority", card_row.priority).value
+                            if hasattr(update_values.get("priority", card_row.priority), "value")
+                            else update_values.get("priority", card_row.priority))
+        card_due_date = update_values.get("due_date", card_row.due_date)
+        for target_assignee_id in added_assignee_ids:
+            chat_id = assignee_chat_map.get(target_assignee_id)
+            if not chat_id:
+                continue
             background_tasks.add_task(
                 send_card_assignment_notification,
-                assignee_row.chat_id,
+                chat_id,
                 card_title,
                 card_description,
                 card_priority,
@@ -1732,9 +1948,7 @@ async def move_card(
     current_user=Depends(get_current_active_user),
 ):
     card_row = await get_card_or_404(session, card_id)
-    source_column = await get_column_or_404(session, card_row.column_id)
-    source_board = await get_board_or_404(session, source_column.board_id)
-    await ensure_project_member_access(session, source_board.project_id, current_user)
+    source_column, source_board = await ensure_card_access(session, card_row, current_user)
 
     target_column = await get_column_or_404(session, move_data.column_id)
     target_board = await get_board_or_404(session, target_column.board_id)
@@ -1800,9 +2014,7 @@ async def delete_card(
     current_user=Depends(get_current_active_user),
 ):
     card_row = await get_card_or_404(session, card_id)
-    column_row = await get_column_or_404(session, card_row.column_id)
-    board_row = await get_board_or_404(session, column_row.board_id)
-    await ensure_project_member_access(session, board_row.project_id, current_user)
+    column_row, _board_row = await ensure_card_access(session, card_row, current_user)
 
     files_result = await session.execute(
         select(project_board_card_file).where(project_board_card_file.c.card_id == card_id)

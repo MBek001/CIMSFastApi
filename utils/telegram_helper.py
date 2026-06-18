@@ -1,4 +1,5 @@
 import logging
+from datetime import date, datetime
 from telegram import Bot
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
@@ -152,7 +153,13 @@ async def send_card_assignment_notification(
             lines.append(f"📝 <b>Tavsif:</b> {description}")
         lines.append(f"🎯 <b>Priority:</b> {priority.capitalize()}")
         if due_date:
-            lines.append(f"📅 <b>Muddat:</b> {due_date}")
+            if isinstance(due_date, datetime):
+                due_date_text = due_date.strftime("%Y-%m-%d %H:%M")
+            elif isinstance(due_date, date):
+                due_date_text = due_date.strftime("%Y-%m-%d")
+            else:
+                due_date_text = str(due_date)
+            lines.append(f"📅 <b>Muddat:</b> {due_date_text}")
         lines.append(f"👤 <b>Kim berdi:</b> {assigner_name}")
 
         update_bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN, request=request)

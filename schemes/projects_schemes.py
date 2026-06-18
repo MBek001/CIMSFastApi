@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -43,11 +43,13 @@ class CardResponse(BaseModel):
     order: int
     priority: CardPriority
     assignee_id: Optional[int]
-    due_date: Optional[date]
+    assignee_ids: List[int] = Field(default_factory=list)
+    due_date: Optional[datetime]
     created_by: Optional[int]
     created_at: datetime
     updated_at: datetime
     assignee: Optional[UserSummaryResponse] = None
+    assignees: List[UserSummaryResponse] = Field(default_factory=list)
     created_by_user: Optional[UserSummaryResponse] = None
     files: List[BoardCardFileResponse] = Field(default_factory=list)
 
@@ -233,7 +235,8 @@ class CardCreateRequest(BaseModel):
     order: Optional[int] = Field(None, ge=0)
     priority: CardPriority = CardPriority.medium
     assignee_id: Optional[int] = None
-    due_date: Optional[date] = None
+    assignee_ids: List[int] = Field(default_factory=list)
+    due_date: Optional[datetime] = None
 
     @field_validator("title")
     @classmethod
@@ -246,7 +249,8 @@ class CardUpdateRequest(BaseModel):
     description: Optional[str] = None
     priority: Optional[CardPriority] = None
     assignee_id: Optional[int] = None
-    due_date: Optional[date] = None
+    assignee_ids: Optional[List[int]] = None
+    due_date: Optional[datetime] = None
 
     @field_validator("title")
     @classmethod
