@@ -476,22 +476,7 @@ async def ensure_card_access(session: AsyncSession, card_row, current_user):
     await ensure_projects_page_access(session, current_user)
     column_row = await get_column_or_404(session, card_row.column_id)
     board_row = await get_board_or_404(session, column_row.board_id, include_archived=True)
-
-    if await is_project_member(session, board_row.project_id, current_user.id):
-        return column_row, board_row
-
-    assignee_ids_map = await get_card_assignee_ids_map(session, [card_row.id])
-    visible_assignee_ids = set(get_card_assignee_ids(card_row, assignee_ids_map))
-    if current_user.id in visible_assignee_ids:
-        return column_row, board_row
-
-    if not visible_assignee_ids and card_row.created_by == current_user.id:
-        return column_row, board_row
-
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Siz bu taskni tahrir qila olmaysiz",
-    )
+    return column_row, board_row
 
 
 async def ensure_project_visible_for_user(session: AsyncSession, project_id: int, user_id: int):
