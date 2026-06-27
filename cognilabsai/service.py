@@ -1003,15 +1003,29 @@ async def verify_websocket_api_key(session: AsyncSession, api_key: str) -> bool:
     return bool(expected and api_key == expected)
 
 
-async def list_conversations(session: AsyncSession, channel: Optional[str] = None) -> list[dict]:
+async def list_conversations(
+    session: AsyncSession,
+    channel: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
     await ensure_schema(session)
     await refresh_expired_pauses(session)
+    filters = []
+    if channel:
+        filters.append(cognilabsai_conversation.c.channel == channel)
+
+    total_query = select(func.count()).select_from(cognilabsai_conversation)
+    if filters:
+        total_query = total_query.where(*filters)
+    total = int((await session.execute(total_query)).scalar() or 0)
+
     query = select(cognilabsai_conversation).order_by(
         cognilabsai_conversation.c.last_message_at.desc().nullslast(),
         cognilabsai_conversation.c.updated_at.desc(),
-    )
-    if channel:
-        query = query.where(cognilabsai_conversation.c.channel == channel)
+    ).limit(limit).offset(offset)
+    if filters:
+        query = query.where(*filters)
     result = await session.execute(query)
     items = [decorate_conversation_payload(dict(row)) for row in result.mappings().all()]
     await session.rollback()
@@ -1025,7 +1039,12 @@ async def list_conversations(session: AsyncSession, channel: Optional[str] = Non
             item["telegram_last_seen_at"] = snapshot.get("last_seen_at")
         except Exception:
             pass
-    return items
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 async def get_conversation(session: AsyncSession, conversation_id: int) -> Optional[dict]:

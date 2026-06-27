@@ -81,6 +81,13 @@ class ConversationItem(BaseModel):
     updated_at: Optional[datetime] = None
 
 
+class ConversationListResponse(BaseModel):
+    items: list[ConversationItem]
+    total: int
+    limit: int
+    offset: int
+
+
 class MessageItem(BaseModel):
     id: int
     conversation_id: int

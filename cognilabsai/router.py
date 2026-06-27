@@ -9,6 +9,7 @@ from cognilabsai.realtime import manager
 from cognilabsai.schemas import (
     AIGlobalToggleRequest,
     ConversationItem,
+    ConversationListResponse,
     FollowUpConfigRequest,
     GenericMessageResponse,
     ImportConversationsRequest,
@@ -58,13 +59,15 @@ webhook_router = APIRouter(prefix="/webhooks", tags=["CognilabsAI Webhooks"])
 public_router = APIRouter(prefix="/public", tags=["CognilabsAI Public"])
 
 
-@chat_router.get("/conversations", response_model=list[ConversationItem])
+@chat_router.get("/conversations", response_model=ConversationListResponse)
 async def chat_conversations(
     channel: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_async_session),
     current_user=Depends(require_cognilabsai_chat),
 ):
-    return await list_conversations(session, channel=channel)
+    return await list_conversations(session, channel=channel, limit=limit, offset=offset)
 
 
 @chat_router.get("/conversations/{conversation_id}", response_model=ConversationItem)
