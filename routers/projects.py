@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Set, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy import delete, exists, func, insert, select, text, update
@@ -58,6 +59,15 @@ DEFAULT_BOARD_COLUMNS = [
 ]
 
 _project_card_schema_ready = False
+PROJECTS_TZ = ZoneInfo("Asia/Tashkent")
+
+
+def normalize_project_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(PROJECTS_TZ).replace(tzinfo=None)
 
 
 def is_ceo_user(current_user) -> bool:
@@ -1595,6 +1605,7 @@ async def create_card(
         session,
         resolved_assignee_ids or [],
     )
+    normalized_due_date = normalize_project_datetime(due_date)
 
     siblings_result = await session.execute(
         select(project_board_card.c.id)
@@ -1617,7 +1628,7 @@ async def create_card(
             order=insert_order,
             priority=priority_value,
             assignee_id=validated_assignee_ids[0] if validated_assignee_ids else None,
-            due_date=due_date,
+            due_date=normalized_due_date,
             created_by=current_user.id,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
@@ -1652,7 +1663,7 @@ async def create_card(
                 title,
                 description,
                 priority,
-                due_date,
+                normalized_due_date,
                 assigner_name,
                 project_row.project_name if project_row else None,
             )
@@ -1963,7 +1974,7 @@ async def update_card(
                 detail="Priority faqat low, medium yoki high bo'lishi kerak",
             )
     if due_date is not None:
-        update_values["due_date"] = due_date
+        update_values["due_date"] = normalize_project_datetime(due_date)
 
     resolved_assignee_ids = resolve_assignee_input(
         assignee_id=assignee_id,
