@@ -1835,13 +1835,6 @@ async def create_customer_api_record(
         f"request received platform={customer_data.platform} phone={customer_data.phone_number} notes='{(customer_data.notes or '')[:220]}' recall_time_input={customer_data.recall_time}"
     )
 
-    existing_customer = await _find_customer_by_phone_number(session, customer_data.phone_number)
-    if existing_customer:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Bu telefon raqami bilan lead allaqachon mavjud",
-        )
-
     created_at_uz = datetime.now(UZBEKISTAN_TZ)
     created_at = created_at_uz.replace(tzinfo=None)
     resolved_recall_time = customer_data.recall_time
