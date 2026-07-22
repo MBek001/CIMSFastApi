@@ -148,6 +148,19 @@ def utcnow() -> datetime:
     return datetime.utcnow()
 
 
+TASHKENT_TZ = timezone(timedelta(hours=5))
+
+
+def to_tashkent_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.astimezone(TASHKENT_TZ)
+
+
 def get_lead_cooldown_deadline(last_lead_created_at: Optional[datetime]) -> Optional[datetime]:
     normalized = normalize_datetime(last_lead_created_at)
     if normalized is None:
@@ -462,6 +475,20 @@ async def backfill_instagram_client_names(session: AsyncSession) -> int:
 def decorate_conversation_payload(payload: dict) -> dict:
     chat_mode, supports_ai = build_chat_mode(payload.get("channel"))
     enriched = dict(payload)
+    for field in (
+        "paused_until",
+        "follow_up_due_at",
+        "follow_up_sent_at",
+        "default_follow_up_due_at",
+        "default_follow_up_last_sent_at",
+        "last_lead_created_at",
+        "last_message_at",
+        "created_at",
+        "updated_at",
+        "ai_enabled_since",
+    ):
+        if field in enriched:
+            enriched[field] = to_tashkent_datetime(enriched.get(field))
     enriched["chat_mode"] = chat_mode
     enriched["supports_ai"] = supports_ai
     enriched["client_display_name"] = build_client_display_name(payload)
@@ -1077,7 +1104,11 @@ async def get_messages(session: AsyncSession, conversation_id: int, limit: int =
         .limit(limit)
         .offset(offset)
     )
-    return [dict(row) for row in result.mappings().all()]
+    messages = [dict(row) for row in result.mappings().all()]
+    for item in messages:
+        item["created_at"] = to_tashkent_datetime(item.get("created_at"))
+        item["read_at"] = to_tashkent_datetime(item.get("read_at"))
+    return messages
 
 
 async def get_latest_client_message_text(session: AsyncSession, conversation_id: int) -> Optional[str]:
