@@ -291,6 +291,7 @@ async def integrations_get(
 
 
 @integrations_router.put("", response_model=IntegrationConfigResponse)
+@integrations_router.patch("", response_model=IntegrationConfigResponse)
 async def integrations_update(
     request: IntegrationConfigPayload,
     session: AsyncSession = Depends(get_async_session),
