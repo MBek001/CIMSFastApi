@@ -2337,6 +2337,46 @@ def apply_reasoning_defaults(payload: dict, model: Optional[str]) -> dict:
     return payload
 
 
+async def request_text_only_ai_reply(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+) -> Optional[str]:
+    text_messages = [
+        *messages,
+        {
+            "role": "system",
+            "content": (
+                "Previous model response only used an internal tool and produced no customer-facing text. "
+                "Now write the exact Instagram DM reply to the customer. Do not call tools. "
+                "Answer naturally from conversation context, then move toward getting phone number if it is missing. "
+                "Keep it short, useful, and in the customer's language."
+            ),
+        },
+    ]
+    payload = apply_reasoning_defaults({
+        "model": model,
+        "messages": text_messages,
+        "max_completion_tokens": 500,
+    }, model)
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        if response.status_code >= 400:
+            print(f"OpenAI text-only error {response.status_code}: {response.text}", flush=True)
+            return None
+        data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    return sanitize_ai_reply_text(extract_chat_message_text(choices[0].get("message") or {}))
+
+
 def extract_chat_message_text(message: dict) -> str:
     content = message.get("content")
     if isinstance(content, str):
@@ -2684,6 +2724,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                     "Use tools proactively. If client gives phone number, call register_customer immediately even if name, business field, or call time is missing. "
                     "If lead already exists and client later provides name, business field, or call time, call update_lead. "
                     "Always call set_conversation_stage when chat state changes. "
+                    "If you call only set_conversation_stage, you still must include a customer-facing text reply in content. "
                     "Lead goal: explain the exact Instagram media context when present, answer customer question, then ask for phone number naturally."
                 ),
             },
@@ -2920,7 +2961,16 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         reply_text = sanitize_ai_reply_text(extract_chat_message_text(message))
         if reply_text:
             return reply_text
-        return "😓 Botdan javob olinmadi. Iltimos, operatorga yozing."
+        if tool_calls:
+            retry_text = await request_text_only_ai_reply(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+            )
+            if retry_text:
+                return retry_text
+        return None
     except Exception as exc:
         import traceback
         print(f"[cognilabsai] Error in generate_ai_reply (conversation {conversation_id}): {exc}", flush=True)
