@@ -170,6 +170,13 @@ class DashboardStatistics(BaseModel):
     messages_count: int
     active_user_count: int
     inactive_user_count: int
+    instagram_media_total_sent_count: int = 0
+    instagram_media_total_lead_count: int = 0
+    instagram_media_total_contacted_count: int = 0
+    instagram_media_total_continuing_count: int = 0
+    instagram_media_unknown_sent_count: int = 0
+    instagram_media_unknown_lead_count: int = 0
+    instagram_media_posts: List[dict] = Field(default_factory=list)
 
 class DashboardResponse(BaseModel):
     users: List[dict]

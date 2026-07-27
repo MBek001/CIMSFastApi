@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File
-from sqlalchemy import select, insert, update, delete, func
+from sqlalchemy import String, cast, distinct, select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, date, time
 from typing import List
@@ -29,6 +29,7 @@ from utils.audit import log_audit_event
 from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
 from models.user_models import  user_payment
 from  models.admin_models import customer,CustomerStatus, company_recurring_payment, user_role_table
+from cognilabsai.tables import cognilabsai_conversation, cognilabsai_instagram_media_context, cognilabsai_message
 from routers.finance import  get_db_exchange_rate,calculate_card_balances
 
 router = APIRouter(prefix="/ceo", tags=['CEO Dashboard'])
@@ -105,6 +106,102 @@ async def _get_role_display_map(session: AsyncSession) -> dict[str, str]:
         for row in result.fetchall()
         if str(row.name or "").strip()
     }
+
+
+async def _get_instagram_media_dashboard_stats(session: AsyncSession) -> dict:
+    status_expr = func.coalesce(customer.c.status_name, cast(customer.c.status, String))
+    media_message_count = func.count(cognilabsai_message.c.id).filter(
+        cognilabsai_message.c.media_type.in_(["story_reply", "story_send", "media_send"])
+    )
+    lead_conversation_count = func.count(distinct(cognilabsai_conversation.c.id)).filter(
+        cognilabsai_conversation.c.crm_customer_id.is_not(None)
+    )
+    contacted_count = func.count(distinct(customer.c.id)).filter(status_expr == CustomerStatus.contacted.value)
+    continuing_count = func.count(distinct(customer.c.id)).filter(status_expr == CustomerStatus.continuing.value)
+    result = await session.execute(
+        select(
+            cognilabsai_instagram_media_context.c.id.label("post_id"),
+            cognilabsai_instagram_media_context.c.media_type,
+            cognilabsai_instagram_media_context.c.url,
+            cognilabsai_instagram_media_context.c.title,
+            media_message_count.label("sent_count"),
+            lead_conversation_count.label("lead_count"),
+            contacted_count.label("contacted_count"),
+            continuing_count.label("continuing_count"),
+        )
+        .select_from(
+            cognilabsai_instagram_media_context
+            .outerjoin(
+                cognilabsai_conversation,
+                cognilabsai_conversation.c.instagram_media_context_id == cognilabsai_instagram_media_context.c.id,
+            )
+            .outerjoin(
+                cognilabsai_message,
+                cognilabsai_message.c.conversation_id == cognilabsai_conversation.c.id,
+            )
+            .outerjoin(
+                customer,
+                customer.c.id == cognilabsai_conversation.c.crm_customer_id,
+            )
+        )
+        .group_by(
+            cognilabsai_instagram_media_context.c.id,
+            cognilabsai_instagram_media_context.c.media_type,
+            cognilabsai_instagram_media_context.c.url,
+            cognilabsai_instagram_media_context.c.title,
+        )
+        .order_by(media_message_count.desc(), cognilabsai_instagram_media_context.c.id.desc())
+    )
+    posts = []
+    totals = {
+        "instagram_media_total_sent_count": 0,
+        "instagram_media_total_lead_count": 0,
+        "instagram_media_total_contacted_count": 0,
+        "instagram_media_total_continuing_count": 0,
+        "instagram_media_unknown_sent_count": 0,
+        "instagram_media_unknown_lead_count": 0,
+    }
+    for row in result.mappings().all():
+        item = {
+            "post_id": row["post_id"],
+            "media_type": row["media_type"],
+            "title": row["title"],
+            "url": row["url"],
+            "sent_count": int(row["sent_count"] or 0),
+            "lead_count": int(row["lead_count"] or 0),
+            "contacted_count": int(row["contacted_count"] or 0),
+            "continuing_count": int(row["continuing_count"] or 0),
+        }
+        posts.append(item)
+        totals["instagram_media_total_sent_count"] += item["sent_count"]
+        totals["instagram_media_total_lead_count"] += item["lead_count"]
+        totals["instagram_media_total_contacted_count"] += item["contacted_count"]
+        totals["instagram_media_total_continuing_count"] += item["continuing_count"]
+    unknown_result = await session.execute(
+        select(
+            func.count(cognilabsai_message.c.id).label("sent_count"),
+            func.count(distinct(cognilabsai_conversation.c.id)).filter(
+                cognilabsai_conversation.c.crm_customer_id.is_not(None)
+            ).label("lead_count"),
+        )
+        .select_from(
+            cognilabsai_conversation.join(
+                cognilabsai_message,
+                cognilabsai_message.c.conversation_id == cognilabsai_conversation.c.id,
+            )
+        )
+        .where(
+            cognilabsai_conversation.c.channel == "instagram",
+            cognilabsai_conversation.c.instagram_media_context_id.is_(None),
+            cognilabsai_message.c.media_type.in_(["story_reply", "story_send", "media_send"]),
+        )
+    )
+    unknown = unknown_result.mappings().first()
+    if unknown:
+        totals["instagram_media_unknown_sent_count"] = int(unknown["sent_count"] or 0)
+        totals["instagram_media_unknown_lead_count"] = int(unknown["lead_count"] or 0)
+    totals["instagram_media_posts"] = posts
+    return totals
 
 
 def _get_user_role_display(user_row, role_display_map: dict[str, str] | None = None) -> str:
@@ -237,6 +334,7 @@ async def ceo_dashboard(
     # Xabarlar sonini hisoblash
     messages_result = await session.execute(select(func.count(message.c.id)))
     messages_count = messages_result.scalar()
+    instagram_media_stats = await _get_instagram_media_dashboard_stats(session)
 
     # Har bir user uchun permissions olish
     page_rows = await get_all_pages(session)
@@ -269,7 +367,8 @@ async def ceo_dashboard(
             "user_count": user_count,
             "messages_count": messages_count,
             "active_user_count": active_user_count,
-            "inactive_user_count": inactive_user_count
+            "inactive_user_count": inactive_user_count,
+            **instagram_media_stats,
         }
     )
 
