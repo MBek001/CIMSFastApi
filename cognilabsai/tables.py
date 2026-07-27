@@ -86,9 +86,52 @@ cognilabsai_conversation = Table(
     Column("last_operator_user_id", Integer, nullable=True),
     Column("last_operator_name", String(255), nullable=True),
     Column("is_imported", Boolean, nullable=False, default=False),
+    Column("ai_stage", String(64), nullable=True),
+    Column("ai_stage_label", String(255), nullable=True),
+    Column("ai_interest", String(255), nullable=True),
+    Column("instagram_media_context_id", Integer, nullable=True),
+    Column("ai_follow_up_due_at", DateTime, nullable=True),
+    Column("ai_follow_up_sent_at", DateTime, nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
     UniqueConstraint("channel", "client_external_id", name="uq_cognilabsai_conversation_channel_client"),
+    extend_existing=True,
+)
+
+
+cognilabsai_instagram_media_context = Table(
+    "cognilabsai_instagram_media_context",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("media_type", String(32), nullable=False),
+    Column("url", String(1000), nullable=True),
+    Column("normalized_url", String(1000), nullable=True),
+    Column("media_id", String(255), nullable=True),
+    Column("story_id", String(255), nullable=True),
+    Column("title", String(255), nullable=True),
+    Column("ai_description", Text, nullable=False),
+    Column("is_active", Boolean, nullable=False, default=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
+    extend_existing=True,
+)
+
+
+cognilabsai_instagram_webhook_event = Table(
+    "cognilabsai_instagram_webhook_event",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("event_type", String(64), nullable=False),
+    Column("sender_id", String(255), nullable=True),
+    Column("recipient_id", String(255), nullable=True),
+    Column("message_id", String(255), nullable=True),
+    Column("text", Text, nullable=True),
+    Column("media_id", String(255), nullable=True),
+    Column("story_id", String(255), nullable=True),
+    Column("story_url", Text, nullable=True),
+    Column("extracted", Text, nullable=True),
+    Column("raw_payload", Text, nullable=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
     extend_existing=True,
 )
 

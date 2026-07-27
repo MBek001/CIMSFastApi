@@ -14,6 +14,10 @@ from cognilabsai.schemas import (
     GenericMessageResponse,
     ImportConversationsRequest,
     ImportConversationsResponse,
+    InstagramMediaContextItem,
+    InstagramMediaContextListResponse,
+    InstagramMediaContextPayload,
+    InstagramMediaContextUpdatePayload,
     IntegrationConfigPayload,
     IntegrationConfigResponse,
     MessageItem,
@@ -29,12 +33,16 @@ from cognilabsai.schemas import (
 )
 from cognilabsai.service import (
     delete_conversation,
+    delete_instagram_media_context,
+    create_instagram_media_context,
     get_conversation,
+    get_instagram_media_context,
     get_integration_config,
     get_messages,
     import_instagram_conversations,
     import_instagram_conversations_upload,
     init_website_session,
+    list_instagram_media_contexts,
     list_conversations,
     mark_conversation_read,
     maybe_send_ai_reply,
@@ -46,6 +54,7 @@ from cognilabsai.service import (
     set_conversation_pause,
     update_conversation_follow_up,
     update_global_ai_state,
+    update_instagram_media_context,
     update_integration_config,
     verify_websocket_api_key,
     start_telegram_outbound_conversation,
@@ -280,6 +289,64 @@ async def chat_retry_ai(
         raise HTTPException(status_code=404, detail="Conversation not found")
     await maybe_send_ai_reply(session, conversation_id)
     return GenericMessageResponse(message="AI processing requested")
+
+
+@chat_router.get("/instagram/media-contexts", response_model=InstagramMediaContextListResponse)
+async def chat_instagram_media_contexts(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    active: bool | None = Query(default=None),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    return await list_instagram_media_contexts(session, limit=limit, offset=offset, active=active)
+
+
+@chat_router.get("/instagram/media-contexts/{context_id}", response_model=InstagramMediaContextItem)
+async def chat_instagram_media_context_detail(
+    context_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    item = await get_instagram_media_context(session, context_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Media context not found")
+    return item
+
+
+@chat_router.post("/instagram/media-contexts", response_model=InstagramMediaContextItem)
+async def chat_instagram_media_context_create(
+    request: InstagramMediaContextPayload,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    return await create_instagram_media_context(session, request.model_dump(exclude_unset=True))
+
+
+@chat_router.put("/instagram/media-contexts/{context_id}", response_model=InstagramMediaContextItem)
+@chat_router.patch("/instagram/media-contexts/{context_id}", response_model=InstagramMediaContextItem)
+async def chat_instagram_media_context_update(
+    context_id: int,
+    request: InstagramMediaContextUpdatePayload,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    item = await update_instagram_media_context(session, context_id, request.model_dump(exclude_unset=True))
+    if not item:
+        raise HTTPException(status_code=404, detail="Media context not found")
+    return item
+
+
+@chat_router.delete("/instagram/media-contexts/{context_id}", response_model=GenericMessageResponse)
+async def chat_instagram_media_context_delete(
+    context_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(require_cognilabsai_chat),
+):
+    deleted = await delete_instagram_media_context(session, context_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Media context not found")
+    return GenericMessageResponse(message="Media context deleted")
 
 
 @integrations_router.get("", response_model=IntegrationConfigResponse)

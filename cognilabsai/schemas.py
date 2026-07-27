@@ -77,6 +77,12 @@ class ConversationItem(BaseModel):
     last_operator_user_id: Optional[int] = None
     last_operator_name: Optional[str] = None
     is_imported: bool
+    ai_stage: Optional[str] = None
+    ai_stage_label: Optional[str] = None
+    ai_interest: Optional[str] = None
+    instagram_media_context_id: Optional[int] = None
+    ai_follow_up_due_at: Optional[datetime] = None
+    ai_follow_up_sent_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -104,6 +110,40 @@ class MessageItem(BaseModel):
     is_read: bool = False
     read_at: Optional[datetime] = None
     created_at: datetime
+
+
+class InstagramMediaContextPayload(BaseModel):
+    media_type: str = Field(min_length=1, max_length=32)
+    url: Optional[str] = Field(default=None, max_length=1000)
+    media_id: Optional[str] = Field(default=None, max_length=255)
+    story_id: Optional[str] = Field(default=None, max_length=255)
+    title: Optional[str] = Field(default=None, max_length=255)
+    ai_description: str = Field(min_length=1)
+    is_active: Optional[bool] = True
+
+
+class InstagramMediaContextUpdatePayload(BaseModel):
+    media_type: Optional[str] = Field(default=None, max_length=32)
+    url: Optional[str] = Field(default=None, max_length=1000)
+    media_id: Optional[str] = Field(default=None, max_length=255)
+    story_id: Optional[str] = Field(default=None, max_length=255)
+    title: Optional[str] = Field(default=None, max_length=255)
+    ai_description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class InstagramMediaContextItem(InstagramMediaContextPayload):
+    id: int
+    normalized_url: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class InstagramMediaContextListResponse(BaseModel):
+    items: list[InstagramMediaContextItem]
+    total: int
+    limit: int
+    offset: int
 
 
 class SendMessageRequest(BaseModel):

@@ -11,7 +11,7 @@ from typing import Optional
 from uuid import uuid4
 
 import httpx
-from sqlalchemy import String, cast, delete, func, insert, select, text, update
+from sqlalchemy import String, cast, delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Bot
@@ -23,6 +23,8 @@ from models.user_models import user
 from utils.page_permissions import ensure_app_page_schema
 from schemes.crm_schemes import ConversationLanguageEnum, CustomerAPICreateRequest
 from routers.crm import create_customer_api_record
+from models.admin_models import customer
+from utils.crypto import encrypt_text
 
 from cognilabsai.realtime import manager
 from cognilabsai.tables import (
@@ -31,6 +33,8 @@ from cognilabsai.tables import (
     cognilabsai_conversation,
     cognilabsai_global_integration,
     cognilabsai_import_log,
+    cognilabsai_instagram_media_context,
+    cognilabsai_instagram_webhook_event,
     cognilabsai_message,
     cognilabsai_pause_event,
 )
@@ -81,6 +85,8 @@ follow_up_scheduler_task: Optional[asyncio.Task] = None
 schema_ready = False
 schema_lock = asyncio.Lock()
 FOLLOW_UPS_ENABLED = False
+INSTAGRAM_AI_FOLLOW_UP_ENABLED = True
+INSTAGRAM_AI_FOLLOW_UP_DELAY_HOURS = 22
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_DELAY_MINUTES = 180
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_DELAY_MINUTES = 360
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES = 1200
@@ -184,6 +190,40 @@ def normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
     if value.tzinfo is not None:
         return value.astimezone(timezone.utc).replace(tzinfo=None)
     return value
+
+
+def json_dumps(value) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def normalize_instagram_url(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.split("?", 1)[0].rstrip("/")
+    return cleaned or None
+
+
+def extract_asset_id_from_url(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    match = re.search(r"[?&]asset_id=([^&]+)", value)
+    if match:
+        return match.group(1)
+    return None
+
+
+def infer_instagram_media_type(url: Optional[str], fallback: Optional[str] = None) -> str:
+    normalized = (url or "").lower()
+    if "/stories/" in normalized:
+        return "story"
+    if "/reel/" in normalized:
+        return "reel"
+    if "/p/" in normalized:
+        return "post"
+    return (fallback or "post").strip().lower() or "post"
 
 
 def get_global_follow_up_fields(channel: str) -> tuple[str, str, str]:
@@ -486,6 +526,8 @@ def decorate_conversation_payload(payload: dict) -> dict:
         "created_at",
         "updated_at",
         "ai_enabled_since",
+        "ai_follow_up_due_at",
+        "ai_follow_up_sent_at",
     ):
         if field in enriched:
             enriched[field] = to_tashkent_datetime(enriched.get(field))
@@ -700,6 +742,12 @@ async def ensure_schema(session: AsyncSession):
             last_operator_user_id INTEGER NULL,
             last_operator_name VARCHAR(255) NULL,
             is_imported BOOLEAN NOT NULL DEFAULT FALSE,
+            ai_stage VARCHAR(64) NULL,
+            ai_stage_label VARCHAR(255) NULL,
+            ai_interest VARCHAR(255) NULL,
+            instagram_media_context_id INTEGER NULL,
+            ai_follow_up_due_at TIMESTAMP NULL,
+            ai_follow_up_sent_at TIMESTAMP NULL,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW(),
             CONSTRAINT uq_cognilabsai_conversation_channel_client UNIQUE (channel, client_external_id)
@@ -776,6 +824,73 @@ async def ensure_schema(session: AsyncSession):
         await session.execute(text("""
             ALTER TABLE cognilabsai_conversation
             ADD COLUMN IF NOT EXISTS default_follow_up_last_sent_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS ai_stage VARCHAR(64) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS ai_stage_label VARCHAR(255) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS ai_interest VARCHAR(255) NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS instagram_media_context_id INTEGER NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS ai_follow_up_due_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS ai_follow_up_sent_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS cognilabsai_instagram_media_context (
+            id SERIAL PRIMARY KEY,
+            media_type VARCHAR(32) NOT NULL,
+            url VARCHAR(1000) NULL,
+            normalized_url VARCHAR(1000) NULL,
+            media_id VARCHAR(255) NULL,
+            story_id VARCHAR(255) NULL,
+            title VARCHAR(255) NULL,
+            ai_description TEXT NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        await session.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_cognilabsai_media_context_media_id
+            ON cognilabsai_instagram_media_context (media_id)
+        """))
+        await session.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_cognilabsai_media_context_story_id
+            ON cognilabsai_instagram_media_context (story_id)
+        """))
+        await session.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_cognilabsai_media_context_normalized_url
+            ON cognilabsai_instagram_media_context (normalized_url)
+        """))
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS cognilabsai_instagram_webhook_event (
+            id SERIAL PRIMARY KEY,
+            event_type VARCHAR(64) NOT NULL,
+            sender_id VARCHAR(255) NULL,
+            recipient_id VARCHAR(255) NULL,
+            message_id VARCHAR(255) NULL,
+            text TEXT NULL,
+            media_id VARCHAR(255) NULL,
+            story_id VARCHAR(255) NULL,
+            story_url TEXT NULL,
+            extracted TEXT NULL,
+            raw_payload TEXT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+            )
         """))
         await session.execute(text("""
             UPDATE cognilabsai_conversation
@@ -1072,6 +1187,109 @@ async def list_conversations(
         "limit": limit,
         "offset": offset,
     }
+
+
+async def list_instagram_media_contexts(session: AsyncSession, limit: int = 50, offset: int = 0, active: Optional[bool] = None) -> dict:
+    await ensure_schema(session)
+    filters = []
+    if active is not None:
+        filters.append(cognilabsai_instagram_media_context.c.is_active == active)
+    total_query = select(func.count()).select_from(cognilabsai_instagram_media_context)
+    query = select(cognilabsai_instagram_media_context).order_by(
+        cognilabsai_instagram_media_context.c.updated_at.desc(),
+        cognilabsai_instagram_media_context.c.id.desc(),
+    ).limit(limit).offset(offset)
+    if filters:
+        total_query = total_query.where(*filters)
+        query = query.where(*filters)
+    total = int((await session.execute(total_query)).scalar() or 0)
+    result = await session.execute(query)
+    items = [dict(row) for row in result.mappings().all()]
+    for item in items:
+        item["created_at"] = to_tashkent_datetime(item.get("created_at"))
+        item["updated_at"] = to_tashkent_datetime(item.get("updated_at"))
+    await session.rollback()
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+async def get_instagram_media_context(session: AsyncSession, context_id: int) -> Optional[dict]:
+    await ensure_schema(session)
+    result = await session.execute(
+        select(cognilabsai_instagram_media_context)
+        .where(cognilabsai_instagram_media_context.c.id == context_id)
+    )
+    row = result.mappings().first()
+    if not row:
+        return None
+    item = dict(row)
+    item["created_at"] = to_tashkent_datetime(item.get("created_at"))
+    item["updated_at"] = to_tashkent_datetime(item.get("updated_at"))
+    await session.rollback()
+    return item
+
+
+async def create_instagram_media_context(session: AsyncSession, payload: dict) -> dict:
+    await ensure_schema(session)
+    now = utcnow()
+    url = (payload.get("url") or "").strip() or None
+    values = {
+        "media_type": infer_instagram_media_type(url, payload.get("media_type")),
+        "url": url,
+        "normalized_url": normalize_instagram_url(url),
+        "media_id": (payload.get("media_id") or "").strip() or extract_asset_id_from_url(url),
+        "story_id": (payload.get("story_id") or "").strip() or None,
+        "title": (payload.get("title") or "").strip() or None,
+        "ai_description": (payload.get("ai_description") or "").strip(),
+        "is_active": bool(payload.get("is_active", True)),
+        "created_at": now,
+        "updated_at": now,
+    }
+    result = await session.execute(insert(cognilabsai_instagram_media_context).values(**values).returning(cognilabsai_instagram_media_context.c.id))
+    context_id = int(result.scalar_one())
+    await session.commit()
+    return await get_instagram_media_context(session, context_id)
+
+
+async def update_instagram_media_context(session: AsyncSession, context_id: int, payload: dict) -> Optional[dict]:
+    await ensure_schema(session)
+    current = await get_instagram_media_context(session, context_id)
+    if not current:
+        return None
+    values = {}
+    if "url" in payload:
+        url = (payload.get("url") or "").strip() or None
+        values["url"] = url
+        values["normalized_url"] = normalize_instagram_url(url)
+    if "media_type" in payload:
+        values["media_type"] = infer_instagram_media_type(values.get("url", current.get("url")), payload.get("media_type"))
+    if "media_id" in payload:
+        values["media_id"] = (payload.get("media_id") or "").strip() or None
+    if "story_id" in payload:
+        values["story_id"] = (payload.get("story_id") or "").strip() or None
+    if "title" in payload:
+        values["title"] = (payload.get("title") or "").strip() or None
+    if "ai_description" in payload:
+        values["ai_description"] = (payload.get("ai_description") or "").strip()
+    if "is_active" in payload:
+        values["is_active"] = bool(payload.get("is_active"))
+    values["updated_at"] = utcnow()
+    await session.execute(
+        update(cognilabsai_instagram_media_context)
+        .where(cognilabsai_instagram_media_context.c.id == context_id)
+        .values(**values)
+    )
+    await session.commit()
+    return await get_instagram_media_context(session, context_id)
+
+
+async def delete_instagram_media_context(session: AsyncSession, context_id: int) -> bool:
+    await ensure_schema(session)
+    result = await session.execute(
+        delete(cognilabsai_instagram_media_context)
+        .where(cognilabsai_instagram_media_context.c.id == context_id)
+    )
+    await session.commit()
+    return bool(result.rowcount)
 
 
 async def get_conversation(session: AsyncSession, conversation_id: int) -> Optional[dict]:
@@ -1795,6 +2013,16 @@ async def create_message(
         "unread_count": (cognilabsai_conversation.c.unread_count + 1) if is_client_message else cognilabsai_conversation.c.unread_count,
         "updated_at": utcnow(),
     }
+    if channel == "instagram" and is_client_message:
+        has_phone = bool(conversation_before and (conversation_before.get("lead_phone_number") or conversation_before.get("crm_customer_id") or conversation_before.get("lead_created")))
+        if has_phone:
+            conversation_updates["ai_follow_up_due_at"] = None
+        else:
+            conversation_updates["ai_follow_up_due_at"] = ts + timedelta(hours=INSTAGRAM_AI_FOLLOW_UP_DELAY_HOURS)
+            conversation_updates["ai_follow_up_sent_at"] = None
+    elif channel == "instagram" and sender_type == "ai":
+        if conversation_before and not (conversation_before.get("lead_phone_number") or conversation_before.get("crm_customer_id") or conversation_before.get("lead_created")):
+            conversation_updates["ai_follow_up_due_at"] = ts + timedelta(hours=INSTAGRAM_AI_FOLLOW_UP_DELAY_HOURS)
     if disable_follow_ups:
         conversation_updates.update(
             {
@@ -1807,6 +2035,7 @@ async def create_message(
                 "default_follow_up_last_step": 0,
                 "default_follow_up_due_at": None,
                 "default_follow_up_last_sent_at": None,
+                "ai_follow_up_due_at": None,
             }
         )
     await session.execute(
@@ -2142,6 +2371,56 @@ def extract_register_customer_arguments(message: dict) -> Optional[dict]:
     return None
 
 
+def extract_ai_tool_calls(message: dict) -> list[tuple[str, dict]]:
+    calls = []
+    function_call = message.get("function_call")
+    if function_call:
+        try:
+            calls.append((function_call.get("name") or "", json.loads(function_call.get("arguments") or "{}")))
+        except Exception:
+            calls.append((function_call.get("name") or "", {}))
+    for tool_call in message.get("tool_calls") or []:
+        function_obj = tool_call.get("function") or {}
+        try:
+            args = json.loads(function_obj.get("arguments") or "{}")
+        except Exception:
+            args = {}
+        calls.append((function_obj.get("name") or "", args))
+    return calls
+
+
+async def set_ai_conversation_stage(session: AsyncSession, conversation_id: int, *, stage: str, label: str = "", interest: str = "") -> None:
+    allowed = {
+        "new",
+        "greeted",
+        "interested_crm",
+        "interested_ai",
+        "interested_website",
+        "interested_automation",
+        "interested_other",
+        "phone_received",
+        "lead_created",
+        "not_fit",
+        "lost",
+    }
+    normalized_stage = (stage or "interested_other").strip().lower()
+    if normalized_stage not in allowed:
+        normalized_stage = "interested_other"
+    values = {
+        "ai_stage": normalized_stage,
+        "ai_stage_label": (label or normalized_stage.replace("_", " ").title())[:255],
+        "updated_at": utcnow(),
+    }
+    if interest:
+        values["ai_interest"] = interest[:255]
+    await session.execute(
+        update(cognilabsai_conversation)
+        .where(cognilabsai_conversation.c.id == conversation_id)
+        .values(**values)
+    )
+    await session.commit()
+
+
 def build_lead_confirmation(language: str) -> str:
     language = (language or "").lower()
     if "ru" in language:
@@ -2229,6 +2508,33 @@ async def send_cognilabs_lead_notification(
         print(f"[cognilabsai-lead-notify] customer_id={customer_id} error: {exc}", flush=True)
 
 
+async def update_crm_customer_from_lead_fields(
+    session: AsyncSession,
+    customer_id: int,
+    *,
+    full_name: str,
+    phone_number: str,
+    business_field: str,
+    scheduled_time: str,
+    conversation_id: int,
+) -> None:
+    values = {}
+    if full_name and not is_missing_required_value(full_name):
+        values["full_name"] = encrypt_text(full_name)
+    if phone_number and not is_missing_required_value(phone_number):
+        values["phone_number"] = encrypt_text(phone_number)
+    note_lines = [
+        f"Business field: {business_field}" if business_field else None,
+        f"Preferred call time: {scheduled_time}" if scheduled_time else None,
+        f"Source conversation: {conversation_id}",
+    ]
+    values["notes"] = "\n".join(line for line in note_lines if line)
+    values["assistant_name"] = "Cognilabs AI"
+    values["is_archived"] = False
+    await session.execute(update(customer).where(customer.c.id == customer_id).values(**values))
+    await session.commit()
+
+
 async def create_crm_customer_from_lead(
     session: AsyncSession,
     conversation_id: int,
@@ -2245,6 +2551,15 @@ async def create_crm_customer_from_lead(
 ) -> int:
     conversation = await get_conversation(session, conversation_id)
     if is_lead_cooldown_active(conversation) and conversation and conversation.get("crm_customer_id"):
+        await update_crm_customer_from_lead_fields(
+            session,
+            int(conversation["crm_customer_id"]),
+            full_name=full_name,
+            phone_number=phone_number,
+            business_field=business_field,
+            scheduled_time=scheduled_time,
+            conversation_id=conversation_id,
+        )
         return int(conversation["crm_customer_id"])
     notes_value = "\n".join(
         value for value in [
@@ -2311,19 +2626,24 @@ async def save_lead_state(
 ):
     conversation = await get_conversation(session, conversation_id)
     lead_created_at = utcnow()
+    values = {
+        "lead_created": True,
+        "lead_phone_number": phone_number,
+        "lead_business_field": business_field,
+        "lead_scheduled_time": scheduled_time,
+        "last_lead_created_at": lead_created_at,
+        "ai_follow_up_due_at": None,
+        "ai_stage": "lead_created",
+        "ai_stage_label": "Lead yaratildi",
+        "updated_at": utcnow(),
+    }
+    if full_name and not is_missing_required_value(full_name):
+        values["client_full_name"] = full_name
+        values["lead_full_name"] = full_name
     await session.execute(
         update(cognilabsai_conversation)
         .where(cognilabsai_conversation.c.id == conversation_id)
-        .values(
-            lead_created=True,
-            client_full_name=full_name,
-            lead_full_name=full_name,
-            lead_phone_number=phone_number,
-            lead_business_field=business_field,
-            lead_scheduled_time=scheduled_time,
-            last_lead_created_at=lead_created_at,
-            updated_at=utcnow(),
-        )
+        .values(**values)
     )
     await session.commit()
     if conversation:
@@ -2358,7 +2678,36 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         messages = [
             {"role": "system", "content": prompt},
             {"role": "system", "content": COGNILABSAI_BEHAVIOR_PROMPT},
+            {
+                "role": "system",
+                "content": (
+                    "Use tools proactively. If client gives phone number, call register_customer immediately even if name, business field, or call time is missing. "
+                    "If lead already exists and client later provides name, business field, or call time, call update_lead. "
+                    "Always call set_conversation_stage when chat state changes. "
+                    "Lead goal: explain the exact Instagram media context when present, answer customer question, then ask for phone number naturally."
+                ),
+            },
         ]
+        if conversation:
+            stage_context = (
+                f"Current AI stage: {conversation.get('ai_stage') or 'new'}; "
+                f"interest: {conversation.get('ai_interest') or ''}; "
+                f"saved phone: {conversation.get('lead_phone_number') or ''}; "
+                f"saved CRM customer id: {conversation.get('crm_customer_id') or ''}."
+            )
+            messages.append({"role": "system", "content": stage_context})
+            media_context_id = conversation.get("instagram_media_context_id")
+            if media_context_id:
+                media_context = await get_instagram_media_context(session, int(media_context_id))
+                if media_context:
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Instagram media context for this conversation: "
+                            f"type={media_context.get('media_type')}; title={media_context.get('title') or ''}; "
+                            f"description={media_context.get('ai_description')}; url={media_context.get('url') or ''}."
+                        ),
+                    })
         if is_lead_cooldown_active(conversation):
             # Cooldown aktiv — lead yaratilgan va hali vaqt o'tmagan
             messages.append({
@@ -2400,6 +2749,42 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             payload = apply_reasoning_defaults({
                 "model": model,
                 "messages": messages,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "update_lead",
+                            "description": "Update CRM lead attached to this conversation after client provides missing details",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "language": {"type": "string"},
+                                    "scheduled_time": {"type": "string"},
+                                    "client's_job": {"type": "string"},
+                                    "full_name": {"type": "string"},
+                                    "phone_number": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "set_conversation_stage",
+                            "description": "Move conversation through AI kanban status",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "stage": {"type": "string"},
+                                    "label": {"type": "string"},
+                                    "interest": {"type": "string"},
+                                },
+                                "required": ["stage"],
+                            },
+                        },
+                    },
+                ],
+                "tool_choice": "auto",
                 "max_completion_tokens": 1200,
             }, model)
         else:
@@ -2421,7 +2806,55 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                                     "full_name": {"type": "string"},
                                     "phone_number": {"type": "string"},
                                 },
-                                "required": ["language", "scheduled_time", "client's_job", "full_name", "phone_number"],
+                                "required": ["phone_number"],
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "update_lead",
+                            "description": "Update CRM lead attached to this conversation after client provides missing details",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "language": {"type": "string"},
+                                    "scheduled_time": {"type": "string"},
+                                    "client's_job": {"type": "string"},
+                                    "full_name": {"type": "string"},
+                                    "phone_number": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "set_conversation_stage",
+                            "description": "Move conversation through AI kanban status",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "stage": {
+                                        "type": "string",
+                                        "enum": [
+                                            "new",
+                                            "greeted",
+                                            "interested_crm",
+                                            "interested_ai",
+                                            "interested_website",
+                                            "interested_automation",
+                                            "interested_other",
+                                            "phone_received",
+                                            "lead_created",
+                                            "not_fit",
+                                            "lost",
+                                        ],
+                                    },
+                                    "label": {"type": "string"},
+                                    "interest": {"type": "string"},
+                                },
+                                "required": ["stage"],
                             },
                         },
                     }
@@ -2446,56 +2879,42 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         message = choices[0].get("message") or {}
         print("GPT Message Structure:", json.dumps(message, indent=2, ensure_ascii=False), flush=True)
 
-        tool_data = extract_register_customer_arguments(message)
-        if tool_data is not None:
-            language = (tool_data.get("language") or "uzbek").lower()
-            scheduled_time = (tool_data.get("scheduled_time") or "").strip()
-            business_field = (tool_data.get("client's_job") or "").strip()
-            full_name = (tool_data.get("full_name") or "").strip()
-            phone_number = normalize_uzbek_phone((tool_data.get("phone_number") or "").strip())
-
-            if is_missing_required_value(full_name):
-                if "uz" in language:
-                    return "Ismingizni ham yozib yuboring."
-                if "ru" in language:
-                    return "Пожалуйста, напишите своё имя."
-                return "Please also send your name."
-
-            if is_missing_required_value(business_field):
-                if "uz" in language:
-                    return "Qaysi sohada faoliyat yuritasiz?"
-                if "ru" in language:
-                    return "В какой сфере вы работаете?"
-                return "What field do you work in?"
-
-            if is_missing_required_value(scheduled_time):
-                if "uz" in language:
-                    return "Qo'ng'iroq uchun qaysi vaqt qulay bo'ladi?"
-                if "ru" in language:
-                    return "Во сколько вам удобно позвонить?"
-                return "What time is convenient for a call?"
-
-            if is_missing_required_value(phone_number):
-                if "uz" in language:
-                    return "Telefon raqamingizni yuboring."
-                if "ru" in language:
-                    return "Пожалуйста, отправьте номер телефона."
-                return "Please send your phone number."
-
-            try:
-                await save_lead_state(
+        tool_calls = extract_ai_tool_calls(message)
+        lead_tool_called = False
+        lead_language = "uzbek"
+        for tool_name, tool_data in tool_calls:
+            if tool_name == "set_conversation_stage":
+                await set_ai_conversation_stage(
                     session,
                     conversation_id,
-                    full_name=full_name,
-                    phone_number=phone_number,
-                    business_field=business_field,
-                    scheduled_time=scheduled_time,
-                    language=language,
+                    stage=tool_data.get("stage") or "interested_other",
+                    label=tool_data.get("label") or "",
+                    interest=tool_data.get("interest") or "",
                 )
-            except Exception as lead_exc:
-                print(f"[cognilabsai] save_lead_state error (conversation {conversation_id}): {lead_exc}", flush=True)
-            # Tool call topildi — faqat confirmation qaytariladi, boshqa hech narsa emas
-            return build_lead_confirmation(language)
+            if tool_name in ("register_customer", "update_lead"):
+                language = (tool_data.get("language") or "uzbek").lower()
+                scheduled_time = (tool_data.get("scheduled_time") or "").strip()
+                business_field = (tool_data.get("client's_job") or "").strip()
+                full_name = (tool_data.get("full_name") or "").strip()
+                phone_number = normalize_uzbek_phone((tool_data.get("phone_number") or (conversation or {}).get("lead_phone_number") or "").strip())
+                if is_missing_required_value(phone_number):
+                    continue
+                try:
+                    await save_lead_state(
+                        session,
+                        conversation_id,
+                        full_name=full_name,
+                        phone_number=phone_number,
+                        business_field=business_field,
+                        scheduled_time=scheduled_time,
+                        language=language,
+                    )
+                    lead_tool_called = True
+                    lead_language = language
+                except Exception as lead_exc:
+                    print(f"[cognilabsai] save_lead_state error (conversation {conversation_id}): {lead_exc}", flush=True)
+        if lead_tool_called:
+            return build_lead_confirmation(lead_language)
 
         # Tool call yo'q — oddiy text reply
         reply_text = sanitize_ai_reply_text(extract_chat_message_text(message))
@@ -2575,6 +2994,141 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
     return None
 
 
+MEDIA_ID_KEYS = ("ig_post_media_id", "ig_reel_media_id", "reel_video_id", "reel_media_id", "media_id", "media_share_id", "media_product_id", "story_media_id", "story_id", "id", "source_id", "target_id")
+URL_KEYS = ("source_url", "story_media_url", "url", "media_url", "permalink", "link", "share_url")
+
+
+def pick_first_value(data: Optional[dict], keys: tuple[str, ...]) -> Optional[str]:
+    if not isinstance(data, dict):
+        return None
+    for key in keys:
+        value = data.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def extract_instagram_webhook_message(item: dict) -> dict:
+    message = item.get("message") or {}
+    referral = message.get("referral") or item.get("referral") or {}
+    reply_to = message.get("reply_to") or {}
+    reply_story = reply_to.get("story") if isinstance(reply_to, dict) else {}
+    attachments = message.get("attachments") or []
+    text_value = (message.get("text") or "").strip()
+    media_id = pick_first_value(referral, ("media_id", "source_id", "id"))
+    story_id = pick_first_value(referral, ("story_id",))
+    source_url = pick_first_value(referral, URL_KEYS)
+    attachment_items = []
+    event_type = "message"
+    for attachment in attachments:
+        payload = attachment.get("payload") or {}
+        attachment_type = attachment.get("type")
+        attachment_url = pick_first_value(payload, URL_KEYS)
+        attachment_media_id = pick_first_value(payload, MEDIA_ID_KEYS)
+        if attachment_type == "ig_story":
+            event_type = "story_send"
+            story_id = story_id or attachment_media_id
+            media_id = media_id or attachment_media_id
+            source_url = source_url or attachment_url
+        elif attachment_type:
+            event_type = "media_send"
+            media_id = media_id or attachment_media_id
+            source_url = source_url or attachment_url
+        attachment_items.append({"type": attachment_type, "url": attachment_url, "media_id": attachment_media_id})
+    if reply_to:
+        event_type = "story_reply"
+        story_id = story_id or pick_first_value(reply_to, ("story_id", "id", "media_id"))
+        media_id = media_id or story_id or pick_first_value(reply_to, MEDIA_ID_KEYS)
+        source_url = source_url or pick_first_value(reply_to, URL_KEYS)
+    if isinstance(reply_story, dict):
+        event_type = "story_reply"
+        story_id = story_id or str(reply_story.get("id") or "")
+        media_id = media_id or story_id
+        source_url = source_url or str(reply_story.get("url") or "")
+    asset_id = extract_asset_id_from_url(source_url)
+    media_id = media_id or asset_id
+    story_id = story_id or asset_id
+    if event_type == "message" and (source_url or media_id):
+        event_type = "media_send"
+    return {
+        "event_type": event_type,
+        "text": text_value,
+        "message_id": message.get("mid"),
+        "media_id": media_id or None,
+        "story_id": story_id or None,
+        "story_url": source_url or None,
+        "normalized_url": normalize_instagram_url(source_url),
+        "attachments": attachment_items,
+        "referral": referral,
+        "reply_to": reply_to,
+    }
+
+
+async def find_instagram_media_context(session: AsyncSession, extracted: dict) -> Optional[dict]:
+    media_id = (extracted.get("media_id") or "").strip()
+    story_id = (extracted.get("story_id") or "").strip()
+    normalized_url = normalize_instagram_url(extracted.get("story_url"))
+    asset_id = extract_asset_id_from_url(extracted.get("story_url"))
+    keys = [value for value in [media_id, story_id, asset_id] if value]
+    if keys:
+        result = await session.execute(
+            select(cognilabsai_instagram_media_context)
+            .where(
+                cognilabsai_instagram_media_context.c.is_active == True,
+                or_(
+                    cognilabsai_instagram_media_context.c.media_id.in_(keys),
+                    cognilabsai_instagram_media_context.c.story_id.in_(keys),
+                ),
+            )
+            .order_by(cognilabsai_instagram_media_context.c.updated_at.desc())
+            .limit(1)
+        )
+        row = result.mappings().first()
+        if row:
+            return dict(row)
+    if normalized_url:
+        result = await session.execute(
+            select(cognilabsai_instagram_media_context)
+            .where(
+                cognilabsai_instagram_media_context.c.is_active == True,
+                or_(
+                    cognilabsai_instagram_media_context.c.normalized_url == normalized_url,
+                    cognilabsai_instagram_media_context.c.url == normalized_url,
+                ),
+            )
+            .order_by(cognilabsai_instagram_media_context.c.updated_at.desc())
+            .limit(1)
+        )
+        row = result.mappings().first()
+        if row:
+            return dict(row)
+    return None
+
+
+def build_instagram_media_message_text(extracted: dict, media_context: Optional[dict]) -> str:
+    parts = []
+    text_value = (extracted.get("text") or "").strip()
+    if text_value:
+        parts.append(text_value)
+    event_type = extracted.get("event_type") or "media_send"
+    if event_type in ("story_reply", "story_send"):
+        parts.append("Mijoz Instagram story bo'yicha yozdi.")
+    elif event_type == "media_send":
+        parts.append("Mijoz Instagram post/reel/media bo'yicha yozdi.")
+    if extracted.get("story_url"):
+        parts.append(f"Instagram media link: {extracted['story_url']}")
+    if media_context:
+        title = (media_context.get("title") or "").strip()
+        description = (media_context.get("ai_description") or "").strip()
+        if title:
+            parts.append(f"Media nomi: {title}")
+        if description:
+            parts.append(f"AI media izohi: {description}")
+    elif event_type != "message":
+        parts.append("Tizim izohi: yuborilgan Instagram media bazadagi story/post/reel contextiga bog'lanmagan.")
+    return "\n".join(part for part in parts if part).strip()
+
+
 async def process_instagram_webhook_payload(session: AsyncSession, payload: dict):
     await ensure_schema(session)
     entries = payload.get("entry") or []
@@ -2586,17 +3140,47 @@ async def process_instagram_webhook_payload(session: AsyncSession, payload: dict
                 continue
             if message_data.get("is_echo"):
                 continue
-            text_value = message_data.get("text")
+            extracted = extract_instagram_webhook_message(item)
+            sender_id = str(item.get("sender", {}).get("id") or "")
+            recipient_id = str(item.get("recipient", {}).get("id") or "")
+            if not sender_id or not recipient_id:
+                continue
+            media_context = await find_instagram_media_context(session, extracted)
+            text_value = build_instagram_media_message_text(extracted, media_context)
             if not text_value:
                 continue
-            sender_id = str(item["sender"]["id"])
-            recipient_id = str(item["recipient"]["id"])
+            await session.execute(
+                insert(cognilabsai_instagram_webhook_event).values(
+                    event_type=extracted.get("event_type") or "message",
+                    sender_id=sender_id,
+                    recipient_id=recipient_id,
+                    message_id=extracted.get("message_id"),
+                    text=extracted.get("text"),
+                    media_id=extracted.get("media_id"),
+                    story_id=extracted.get("story_id"),
+                    story_url=extracted.get("story_url"),
+                    extracted=json_dumps(extracted),
+                    raw_payload=json_dumps(item),
+                    created_at=utcnow(),
+                )
+            )
             conversation = await upsert_conversation(
                 session,
                 channel="instagram",
                 client_external_id=sender_id,
                 instagram_business_id=recipient_id,
             )
+            if media_context:
+                await session.execute(
+                    update(cognilabsai_conversation)
+                    .where(cognilabsai_conversation.c.id == conversation["id"])
+                    .values(
+                        instagram_media_context_id=media_context["id"],
+                        ai_interest=(media_context.get("title") or media_context.get("media_type") or "instagram media")[:255],
+                        updated_at=utcnow(),
+                    )
+                )
+                await session.commit()
             await create_message(
                 session,
                 conversation_id=conversation["id"],
@@ -2604,7 +3188,9 @@ async def process_instagram_webhook_payload(session: AsyncSession, payload: dict
                 sender_type="client",
                 text_value=text_value,
                 client_external_id=sender_id,
-                instagram_message_id=message_data.get("mid"),
+                instagram_message_id=extracted.get("message_id"),
+                media_type=extracted.get("event_type"),
+                media_url=extracted.get("story_url"),
             )
             try:
                 await maybe_send_ai_reply(session, conversation["id"])
@@ -2912,33 +3498,150 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
     return True
 
 
+async def generate_instagram_ai_follow_up(session: AsyncSession, conversation_id: int) -> Optional[str]:
+    conversation = await get_conversation(session, conversation_id)
+    if not conversation or conversation.get("crm_customer_id") or conversation.get("lead_phone_number") or conversation.get("lead_created"):
+        return None
+    config = await get_integration_config(session)
+    api_key = config.get("openai_api_key")
+    if not api_key:
+        return None
+    base_url = (config.get("openai_base_url") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
+    model = config.get("openai_model") or DEFAULT_OPENAI_MODEL
+    history = await get_messages(session, conversation_id, limit=40, offset=0)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are Alisher from Cognilabs. Generate one short Instagram DM follow-up in the customer's language. "
+                "The client stopped replying and has not sent phone number. Continue from exact conversation context. "
+                "Do not sound robotic. Mention their interest if clear. Ask one natural question or ask for phone number softly. "
+                "Max 2 short sentences."
+            ),
+        }
+    ]
+    if conversation.get("instagram_media_context_id"):
+        media_context = await get_instagram_media_context(session, int(conversation["instagram_media_context_id"]))
+        if media_context:
+            messages.append({
+                "role": "system",
+                "content": f"Instagram media context: {media_context.get('title') or ''}. {media_context.get('ai_description') or ''}",
+            })
+    for item in history:
+        role = "assistant" if item["sender_type"] in ("ai", "operator") else "user"
+        messages.append({"role": role, "content": item["text"]})
+    payload = apply_reasoning_defaults({
+        "model": model,
+        "messages": messages,
+        "max_completion_tokens": 250,
+    }, model)
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        if response.status_code >= 400:
+            print(f"OpenAI follow-up error {response.status_code}: {response.text}", flush=True)
+            return None
+        data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    return sanitize_ai_reply_text(extract_chat_message_text(choices[0].get("message") or {}))
+
+
+async def send_instagram_ai_follow_up_message(session: AsyncSession, conversation_id: int) -> bool:
+    conversation = await get_conversation(session, conversation_id)
+    if not conversation or conversation.get("channel") != "instagram":
+        return False
+    if conversation.get("crm_customer_id") or conversation.get("lead_phone_number") or conversation.get("lead_created"):
+        await session.execute(
+            update(cognilabsai_conversation)
+            .where(cognilabsai_conversation.c.id == conversation_id)
+            .values(ai_follow_up_due_at=None, updated_at=utcnow())
+        )
+        await session.commit()
+        return False
+    config = await get_integration_config(session)
+    access_token = config.get("instagram_access_token")
+    if not access_token:
+        return False
+    message = await generate_instagram_ai_follow_up(session, conversation_id)
+    if not message:
+        return False
+    sent_at = utcnow()
+    instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
+    await create_message(
+        session,
+        conversation_id=conversation_id,
+        channel="instagram",
+        sender_type="ai",
+        text_value=message,
+        client_external_id=conversation["client_external_id"],
+        instagram_message_id=instagram_message_id,
+        created_at=sent_at,
+    )
+    await session.execute(
+        update(cognilabsai_conversation)
+        .where(cognilabsai_conversation.c.id == conversation_id)
+        .values(ai_follow_up_due_at=None, ai_follow_up_sent_at=sent_at, updated_at=utcnow())
+    )
+    await session.commit()
+    return True
+
+
 async def process_pending_follow_ups():
-    if not FOLLOW_UPS_ENABLED:
-        return
     async with async_session_maker() as session:
         now = utcnow()
-        manual_result = await session.execute(
-            select(cognilabsai_conversation.c.id)
-            .where(
-                cognilabsai_conversation.c.follow_up_enabled == True,
-                cognilabsai_conversation.c.follow_up_due_at.is_not(None),
-                cognilabsai_conversation.c.follow_up_due_at <= now,
-            )
-            .order_by(cognilabsai_conversation.c.follow_up_due_at.asc())
-        )
-        manual_conversation_ids = [row[0] for row in manual_result.all()]
-        default_result = await session.execute(
+        ai_result = await session.execute(
             select(cognilabsai_conversation.c.id)
             .where(
                 cognilabsai_conversation.c.channel == "instagram",
                 cognilabsai_conversation.c.crm_customer_id.is_(None),
-                cognilabsai_conversation.c.follow_up_enabled == False,
-                cognilabsai_conversation.c.default_follow_up_due_at.is_not(None),
-                cognilabsai_conversation.c.default_follow_up_due_at <= now,
+                cognilabsai_conversation.c.lead_created == False,
+                cognilabsai_conversation.c.lead_phone_number.is_(None),
+                cognilabsai_conversation.c.ai_follow_up_due_at.is_not(None),
+                cognilabsai_conversation.c.ai_follow_up_due_at <= now,
             )
-            .order_by(cognilabsai_conversation.c.default_follow_up_due_at.asc())
+            .order_by(cognilabsai_conversation.c.ai_follow_up_due_at.asc())
+            .limit(50)
         )
-        default_conversation_ids = [row[0] for row in default_result.all()]
+        ai_conversation_ids = [row[0] for row in ai_result.all()] if INSTAGRAM_AI_FOLLOW_UP_ENABLED else []
+        if not FOLLOW_UPS_ENABLED:
+            manual_conversation_ids = []
+            default_conversation_ids = []
+        else:
+            manual_result = await session.execute(
+                select(cognilabsai_conversation.c.id)
+                .where(
+                    cognilabsai_conversation.c.follow_up_enabled == True,
+                    cognilabsai_conversation.c.follow_up_due_at.is_not(None),
+                    cognilabsai_conversation.c.follow_up_due_at <= now,
+                )
+                .order_by(cognilabsai_conversation.c.follow_up_due_at.asc())
+            )
+            manual_conversation_ids = [row[0] for row in manual_result.all()]
+            default_result = await session.execute(
+                select(cognilabsai_conversation.c.id)
+                .where(
+                    cognilabsai_conversation.c.channel == "instagram",
+                    cognilabsai_conversation.c.crm_customer_id.is_(None),
+                    cognilabsai_conversation.c.follow_up_enabled == False,
+                    cognilabsai_conversation.c.default_follow_up_due_at.is_not(None),
+                    cognilabsai_conversation.c.default_follow_up_due_at <= now,
+                )
+                .order_by(cognilabsai_conversation.c.default_follow_up_due_at.asc())
+            )
+            default_conversation_ids = [row[0] for row in default_result.all()]
+    for conversation_id in ai_conversation_ids:
+        try:
+            async with async_session_maker() as session:
+                await send_instagram_ai_follow_up_message(session, conversation_id)
+        except Exception as exc:
+            print(f"AI follow-up send error for conversation {conversation_id}: {exc}", flush=True)
+    if not FOLLOW_UPS_ENABLED:
+        return
     for conversation_id in manual_conversation_ids:
         try:
             async with async_session_maker() as session:
@@ -2954,7 +3657,7 @@ async def process_pending_follow_ups():
 
 
 async def follow_up_scheduler_loop():
-    if not FOLLOW_UPS_ENABLED:
+    if not (FOLLOW_UPS_ENABLED or INSTAGRAM_AI_FOLLOW_UP_ENABLED):
         return
     while True:
         try:
@@ -3122,7 +3825,7 @@ async def startup_cognilabsai():
         await refresh_global_follow_up_schedules(session)
         await refresh_default_instagram_follow_up_schedules(session)
     await telegram_userbot_manager.start()
-    if FOLLOW_UPS_ENABLED and (follow_up_scheduler_task is None or follow_up_scheduler_task.done()):
+    if (FOLLOW_UPS_ENABLED or INSTAGRAM_AI_FOLLOW_UP_ENABLED) and (follow_up_scheduler_task is None or follow_up_scheduler_task.done()):
         follow_up_scheduler_task = asyncio.create_task(follow_up_scheduler_loop())
 
 
