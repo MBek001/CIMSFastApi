@@ -149,6 +149,7 @@ class CustomerResponse(BaseModel):
     created_at: str
     is_archived: Optional[bool] = None
     additional_notes: Optional[List[CustomerNoteResponse]] = None
+    lead_response_metrics: Optional[dict] = None
 
     class Config:
         from_attributes = True

@@ -25,6 +25,7 @@ from utils.page_permissions import (
     validate_page_names,
 )
 from utils.audit import log_audit_event
+from utils.crm_lead_response import get_lead_response_dashboard_stats
 
 from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
 from models.user_models import  user_payment
@@ -335,6 +336,7 @@ async def ceo_dashboard(
     messages_result = await session.execute(select(func.count(message.c.id)))
     messages_count = messages_result.scalar()
     instagram_media_stats = await _get_instagram_media_dashboard_stats(session)
+    lead_response_stats = await get_lead_response_dashboard_stats(session)
 
     # Har bir user uchun permissions olish
     page_rows = await get_all_pages(session)
@@ -369,6 +371,7 @@ async def ceo_dashboard(
             "active_user_count": active_user_count,
             "inactive_user_count": inactive_user_count,
             **instagram_media_stats,
+            **lead_response_stats,
         }
     )
 

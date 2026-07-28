@@ -43,6 +43,7 @@ from utils.ai_summary import (
     infer_recall_time_from_notes_ai,
 )
 from utils.google_calendar import sync_customer_recall_event, delete_customer_recall_event
+from utils.crm_lead_response import get_customer_lead_response_metric, get_lead_response_metrics_for_customers
 from config import CRM_CUSTOMER_API_KEY
 
 router = APIRouter(prefix="/crm", tags=['Sales CRM'])
@@ -501,6 +502,7 @@ async def get_latest_customers(
     if not customers:
         raise HTTPException(status_code=404, detail="Mijozlar topilmadi")
 
+    lead_response_metrics = await get_lead_response_metrics_for_customers(session, customers)
     response_list = []
     for c in customers:
         audio_url = None
@@ -523,7 +525,8 @@ async def get_latest_customers(
             conversation_language=c.conversation_language,
             audio_url=audio_url,                        # СЂСџСџСћ toРІР‚ВgРІР‚Вri joyda
             recall_time=_from_utc_naive_to_uz_iso(c.recall_time),
-            created_at=c.created_at.isoformat()
+            created_at=c.created_at.isoformat(),
+            lead_response_metrics=lead_response_metrics.get(int(c.id)),
         ))
 
     return response_list
@@ -548,6 +551,7 @@ async def get_customer_detail(
         if c.audio_file_id:
             audio_url = f"https://api.project.cims.cognilabs.org/crm/customers/audio/{c.audio_file_id}"
         additional_notes = [_serialize_customer_note(row) for row in await _fetch_customer_note_rows(session, customer_id)]
+        lead_response_metrics = await get_customer_lead_response_metric(session, c)
 
         # СЂСџВ§В  Deshifrlangan maРІР‚в„ўlumotlar
         return CustomerResponse(
@@ -574,6 +578,7 @@ async def get_customer_detail(
             created_at=c.created_at.isoformat(),
             is_archived=getattr(c, "is_archived", None),
             additional_notes=additional_notes,
+            lead_response_metrics=lead_response_metrics,
         )
 
     except HTTPException as e:
@@ -820,6 +825,7 @@ async def crm_dashboard(
     
     customers_result = await session.execute(base_query)
     customers_data = customers_result.fetchall()
+    lead_response_metrics = await get_lead_response_metrics_for_customers(session, customers_data)
 
     # СЂСџвЂќвЂњ Deshifrlab va filter qilish (Python-da)
     filtered_customers = []
@@ -880,6 +886,7 @@ async def crm_dashboard(
             "recall_time": _from_utc_naive_to_uz_iso(c.recall_time),
             "created_at": c.created_at.isoformat(),
             "is_archived": getattr(c, "is_archived", None),
+            "lead_response_metrics": lead_response_metrics.get(int(c.id)),
         })
 
     total_items = len(filtered_customers)

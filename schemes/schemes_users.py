@@ -177,6 +177,23 @@ class DashboardStatistics(BaseModel):
     instagram_media_unknown_sent_count: int = 0
     instagram_media_unknown_lead_count: int = 0
     instagram_media_posts: List[dict] = Field(default_factory=list)
+    lead_response_limit_minutes: int = 5
+    lead_response_total_count: int = 0
+    lead_response_status_changed_count: int = 0
+    lead_response_on_time_count: int = 0
+    lead_response_late_count: int = 0
+    lead_response_no_status_change_count: int = 0
+    lead_response_note_written_count: int = 0
+    lead_response_note_missing_count: int = 0
+    lead_response_status_changed_without_note_count: int = 0
+    lead_response_average_minutes: Optional[float] = None
+    lead_response_average_human: Optional[str] = None
+    lead_response_average_with_note_minutes: Optional[float] = None
+    lead_response_average_with_note_human: Optional[str] = None
+    lead_response_average_note_minutes: Optional[float] = None
+    lead_response_average_note_human: Optional[str] = None
+    lead_response_average_late_minutes: Optional[float] = None
+    lead_response_average_late_human: Optional[str] = None
 
 class DashboardResponse(BaseModel):
     users: List[dict]
