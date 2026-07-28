@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import shutil
 import subprocess
@@ -34,6 +35,7 @@ except Exception:
 backup_bot_app: Optional[Application] = None
 backup_lock = asyncio.Lock()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _chat_target(chat_id: str):
