@@ -60,6 +60,26 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_VERIFY_TOKEN = "cognilabsai-verify-token"
 DEFAULT_WS_KEY = "cognilabsai-websocket-key"
 LEAD_COOLDOWN_HOURS = 24
+AI_STAGE_LABELS = {
+    "new_request": "Yangi murojat",
+    "greeted": "Salomlashildi",
+    "field_provided": "Sohasini yozdi",
+    "field_years_provided": "Sohadagi yil etildi",
+    "phone_collected": "Telefon olindi",
+    "lead_created": "Lead yaratildi",
+    "lost": "Yoqotildi",
+}
+AI_STAGE_VALUES = tuple(AI_STAGE_LABELS.keys())
+AI_STAGE_ALIASES = {
+    "new": "new_request",
+    "interested_crm": "field_provided",
+    "interested_ai": "field_provided",
+    "interested_website": "field_provided",
+    "interested_automation": "field_provided",
+    "interested_other": "field_years_provided",
+    "phone_received": "phone_collected",
+    "not_fit": "lost",
+}
 COGNILABSAI_BEHAVIOR_PROMPT = (
     "When the user provides all needed details (name, business field/job, phone, preferred call time), "
     "you must call the register_customer tool once. Otherwise continue the script and ask only one question per message. "
@@ -903,6 +923,35 @@ async def ensure_schema(session: AsyncSession):
             SET last_lead_created_at = updated_at
             WHERE lead_created = TRUE
               AND last_lead_created_at IS NULL
+        """))
+        await session.execute(text("""
+            UPDATE cognilabsai_conversation
+            SET
+                ai_stage = CASE
+                    WHEN ai_stage = 'new' THEN 'new_request'
+                    WHEN ai_stage IN ('interested_crm', 'interested_ai', 'interested_website', 'interested_automation') THEN 'field_provided'
+                    WHEN ai_stage = 'interested_other' THEN 'field_years_provided'
+                    WHEN ai_stage = 'phone_received' THEN 'phone_collected'
+                    WHEN ai_stage = 'not_fit' THEN 'lost'
+                    ELSE ai_stage
+                END,
+                ai_stage_label = CASE
+                    WHEN ai_stage = 'new' THEN 'Yangi murojat'
+                    WHEN ai_stage = 'greeted' THEN 'Salomlashildi'
+                    WHEN ai_stage IN ('interested_crm', 'interested_ai', 'interested_website', 'interested_automation') THEN 'Sohasini yozdi'
+                    WHEN ai_stage = 'interested_other' THEN 'Sohadagi yil etildi'
+                    WHEN ai_stage = 'phone_received' THEN 'Telefon olindi'
+                    WHEN ai_stage = 'lead_created' THEN 'Lead yaratildi'
+                    WHEN ai_stage IN ('not_fit', 'lost') THEN 'Yoqotildi'
+                    ELSE ai_stage_label
+                END
+            WHERE ai_stage IN ('new', 'greeted', 'interested_crm', 'interested_ai', 'interested_website', 'interested_automation', 'interested_other', 'phone_received', 'lead_created', 'not_fit', 'lost')
+        """))
+        await session.execute(text("""
+            UPDATE cognilabsai_conversation
+            SET ai_stage = 'new_request',
+                ai_stage_label = 'Yangi murojat'
+            WHERE ai_stage IS NULL
         """))
         await session.execute(text("""
             CREATE TABLE IF NOT EXISTS cognilabsai_message (
@@ -1818,6 +1867,8 @@ async def upsert_conversation(
         last_message_preview=None,
         last_operator_user_id=None,
         last_operator_name=None,
+        ai_stage="new_request",
+        ai_stage_label=AI_STAGE_LABELS["new_request"],
         is_imported=is_imported,
         created_at=now,
         updated_at=now,
@@ -2436,25 +2487,13 @@ def extract_ai_tool_calls(message: dict) -> list[tuple[str, dict]]:
 
 
 async def set_ai_conversation_stage(session: AsyncSession, conversation_id: int, *, stage: str, label: str = "", interest: str = "") -> None:
-    allowed = {
-        "new",
-        "greeted",
-        "interested_crm",
-        "interested_ai",
-        "interested_website",
-        "interested_automation",
-        "interested_other",
-        "phone_received",
-        "lead_created",
-        "not_fit",
-        "lost",
-    }
-    normalized_stage = (stage or "interested_other").strip().lower()
-    if normalized_stage not in allowed:
-        normalized_stage = "interested_other"
+    normalized_stage = (stage or "new_request").strip().lower()
+    normalized_stage = AI_STAGE_ALIASES.get(normalized_stage, normalized_stage)
+    if normalized_stage not in AI_STAGE_LABELS:
+        normalized_stage = "new_request"
     values = {
         "ai_stage": normalized_stage,
-        "ai_stage_label": (label or normalized_stage.replace("_", " ").title())[:255],
+        "ai_stage_label": (label or AI_STAGE_LABELS[normalized_stage])[:255],
         "updated_at": utcnow(),
     }
     if interest:
@@ -2845,13 +2884,14 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                     "If lead already exists and client later provides name, business field, or call time, call update_lead. "
                     "Always call set_conversation_stage when chat state changes. "
                     "If you call only set_conversation_stage, you still must include a customer-facing text reply in content. "
+                    "Allowed AI stages only: new_request=Yangi murojat, greeted=Salomlashildi, field_provided=Sohasini yozdi, field_years_provided=Sohadagi yil etildi, phone_collected=Telefon olindi, lead_created=Lead yaratildi, lost=Yoqotildi. "
                     "Lead goal: explain the exact Instagram media context when present, answer customer question, then ask for phone number naturally."
                 ),
             },
         ]
         if conversation:
             stage_context = (
-                f"Current AI stage: {conversation.get('ai_stage') or 'new'}; "
+                f"Current AI stage: {conversation.get('ai_stage') or 'new_request'}; "
                 f"interest: {conversation.get('ai_interest') or ''}; "
                 f"saved phone: {conversation.get('lead_phone_number') or ''}; "
                 f"saved CRM customer id: {conversation.get('crm_customer_id') or ''}."
@@ -2936,7 +2976,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                             "parameters": {
                                 "type": "object",
                                 "properties": {
-                                    "stage": {"type": "string"},
+                                    "stage": {"type": "string", "enum": list(AI_STAGE_VALUES)},
                                     "label": {"type": "string"},
                                     "interest": {"type": "string"},
                                 },
@@ -2998,19 +3038,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                                 "properties": {
                                     "stage": {
                                         "type": "string",
-                                        "enum": [
-                                            "new",
-                                            "greeted",
-                                            "interested_crm",
-                                            "interested_ai",
-                                            "interested_website",
-                                            "interested_automation",
-                                            "interested_other",
-                                            "phone_received",
-                                            "lead_created",
-                                            "not_fit",
-                                            "lost",
-                                        ],
+                                        "enum": list(AI_STAGE_VALUES),
                                     },
                                     "label": {"type": "string"},
                                     "interest": {"type": "string"},
@@ -3048,7 +3076,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                 await set_ai_conversation_stage(
                     session,
                     conversation_id,
-                    stage=tool_data.get("stage") or "interested_other",
+                    stage=tool_data.get("stage") or "new_request",
                     label=tool_data.get("label") or "",
                     interest=tool_data.get("interest") or "",
                 )
