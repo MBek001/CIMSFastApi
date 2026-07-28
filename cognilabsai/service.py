@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import hashlib
+import html
 import io
 import json
 import os
@@ -725,6 +726,7 @@ async def ensure_schema(session: AsyncSession):
             lead_business_field VARCHAR(255) NULL,
             lead_scheduled_time VARCHAR(255) NULL,
             last_lead_created_at TIMESTAMP NULL,
+            lead_notification_message_id INTEGER NULL,
             unread_count INTEGER NOT NULL DEFAULT 0,
             pause_reason VARCHAR(64),
             paused_until TIMESTAMP NULL,
@@ -784,6 +786,10 @@ async def ensure_schema(session: AsyncSession):
         await session.execute(text("""
             ALTER TABLE cognilabsai_conversation
             ADD COLUMN IF NOT EXISTS last_lead_created_at TIMESTAMP NULL
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_conversation
+            ADD COLUMN IF NOT EXISTS lead_notification_message_id INTEGER NULL
         """))
         await session.execute(text("""
             ALTER TABLE cognilabsai_conversation
@@ -2495,39 +2501,38 @@ async def send_cognilabs_lead_notification(
     business_field: str,
     scheduled_time: str,
     conversation_id: int,
-) -> None:
+) -> Optional[int]:
     token = (config.get("cognilabs_telegram_token") or "").strip()
     channel_id = (config.get("cognilabs_channel_id") or "").strip()
     if not token or not channel_id:
-        return
-    lines = [
-        "🆕 <b>Yangi lead keldi</b>",
-        f"👤 <b>Ism:</b> {full_name}",
-        f"📞 <b>Telefon:</b> {phone_number}",
-        f"🌐 <b>Platforma:</b> {platform}",
-    ]
-    if username:
-        lines.append(f"🔗 <b>Username:</b> {username}")
-    if business_field:
-        lines.append(f"💼 <b>Yo'nalish:</b> {business_field}")
-    if scheduled_time:
-        lines.append(f"🕒 <b>Qulay vaqt:</b> {scheduled_time}")
-    lines.append(f"🆔 <b>Lead ID:</b> {customer_id}")
-    lines.append(f"💬 <b>Conversation ID:</b> {conversation_id}")
-    reply_markup = None
-    chat_url = build_public_chat_url(conversation_id, config.get("frontend_base_url"))
-    if chat_url:
-        reply_markup = {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "Suhbatni ko'rish",
-                        "url": chat_url,
-                    }
-                ]
-            ]
-        }
-    bot = Bot(
+        return None
+    text_value = build_cognilabs_lead_notification_text(
+        customer_id=customer_id,
+        full_name=full_name,
+        phone_number=phone_number,
+        platform=platform,
+        username=username,
+        business_field=business_field,
+        scheduled_time=scheduled_time,
+        conversation_id=conversation_id,
+    )
+    reply_markup = build_cognilabs_lead_notification_reply_markup(conversation_id, config)
+    bot = build_cognilabs_lead_bot(token)
+    try:
+        message = await bot.send_message(
+            chat_id=channel_id,
+            text=text_value,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        return int(message.message_id)
+    except Exception as exc:
+        print(f"[cognilabsai-lead-notify] customer_id={customer_id} error: {exc}", flush=True)
+        return None
+
+
+def build_cognilabs_lead_bot(token: str) -> Bot:
+    return Bot(
         token=token,
         request=HTTPXRequest(
             connection_pool_size=8,
@@ -2537,15 +2542,98 @@ async def send_cognilabs_lead_notification(
             pool_timeout=30.0,
         ),
     )
+
+
+def build_cognilabs_lead_notification_reply_markup(conversation_id: int, config: dict):
+    chat_url = build_public_chat_url(conversation_id, config.get("frontend_base_url"))
+    if not chat_url:
+        return None
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Suhbatni ko'rish",
+                    "url": chat_url,
+                }
+            ]
+        ]
+    }
+
+
+def build_cognilabs_lead_notification_text(
+    *,
+    customer_id: int,
+    full_name: str,
+    phone_number: str,
+    platform: str,
+    username: Optional[str],
+    business_field: str,
+    scheduled_time: str,
+    conversation_id: int,
+) -> str:
+    def e(value: Optional[str]) -> str:
+        return html.escape(str(value or "").strip())
+
+    lines = [
+        "🆕 <b>Yangi lead keldi</b>",
+        f"👤 <b>Ism:</b> {e(full_name)}",
+        f"📞 <b>Telefon:</b> {e(phone_number)}",
+        f"🌐 <b>Platforma:</b> {e(platform)}",
+    ]
+    if username:
+        lines.append(f"🔗 <b>Username:</b> {e(username)}")
+    if business_field:
+        lines.append(f"💼 <b>Yo'nalish:</b> {e(business_field)}")
+    if scheduled_time:
+        lines.append(f"🕒 <b>Qulay vaqt:</b> {e(scheduled_time)}")
+    lines.append(f"🆔 <b>Lead ID:</b> {customer_id}")
+    lines.append(f"💬 <b>Conversation ID:</b> {conversation_id}")
+    return "\n".join(lines)
+
+
+async def edit_cognilabs_lead_notification(
+    session: AsyncSession,
+    conversation_id: int,
+    customer_id: int,
+    *,
+    full_name: str,
+    phone_number: str,
+    platform: str,
+    username: Optional[str],
+    business_field: str,
+    scheduled_time: str,
+) -> None:
+    conversation = await get_conversation(session, conversation_id)
+    message_id = conversation.get("lead_notification_message_id") if conversation else None
+    if not message_id:
+        return
+    config = await get_integration_config(session)
+    token = (config.get("cognilabs_telegram_token") or "").strip()
+    channel_id = (config.get("cognilabs_channel_id") or "").strip()
+    if not token or not channel_id:
+        return
+    text_value = build_cognilabs_lead_notification_text(
+        customer_id=customer_id,
+        full_name=full_name,
+        phone_number=phone_number,
+        platform=platform,
+        username=username,
+        business_field=business_field,
+        scheduled_time=scheduled_time,
+        conversation_id=conversation_id,
+    )
+    reply_markup = build_cognilabs_lead_notification_reply_markup(conversation_id, config)
+    bot = build_cognilabs_lead_bot(token)
     try:
-        await bot.send_message(
+        await bot.edit_message_text(
             chat_id=channel_id,
-            text="\n".join(lines),
+            message_id=int(message_id),
+            text=text_value,
             parse_mode="HTML",
             reply_markup=reply_markup,
         )
     except Exception as exc:
-        print(f"[cognilabsai-lead-notify] customer_id={customer_id} error: {exc}", flush=True)
+        print(f"[cognilabsai-lead-notify-edit] customer_id={customer_id} message_id={message_id} error: {exc}", flush=True)
 
 
 async def update_crm_customer_from_lead_fields(
@@ -2558,6 +2646,7 @@ async def update_crm_customer_from_lead_fields(
     scheduled_time: str,
     conversation_id: int,
 ) -> None:
+    conversation = await get_conversation(session, conversation_id)
     values = {}
     if full_name and not is_missing_required_value(full_name):
         values["full_name"] = encrypt_text(full_name)
@@ -2573,6 +2662,23 @@ async def update_crm_customer_from_lead_fields(
     values["is_archived"] = False
     await session.execute(update(customer).where(customer.c.id == customer_id).values(**values))
     await session.commit()
+    if conversation:
+        display_name = (
+            full_name.strip()
+            if full_name and not is_missing_required_value(full_name)
+            else (conversation.get("lead_full_name") or conversation.get("client_full_name") or conversation.get("client_username") or conversation.get("client_external_id") or "")
+        )
+        await edit_cognilabs_lead_notification(
+            session,
+            conversation_id,
+            customer_id,
+            full_name=display_name,
+            phone_number=phone_number or conversation.get("lead_phone_number") or "",
+            platform=conversation.get("channel") or "",
+            username=conversation.get("client_username"),
+            business_field=business_field or conversation.get("lead_business_field") or "",
+            scheduled_time=scheduled_time or conversation.get("lead_scheduled_time") or "",
+        )
 
 
 async def create_crm_customer_from_lead(
@@ -2640,7 +2746,7 @@ async def create_crm_customer_from_lead(
         )
     )
     await session.commit()
-    await send_cognilabs_lead_notification(
+    lead_notification_message_id = await send_cognilabs_lead_notification(
         config,
         customer_id,
         full_name=display_name,
@@ -2651,6 +2757,16 @@ async def create_crm_customer_from_lead(
         scheduled_time=scheduled_time,
         conversation_id=conversation_id,
     )
+    if lead_notification_message_id:
+        await session.execute(
+            update(cognilabsai_conversation)
+            .where(cognilabsai_conversation.c.id == conversation_id)
+            .values(
+                lead_notification_message_id=lead_notification_message_id,
+                updated_at=utcnow(),
+            )
+        )
+        await session.commit()
     return customer_id
 
 
@@ -2666,20 +2782,24 @@ async def save_lead_state(
 ):
     conversation = await get_conversation(session, conversation_id)
     lead_created_at = utcnow()
+    resolved_full_name = full_name if full_name and not is_missing_required_value(full_name) else ((conversation or {}).get("lead_full_name") or (conversation or {}).get("client_full_name") or "")
+    resolved_phone_number = phone_number if phone_number and not is_missing_required_value(phone_number) else ((conversation or {}).get("lead_phone_number") or "")
+    resolved_business_field = business_field if business_field and not is_missing_required_value(business_field) else ((conversation or {}).get("lead_business_field") or "")
+    resolved_scheduled_time = scheduled_time if scheduled_time and not is_missing_required_value(scheduled_time) else ((conversation or {}).get("lead_scheduled_time") or "")
     values = {
         "lead_created": True,
-        "lead_phone_number": phone_number,
-        "lead_business_field": business_field,
-        "lead_scheduled_time": scheduled_time,
+        "lead_phone_number": resolved_phone_number,
+        "lead_business_field": resolved_business_field,
+        "lead_scheduled_time": resolved_scheduled_time,
         "last_lead_created_at": lead_created_at,
         "ai_follow_up_due_at": None,
         "ai_stage": "lead_created",
         "ai_stage_label": "Lead yaratildi",
         "updated_at": utcnow(),
     }
-    if full_name and not is_missing_required_value(full_name):
-        values["client_full_name"] = full_name
-        values["lead_full_name"] = full_name
+    if resolved_full_name:
+        values["client_full_name"] = resolved_full_name
+        values["lead_full_name"] = resolved_full_name
     await session.execute(
         update(cognilabsai_conversation)
         .where(cognilabsai_conversation.c.id == conversation_id)
@@ -2694,10 +2814,10 @@ async def save_lead_state(
             client_external_id=conversation["client_external_id"],
             client_username=conversation.get("client_username"),
             client_full_name=conversation.get("client_full_name"),
-            full_name=full_name,
-            phone_number=phone_number,
-            business_field=business_field,
-            scheduled_time=scheduled_time,
+            full_name=resolved_full_name,
+            phone_number=resolved_phone_number,
+            business_field=resolved_business_field,
+            scheduled_time=resolved_scheduled_time,
             language=language,
         )
 

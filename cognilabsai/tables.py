@@ -69,6 +69,7 @@ cognilabsai_conversation = Table(
     Column("lead_business_field", String(255), nullable=True),
     Column("lead_scheduled_time", String(255), nullable=True),
     Column("last_lead_created_at", DateTime, nullable=True),
+    Column("lead_notification_message_id", Integer, nullable=True),
     Column("unread_count", Integer, nullable=False, default=0),
     Column("pause_reason", String(64), nullable=True),
     Column("paused_until", DateTime, nullable=True),

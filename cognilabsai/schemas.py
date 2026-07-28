@@ -61,6 +61,13 @@ class ConversationItem(BaseModel):
     telegram_presence_status: Optional[str] = None
     telegram_last_seen_at: Optional[datetime] = None
     ai_enabled: bool
+    lead_created: Optional[bool] = False
+    crm_customer_id: Optional[int] = None
+    lead_full_name: Optional[str] = None
+    lead_phone_number: Optional[str] = None
+    lead_business_field: Optional[str] = None
+    lead_scheduled_time: Optional[str] = None
+    lead_notification_message_id: Optional[int] = None
     pause_reason: Optional[str] = None
     paused_until: Optional[datetime] = None
     follow_up_enabled: bool = False
