@@ -2530,6 +2530,61 @@ async def request_text_only_ai_reply(
     return sanitize_ai_reply_text(extract_chat_message_text(choices[0].get("message") or {}))
 
 
+async def request_lead_confirmation_ai_reply(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    language: str,
+    full_name: str,
+    phone_number: str,
+    business_field: str,
+    scheduled_time: str,
+) -> Optional[str]:
+    text_messages = [
+        *messages,
+        {
+            "role": "system",
+            "content": (
+                "CRM lead has just been saved successfully. "
+                "Write one short customer-facing confirmation message. Do not call tools. "
+                "Do not repeat any previous confirmation wording from this conversation. "
+                "Acknowledge useful new details such as preferred call time when present. "
+                "Do not ask for phone number again. Do not say the same template sentence. "
+                "Reply in the customer's language. Keep it warm, natural, 1 sentence."
+            ),
+        },
+        {
+            "role": "system",
+            "content": (
+                f"Saved lead details: language={language or ''}; full_name={full_name or ''}; "
+                f"phone_number={phone_number or ''}; business_field={business_field or ''}; "
+                f"scheduled_time={scheduled_time or ''}."
+            ),
+        },
+    ]
+    payload = apply_reasoning_defaults({
+        "model": model,
+        "messages": text_messages,
+        "max_completion_tokens": 300,
+    }, model)
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        if response.status_code >= 400:
+            print(f"OpenAI lead-confirmation error {response.status_code}: {response.text}", flush=True)
+            return None
+        data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    return sanitize_ai_reply_text(extract_chat_message_text(choices[0].get("message") or {}))
+
+
 def extract_chat_message_text(message: dict) -> str:
     content = message.get("content")
     if isinstance(content, str):
@@ -3167,6 +3222,12 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         tool_calls = extract_ai_tool_calls(message)
         lead_tool_called = False
         lead_language = "uzbek"
+        lead_confirmation_data = {
+            "full_name": "",
+            "phone_number": "",
+            "business_field": "",
+            "scheduled_time": "",
+        }
         for tool_name, tool_data in tool_calls:
             if tool_name == "set_conversation_stage":
                 await set_ai_conversation_stage(
@@ -3196,9 +3257,31 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                     )
                     lead_tool_called = True
                     lead_language = language
+                    lead_confirmation_data = {
+                        "full_name": full_name,
+                        "phone_number": phone_number,
+                        "business_field": business_field,
+                        "scheduled_time": scheduled_time,
+                    }
                 except Exception as lead_exc:
                     print(f"[cognilabsai] save_lead_state error (conversation {conversation_id}): {lead_exc}", flush=True)
         if lead_tool_called:
+            inline_reply = sanitize_ai_reply_text(extract_chat_message_text(message))
+            if inline_reply:
+                return inline_reply
+            generated_confirmation = await request_lead_confirmation_ai_reply(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                language=lead_language,
+                full_name=lead_confirmation_data["full_name"],
+                phone_number=lead_confirmation_data["phone_number"],
+                business_field=lead_confirmation_data["business_field"],
+                scheduled_time=lead_confirmation_data["scheduled_time"],
+            )
+            if generated_confirmation:
+                return generated_confirmation
             return build_lead_confirmation(lead_language)
 
         # Tool call yo'q — oddiy text reply
