@@ -173,6 +173,47 @@ Conversation detailda agar `instagram_media_context_id` bor bo'lsa, frontend med
 GET /cognilabsai/chat/instagram/media-contexts/{instagram_media_context_id}
 ```
 
+Detail response postdan tushgan lead statuslarini ham beradi:
+
+```json
+{
+  "id": 1,
+  "media_type": "reel",
+  "title": "CRM reklama",
+  "stats": {
+    "sent_count": 18,
+    "lead_count": 5
+  },
+  "lead_status_counts": {
+    "need_to_call": 1,
+    "contacted": 2,
+    "delayed": 1,
+    "project_started": 1
+  },
+  "lead_items": [
+    {
+      "id": 187,
+      "full_name": "Ahmad",
+      "platform": "instagram",
+      "username": "ahmad_dev",
+      "status": "contacted",
+      "conversation_id": 625,
+      "created_at": "2026-07-28T14:10:00+05:00"
+    }
+  ]
+}
+```
+
+Post detail pageda:
+
+```text
+Postdan kelgan leadlar: stats.lead_count
+Status chart/table: lead_status_counts
+Lead list: lead_items
+```
+
+`lead_items` max 200 ta, eng yangilari birinchi.
+
 Chat headerda ko'rsatish tavsiya:
 
 ```text

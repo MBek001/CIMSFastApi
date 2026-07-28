@@ -25,7 +25,7 @@ from utils.page_permissions import ensure_app_page_schema
 from schemes.crm_schemes import ConversationLanguageEnum, CustomerAPICreateRequest
 from routers.crm import create_customer_api_record
 from models.admin_models import customer
-from utils.crypto import encrypt_text
+from utils.crypto import decrypt_text, encrypt_text
 
 from cognilabsai.realtime import manager
 from cognilabsai.tables import (
@@ -215,6 +215,15 @@ def normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
 
 def json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def safe_decrypt_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return decrypt_text(value)
+    except Exception:
+        return value
 
 
 def normalize_instagram_url(value: Optional[str]) -> Optional[str]:
@@ -1279,8 +1288,95 @@ async def get_instagram_media_context(session: AsyncSession, context_id: int) ->
     item = dict(row)
     item["created_at"] = to_tashkent_datetime(item.get("created_at"))
     item["updated_at"] = to_tashkent_datetime(item.get("updated_at"))
+    item.update(await get_instagram_media_context_stats(session, context_id))
     await session.rollback()
     return item
+
+
+async def get_instagram_media_context_stats(session: AsyncSession, context_id: int) -> dict:
+    status_expr = func.coalesce(customer.c.status_name, cast(customer.c.status, String))
+    status_result = await session.execute(
+        select(
+            status_expr.label("status"),
+            func.count(func.distinct(customer.c.id)).label("count"),
+        )
+        .select_from(
+            cognilabsai_conversation.join(
+                customer,
+                customer.c.id == cognilabsai_conversation.c.crm_customer_id,
+            )
+        )
+        .where(
+            cognilabsai_conversation.c.instagram_media_context_id == context_id,
+            customer.c.is_archived.is_not(True),
+        )
+        .group_by(status_expr)
+        .order_by(status_expr)
+    )
+    lead_status_counts = {
+        str(row.status): int(row.count or 0)
+        for row in status_result.fetchall()
+        if row.status
+    }
+    lead_result = await session.execute(
+        select(
+            customer.c.id,
+            customer.c.full_name,
+            customer.c.platform,
+            customer.c.username,
+            customer.c.status,
+            customer.c.status_name,
+            customer.c.created_at,
+            cognilabsai_conversation.c.id.label("conversation_id"),
+        )
+        .select_from(
+            cognilabsai_conversation.join(
+                customer,
+                customer.c.id == cognilabsai_conversation.c.crm_customer_id,
+            )
+        )
+        .where(
+            cognilabsai_conversation.c.instagram_media_context_id == context_id,
+            customer.c.is_archived.is_not(True),
+        )
+        .order_by(customer.c.created_at.desc())
+        .limit(200)
+    )
+    lead_items = []
+    for row in lead_result.fetchall():
+        status_value = row.status_name or (row.status.value if hasattr(row.status, "value") else str(row.status or ""))
+        lead_items.append({
+            "id": row.id,
+            "full_name": safe_decrypt_text(row.full_name),
+            "platform": row.platform,
+            "username": row.username,
+            "status": status_value,
+            "conversation_id": row.conversation_id,
+            "created_at": to_tashkent_datetime(row.created_at),
+        })
+    sent_result = await session.execute(
+        select(func.count(cognilabsai_message.c.id))
+        .select_from(
+            cognilabsai_conversation.join(
+                cognilabsai_message,
+                cognilabsai_message.c.conversation_id == cognilabsai_conversation.c.id,
+            )
+        )
+        .where(
+            cognilabsai_conversation.c.instagram_media_context_id == context_id,
+            cognilabsai_message.c.media_type.in_(["story_reply", "story_send", "media_send"]),
+        )
+    )
+    sent_count = int(sent_result.scalar() or 0)
+    lead_count = sum(lead_status_counts.values())
+    return {
+        "stats": {
+            "sent_count": sent_count,
+            "lead_count": lead_count,
+        },
+        "lead_status_counts": lead_status_counts,
+        "lead_items": lead_items,
+    }
 
 
 async def create_instagram_media_context(session: AsyncSession, payload: dict) -> dict:

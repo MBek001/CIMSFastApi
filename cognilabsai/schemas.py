@@ -142,6 +142,9 @@ class InstagramMediaContextUpdatePayload(BaseModel):
 class InstagramMediaContextItem(InstagramMediaContextPayload):
     id: int
     normalized_url: Optional[str] = None
+    stats: Optional[dict] = None
+    lead_status_counts: Optional[dict] = None
+    lead_items: Optional[list[dict]] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
