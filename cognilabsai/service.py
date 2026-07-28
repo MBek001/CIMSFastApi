@@ -2554,7 +2554,9 @@ async def request_lead_confirmation_ai_reply(
                 "Do not repeat any previous confirmation wording from this conversation. "
                 "Acknowledge useful new details such as preferred call time when present. "
                 "Do not ask for phone number again. Do not say the same template sentence. "
-                "If scheduled_time is missing, confirm the phone number was saved and ask what time is convenient for a call. "
+                "If full_name is missing, ask for the client's name. "
+                "If scheduled_time is missing, ask what time is convenient for a call. "
+                "If both full_name and scheduled_time are missing, ask for both in one short sentence. "
                 "If scheduled_time is present, confirm the team will call around that time. "
                 "Reply in the customer's language. Keep it warm, natural, 1 sentence."
             ),
@@ -2659,24 +2661,6 @@ async def set_ai_conversation_stage(session: AsyncSession, conversation_id: int,
         .values(**values)
     )
     await session.commit()
-
-
-def build_lead_confirmation(language: str) -> str:
-    language = (language or "").lower()
-    if "ru" in language:
-        return "😊 Спасибо! Мы получили ваш номер и скоро свяжемся с вами."
-    if "en" in language:
-        return "😊 Thank you! We've received your number. Our team will call you very soon."
-    return "😊 Raqamingizni oldik! Jamoamiz tez orada siz bilan bog'lanadi."
-
-
-def build_preferred_call_time_question(language: str) -> str:
-    language = (language or "").lower()
-    if "ru" in language:
-        return "Спасибо, номер получили. В какое время вам удобно принять звонок?"
-    if "en" in language:
-        return "Thanks, we have your number. What time is convenient for a quick call?"
-    return "Rahmat, raqamingizni oldik. Qo'ng'iroq uchun qaysi vaqt sizga qulay bo'ladi?"
 
 
 def to_utc_naive_from_tashkent(value: Optional[datetime]) -> Optional[datetime]:
@@ -3325,7 +3309,22 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             )
             if generated_confirmation:
                 return generated_confirmation
-            return build_lead_confirmation(lead_language)
+            retry_text = await request_text_only_ai_reply(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=[
+                    *messages,
+                    {
+                        "role": "system",
+                        "content": (
+                            "Lead was saved. Write a natural short customer reply. "
+                            "Do not use a fixed template. Ask for missing full_name and preferred call time if missing."
+                        ),
+                    },
+                ],
+            )
+            return retry_text
 
         # Tool call yo'q — oddiy text reply
         reply_text = sanitize_ai_reply_text(extract_chat_message_text(message))
@@ -3544,8 +3543,6 @@ def build_instagram_media_message_text(extracted: dict, media_context: Optional[
             parts.append(f"Media nomi: {title}")
         if description:
             parts.append(f"AI media izohi: {description}")
-    elif event_type != "message":
-        parts.append("Tizim izohi: yuborilgan Instagram media bazadagi story/post/reel contextiga bog'lanmagan.")
     return "\n".join(part for part in parts if part).strip()
 
 
