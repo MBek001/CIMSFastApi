@@ -311,6 +311,18 @@ def _extract_time_components(text: str) -> Optional[tuple[int, int]]:
     return None
 
 
+def _extract_time_range_start_components(text: str) -> Optional[tuple[int, int]]:
+    normalized = _normalize_notes(text or "").lower()
+    match = re.search(
+        r"(?<!\d)([01]?\d|2[0-3])(?:[:.]([0-5]\d))?\s*(?:-|dan|to|gacha)\s*([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d)",
+        normalized,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2) or 0)
+
+
 def _contains_flexible_time_phrase(text: str) -> bool:
     normalized = _normalize_notes(text).lower()
     phrases = (
@@ -400,6 +412,17 @@ def _fallback_infer_recall_time(notes: str, base_time_uz: datetime) -> Optional[
         )
         _debug_recall(f"fallback: flexible time matched -> {result.isoformat()}")
         return result
+
+    range_time_parts = _extract_time_range_start_components(text)
+    if range_time_parts:
+        hours, minutes = range_time_parts
+        candidate = base_time_uz.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        if any(token in text for token in ("ertaga", "zavtra", "tomorrow")):
+            candidate += timedelta(days=1)
+        elif candidate < base_time_uz:
+            candidate += timedelta(days=1)
+        _debug_recall(f"fallback: time range start matched -> {candidate.isoformat()}")
+        return candidate
 
     time_parts = _extract_time_components(text)
     if any(token in text for token in ("ertaga", "zavtra", "tomorrow")) and time_parts:
@@ -538,7 +561,8 @@ async def infer_recall_time_from_notes_ai(
         "recall_time must be either null or an ISO-8601 datetime with Asia/Tashkent offset +05:00. "
         "Use the provided created_at as the base time for relative phrases. "
         "If the note says flexible timing such as 'istalgan vaqt' or 'any time', set recall_time to created_at plus 32 minutes. "
-        "If the note is ambiguous, contains only a time range, or does not specify one exact recall moment, return null. "
+        "If the note contains a time range, use the start of the range as recall_time. "
+        "If the note is ambiguous or does not specify one usable recall moment, return null. "
         "Examples: "
         "'ertaga soat 10 da' => next day 10:00, "
         "'bir soatdan keyin' => created_at plus 1 hour, "
@@ -546,7 +570,7 @@ async def infer_recall_time_from_notes_ai(
         "'21:20' => same date 21:20 if still upcoming, otherwise next day 21:20, "
         "'hozir' => created_at plus 5 minutes, "
         "'istalgan vaqt' => created_at plus 32 minutes, "
-        "'9:00 to 18:00' => null."
+        "'9:00 to 18:00' => start at 09:00."
     )
 
     user_prompt = (
@@ -594,6 +618,18 @@ async def infer_recall_time_from_notes_ai(
                     _debug_recall(f"ai: parsed json={parsed_json}")
                     recall_time_value = parsed_json.get("recall_time")
                     if recall_time_value in (None, "", "null"):
+                        range_time_parts = _extract_time_range_start_components(cleaned_notes)
+                        if range_time_parts:
+                            hours, minutes = range_time_parts
+                            result = base_time_uz.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+                            if any(token in cleaned_notes.lower() for token in ("ertaga", "zavtra", "tomorrow")):
+                                result += timedelta(days=1)
+                            elif result < base_time_uz:
+                                result += timedelta(days=1)
+                            _debug_recall(
+                                f"ai: model returned null but range start matched -> {result.isoformat()}"
+                            )
+                            return result
                         if _contains_flexible_time_phrase(cleaned_notes):
                             result = (
                                 base_time_uz + timedelta(minutes=FLEXIBLE_RECALL_OFFSET_MINUTES)

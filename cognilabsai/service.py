@@ -25,6 +25,7 @@ from utils.page_permissions import ensure_app_page_schema
 from schemes.crm_schemes import ConversationLanguageEnum, CustomerAPICreateRequest
 from routers.crm import create_customer_api_record
 from models.admin_models import customer
+from utils.ai_summary import infer_recall_time_from_notes_ai
 from utils.crypto import decrypt_text, encrypt_text
 
 from cognilabsai.realtime import manager
@@ -93,6 +94,7 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
     "Never skip the business field question even if the client already described the IT system they need. "
     "IMPORTANT: Do NOT call register_customer unless the client has explicitly provided a preferred call time in the conversation. "
     "If scheduled_time is missing or empty, ask for it first: 'Qo\'ng\'iroq uchun qaysi vaqt qulay bo\'ladi?' — then call register_customer only after receiving the answer. "
+    "If the client already gave a phone number but did not give preferred call time, ask only for preferred call time and do not call register_customer yet. "
     "AFTER LEAD IS CREATED: Act as a knowledgeable IT consultant named Alisher from Cognilabs. "
     "Answer questions naturally. If asked about price: it depends on project scope, will be discussed on the call. "
     "If asked about office or address: Toshkent shahar, Xadra 9 — 'Cognilabs' on maps, call +998 33 323 22 32 before visiting. "
@@ -2666,6 +2668,39 @@ def build_lead_confirmation(language: str) -> str:
     return "😊 Raqamingizni oldik! Jamoamiz tez orada siz bilan bog'lanadi."
 
 
+def build_preferred_call_time_question(language: str) -> str:
+    language = (language or "").lower()
+    if "ru" in language:
+        return "Спасибо, номер получили. В какое время вам удобно принять звонок?"
+    if "en" in language:
+        return "Thanks, we have your number. What time is convenient for a quick call?"
+    return "Rahmat, raqamingizni oldik. Qo'ng'iroq uchun qaysi vaqt sizga qulay bo'ladi?"
+
+
+def to_utc_naive_from_tashkent(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=TASHKENT_TZ)
+    else:
+        value = value.astimezone(TASHKENT_TZ)
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+async def infer_lead_recall_time(scheduled_time: str, conversation_id: int) -> Optional[datetime]:
+    normalized_time = (scheduled_time or "").strip()
+    if is_missing_required_value(normalized_time):
+        return None
+    prompt = (
+        f"Preferred call time: {normalized_time}\n"
+        f"Source conversation: {conversation_id}"
+    )
+    return await infer_recall_time_from_notes_ai(
+        prompt,
+        created_at=datetime.now(TASHKENT_TZ),
+    )
+
+
 async def get_default_sales_manager_id(session: AsyncSession) -> Optional[int]:
     normalized_role = func.lower(func.replace(func.coalesce(user.c.role_name, cast(user.c.role, String)), "_", " "))
     result = await session.execute(
@@ -2847,9 +2882,12 @@ async def update_crm_customer_from_lead_fields(
         f"Preferred call time: {scheduled_time}" if scheduled_time else None,
         f"Source conversation: {conversation_id}",
     ]
+    recall_time = await infer_lead_recall_time(scheduled_time, conversation_id)
     values["notes"] = "\n".join(line for line in note_lines if line)
     values["assistant_name"] = "Cognilabs AI"
     values["is_archived"] = False
+    if recall_time is not None:
+        values["recall_time"] = to_utc_naive_from_tashkent(recall_time)
     await session.execute(update(customer).where(customer.c.id == customer_id).values(**values))
     await session.commit()
     if conversation:
@@ -2909,6 +2947,7 @@ async def create_crm_customer_from_lead(
     )
     display_name = full_name.strip() or client_full_name or client_username or client_external_id
     config = await get_integration_config(session)
+    recall_time = await infer_lead_recall_time(scheduled_time, conversation_id)
     create_response = await create_customer_api_record(
         session,
         CustomerAPICreateRequest(
@@ -2920,6 +2959,7 @@ async def create_crm_customer_from_lead(
             chat_url=build_crm_chat_url(conversation_id),
             notes=notes_value,
             status="need_to_call",
+            recall_time=recall_time,
             conversation_language=ConversationLanguageEnum(map_conversation_language(language).lower()),
         ),
     )
@@ -3031,7 +3071,8 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             {
                 "role": "system",
                 "content": (
-                    "Use tools proactively. If client gives phone number, call register_customer immediately even if name, business field, or call time is missing. "
+                    "Use tools proactively, but never call register_customer until phone_number and scheduled_time are both explicitly available. "
+                    "If client gives phone number but no preferred call time, ask only for preferred call time. "
                     "If lead already exists and client later provides name, business field, or call time, call update_lead. "
                     "Always call set_conversation_stage when chat state changes. "
                     "If you call only set_conversation_stage, you still must include a customer-facing text reply in content. "
@@ -3158,7 +3199,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                                     "full_name": {"type": "string"},
                                     "phone_number": {"type": "string"},
                                 },
-                                "required": ["phone_number"],
+                                "required": ["phone_number", "scheduled_time"],
                             },
                         },
                     },
@@ -3245,6 +3286,8 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                 phone_number = normalize_uzbek_phone((tool_data.get("phone_number") or (conversation or {}).get("lead_phone_number") or "").strip())
                 if is_missing_required_value(phone_number):
                     continue
+                if tool_name == "register_customer" and is_missing_required_value(scheduled_time):
+                    return build_preferred_call_time_question(language)
                 try:
                     await save_lead_state(
                         session,
