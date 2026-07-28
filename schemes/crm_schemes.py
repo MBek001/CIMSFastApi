@@ -164,9 +164,12 @@ class CustomerStatsResponse(BaseModel):
     total_customers: int
     need_to_call: int
     contacted: int
+    delayed: int = 0
+    meeting_scheduled: int = 0
+    creating_kp_tz: int = 0
+    payment_pending: int = 0
     project_started: int
-    continuing: int
-    finished: int
+    project_finished: int = 0
     rejected: int
     status_dict: Dict[str, int]
     status_percentages: Dict[str, float]

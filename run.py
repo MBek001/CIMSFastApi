@@ -16,7 +16,7 @@ from routers.finance import router as finance_router
 from routers.finance_advanced import advanced_router as advanced_router
 from routers.updates import router as updates_router
 from routers.update_tracking import router as update_tracking_router
-from routers.management import router as management_router
+from routers.management import router as management_router, initialize_default_statuses
 from routers.instagram import router as instagram_router
 from routers.recall_bot import router as recall_bot_router
 from routers.projects import router as projects_router
@@ -27,6 +27,7 @@ from cognilabsai.router import router as cognilabsai_router
 from cognilabsai.service import shutdown_cognilabsai, startup_cognilabsai
 from utils.file_storage import FILES_ROOT, IMAGES_ROOT, ensure_image_directories
 from utils.backup_service import send_daily_backup, shutdown_backup_bot, start_backup_bot
+from database import async_session_maker
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from uuid import uuid4
 
@@ -128,6 +129,8 @@ _scheduler = AsyncIOScheduler(timezone="Asia/Tashkent")
 
 @app.on_event("startup")
 async def app_startup():
+    async with async_session_maker() as session:
+        await initialize_default_statuses(session)
     await startup_cognilabsai()
     await start_backup_bot()
     _scheduler.add_job(send_daily_backup, "cron", hour=3, minute=0)

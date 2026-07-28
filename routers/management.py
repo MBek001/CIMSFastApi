@@ -16,6 +16,7 @@ from models.user_models import user_page_permission
 from models.admin_models import (
     app_page_table,
     customer_status_table,
+    CustomerStatus,
     user_role_table,
     customer
 )
@@ -41,6 +42,27 @@ from utils.page_permissions import initialize_default_pages
 router = APIRouter(prefix="/management", tags=["Management"])
 
 
+REQUIRED_CUSTOMER_STATUSES = [
+    {"name": "need_to_call", "display_name": "Need To Call", "description": "Call needed", "color": "#F97316", "order": 1, "is_system": True},
+    {"name": "contacted", "display_name": "Contacted", "description": "Client contacted", "color": "#3B82F6", "order": 2, "is_system": True},
+    {"name": "delayed", "display_name": "Delayed", "description": "Delayed or postponed", "color": "#F59E0B", "order": 3, "is_system": True},
+    {"name": "meeting_scheduled", "display_name": "Meeting Scheduled", "description": "Meeting scheduled", "color": "#06B6D4", "order": 4, "is_system": True},
+    {"name": "creating_kp_tz", "display_name": "Creating KP/TZ", "description": "KP or TZ is being prepared", "color": "#8B5CF6", "order": 5, "is_system": True},
+    {"name": "payment_pending", "display_name": "Payment Pending", "description": "Payment pending", "color": "#EAB308", "order": 6, "is_system": True},
+    {"name": "project_started", "display_name": "Project Started", "description": "Project started", "color": "#10B981", "order": 7, "is_system": True},
+    {"name": "project_finished", "display_name": "Project Finished", "description": "Project finished", "color": "#14B8A6", "order": 8, "is_system": True},
+    {"name": "rejected", "display_name": "Rejected", "description": "Lead rejected", "color": "#EF4444", "order": 9, "is_system": True},
+]
+REQUIRED_CUSTOMER_STATUS_NAMES = {item["name"] for item in REQUIRED_CUSTOMER_STATUSES}
+REMOVED_STATUS_MAP = {
+    "continuing": "delayed",
+    "finished": "project_finished",
+    "no_telegram_/_rejected": "rejected",
+    "no_telegram_rejected": "rejected",
+    "no_telegram": "rejected",
+}
+
+
 # ========================================
 # HELPER FUNCTIONS
 # ========================================
@@ -53,23 +75,51 @@ async def require_ceo_access(
 
 
 async def initialize_default_statuses(session: AsyncSession):
-    """Initialize default customer statuses if table is empty"""
-    result = await session.execute(select(func.count()).select_from(customer_status_table))
-    count = result.scalar()
+    for old_status, new_status in REMOVED_STATUS_MAP.items():
+        await session.execute(
+            update(customer)
+            .where(customer.c.status_name == old_status)
+            .values(status_name=new_status)
+        )
+    await session.execute(
+        update(customer)
+        .where(customer.c.status == CustomerStatus.continuing, customer.c.status_name.is_(None))
+        .values(status_name="delayed")
+    )
+    await session.execute(
+        update(customer)
+        .where(customer.c.status == CustomerStatus.finished, customer.c.status_name.is_(None))
+        .values(status_name="project_finished")
+    )
 
-    if count == 0:
-        default_statuses = [
-            {"name": "contacted", "display_name": "Contacted", "description": "Initial contact made", "color": "#3B82F6", "order": 1, "is_system": True},
-            {"name": "project_started", "display_name": "Project Started", "description": "Project has started", "color": "#10B981", "order": 2, "is_system": True},
-            {"name": "continuing", "display_name": "Continuing", "description": "Project is continuing", "color": "#F59E0B", "order": 3, "is_system": True},
-            {"name": "finished", "display_name": "Finished", "description": "Project completed", "color": "#8B5CF6", "order": 4, "is_system": True},
-            {"name": "rejected", "display_name": "Rejected", "description": "Lead rejected", "color": "#EF4444", "order": 5, "is_system": True},
-            {"name": "need_to_call", "display_name": "Need to Call", "description": "Follow-up call needed", "color": "#F97316", "order": 6, "is_system": True},
-        ]
+    for status_data in REQUIRED_CUSTOMER_STATUSES:
+        existing_result = await session.execute(
+            select(customer_status_table.c.id).where(customer_status_table.c.name == status_data["name"])
+        )
+        existing_id = existing_result.scalar()
+        values = {
+            **status_data,
+            "is_active": True,
+            "updated_at": datetime.utcnow(),
+        }
+        if existing_id:
+            await session.execute(
+                update(customer_status_table)
+                .where(customer_status_table.c.id == existing_id)
+                .values(**values)
+            )
+        else:
+            await session.execute(
+                insert(customer_status_table).values(
+                    **values,
+                    created_at=datetime.utcnow(),
+                )
+            )
 
-        for status_data in default_statuses:
-            await session.execute(insert(customer_status_table).values(**status_data))
-        await session.commit()
+    await session.execute(
+        delete(customer_status_table).where(customer_status_table.c.name.notin_(REQUIRED_CUSTOMER_STATUS_NAMES))
+    )
+    await session.commit()
 
 
 async def initialize_default_roles(session: AsyncSession):
@@ -672,7 +722,7 @@ async def delete_status(
     current_user=Depends(require_ceo_access)
 ):
     """
-    Statusni o'chirish (faqat CEO, system statuslarni o'chirish mumkin emas)
+    Statusni o'chirish.
     """
     # Check if status exists
     result = await session.execute(
@@ -686,25 +736,12 @@ async def delete_status(
             detail="Status topilmadi"
         )
 
-    if existing_status.is_system:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="System statuslarni o'chirish mumkin emas"
-        )
-
-    # Check if any customers are using this status
-    result = await session.execute(
-        select(func.count()).select_from(customer).where(customer.c.status_name == existing_status.name)
+    await session.execute(
+        update(customer)
+        .where(customer.c.status_name == existing_status.name)
+        .values(status_name=None)
     )
-    usage_count = result.scalar()
 
-    if usage_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Bu status {usage_count} ta mijozda ishlatilmoqda. Avval ularni boshqa statusga o'zgartiring"
-        )
-
-    # Delete status
     await session.execute(
         delete(customer_status_table).where(customer_status_table.c.id == status_id)
     )

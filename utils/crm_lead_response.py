@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.admin_models import CustomerStatus, audit_log, customer, customer_note, customer_status_change_log
@@ -15,6 +15,18 @@ except Exception:
 
 
 LEAD_RESPONSE_LIMIT_MINUTES = 5
+
+
+async def ensure_status_change_name_columns(session: AsyncSession) -> None:
+    await session.execute(text("""
+        ALTER TABLE customer_status_change_log
+        ADD COLUMN IF NOT EXISTS from_status_name VARCHAR(100)
+    """))
+    await session.execute(text("""
+        ALTER TABLE customer_status_change_log
+        ADD COLUMN IF NOT EXISTS to_status_name VARCHAR(100)
+    """))
+    await session.commit()
 
 
 def _normalize_dt(value: Optional[datetime]) -> Optional[datetime]:
@@ -62,6 +74,7 @@ def _format_minutes(value: Optional[float]) -> Optional[str]:
 async def _first_status_change_rows(session: AsyncSession, customer_ids: list[int]) -> dict[int, dict]:
     if not customer_ids:
         return {}
+    await ensure_status_change_name_columns(session)
     first_changed = (
         select(
             customer_status_change_log.c.customer_id.label("customer_id"),
@@ -69,8 +82,8 @@ async def _first_status_change_rows(session: AsyncSession, customer_ids: list[in
         )
         .where(
             customer_status_change_log.c.customer_id.in_(customer_ids),
-            customer_status_change_log.c.from_status == CustomerStatus.need_to_call,
-            customer_status_change_log.c.to_status != CustomerStatus.need_to_call,
+            func.coalesce(customer_status_change_log.c.from_status_name, cast(customer_status_change_log.c.from_status, String)) == CustomerStatus.need_to_call.value,
+            func.coalesce(customer_status_change_log.c.to_status_name, cast(customer_status_change_log.c.to_status, String)) != CustomerStatus.need_to_call.value,
         )
         .group_by(customer_status_change_log.c.customer_id)
         .subquery()
@@ -79,6 +92,7 @@ async def _first_status_change_rows(session: AsyncSession, customer_ids: list[in
         select(
             customer_status_change_log.c.customer_id,
             customer_status_change_log.c.to_status,
+            customer_status_change_log.c.to_status_name,
             customer_status_change_log.c.changed_at,
         )
         .select_from(
@@ -93,7 +107,7 @@ async def _first_status_change_rows(session: AsyncSession, customer_ids: list[in
     )
     rows = {}
     for row in result.fetchall():
-        status_value = row.to_status.value if hasattr(row.to_status, "value") else str(row.to_status or "")
+        status_value = row.to_status_name or (row.to_status.value if hasattr(row.to_status, "value") else str(row.to_status or ""))
         rows[int(row.customer_id)] = {
             "status": status_value,
             "changed_at": _normalize_dt(row.changed_at),

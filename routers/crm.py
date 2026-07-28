@@ -1,5 +1,5 @@
 ﻿from fastapi import APIRouter, Depends, HTTPException, status, Query,Form,UploadFile,File
-from sqlalchemy import select, insert, update, delete, func, desc, or_, and_
+from sqlalchemy import select, insert, update, delete, func, desc, or_, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone, date
 from typing import List, Optional
@@ -12,7 +12,7 @@ from fastapi import Header
 from fastapi.responses import RedirectResponse
 from telegram.error import TelegramError
 # Import qilinadigan modellar
-from models.admin_models import customer, customer_note, CustomerStatus, CustomerType, customer_status_change_log
+from models.admin_models import customer, customer_note, CustomerStatus, CustomerType, customer_status_change_log, customer_status_table
 from models.user_models import user, user_page_permission, PageName
 from schemes.crm_schemes import (
 CustomerResponse,
@@ -47,6 +47,17 @@ from utils.crm_lead_response import get_customer_lead_response_metric, get_lead_
 from config import CRM_CUSTOMER_API_KEY
 
 router = APIRouter(prefix="/crm", tags=['Sales CRM'])
+CRM_STATUS_KEYS = [
+    "need_to_call",
+    "contacted",
+    "delayed",
+    "meeting_scheduled",
+    "creating_kp_tz",
+    "payment_pending",
+    "project_started",
+    "project_finished",
+    "rejected",
+]
 
 try:
     UZBEKISTAN_TZ = ZoneInfo("Asia/Tashkent")
@@ -269,20 +280,34 @@ async def _log_customer_status_change(
     session: AsyncSession,
     customer_id: int,
     from_status,
-    to_status
+    to_status,
+    from_status_name: Optional[str] = None,
+    to_status_name: Optional[str] = None,
 ) -> None:
     normalized_from = _normalize_customer_status(from_status)
     normalized_to = _normalize_customer_status(to_status)
-    if normalized_to is None:
+    from_status_value = _normalize_status_value(from_status_name) or _normalize_status_value(from_status)
+    to_status_value = _normalize_status_value(to_status_name) or _normalize_status_value(to_status)
+    if not to_status_value:
         return
-    if normalized_from == normalized_to:
+    if from_status_value == to_status_value:
         return
     try:
+        await session.execute(text("""
+            ALTER TABLE customer_status_change_log
+            ADD COLUMN IF NOT EXISTS from_status_name VARCHAR(100)
+        """))
+        await session.execute(text("""
+            ALTER TABLE customer_status_change_log
+            ADD COLUMN IF NOT EXISTS to_status_name VARCHAR(100)
+        """))
         await session.execute(
             insert(customer_status_change_log).values(
                 customer_id=customer_id,
                 from_status=normalized_from,
                 to_status=normalized_to,
+                from_status_name=from_status_value,
+                to_status_name=to_status_value,
                 changed_at=_utc_now_naive()
             )
         )
@@ -421,34 +446,24 @@ async def _get_status_stats_for_date_range(
     start_utc_naive, end_utc_naive = _date_range_uz_to_utc_naive(start_date, end_date)
     status_expr = _get_customer_status_sql_expr()
 
-    stats_result = await session.execute(
-        select(
-            func.count(customer.c.id).label("total_customers"),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.need_to_call.value).label("need_to_call"),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.contacted.value).label("contacted"),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.project_started.value).label("project_started"),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.continuing.value).label("continuing"),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.finished.value).label("finished"),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.rejected.value).label("rejected")
-        ).where(
+    status_counts_result = await session.execute(
+        select(status_expr.label("status_key"), func.count(customer.c.id).label("count"))
+        .where(
             and_(
                 customer.c.created_at >= start_utc_naive,
                 customer.c.created_at < end_utc_naive,
                 customer.c.is_archived.is_not(True)
             )
         )
+        .group_by(status_expr)
     )
-    row = stats_result.fetchone()
-
-    status_stats = {
-        "need_to_call": row.need_to_call,
-        "contacted": row.contacted,
-        "project_started": row.project_started,
-        "continuing": row.continuing,
-        "finished": row.finished,
-        "rejected": row.rejected
+    status_dict = {
+        _normalize_status_value(row.status_key): int(row.count or 0)
+        for row in status_counts_result.fetchall()
+        if _normalize_status_value(row.status_key)
     }
-    total = row.total_customers
+    status_stats = {key: int(status_dict.get(key, 0)) for key in CRM_STATUS_KEYS}
+    total = sum(status_dict.values())
     percentages = _build_status_percentages(status_stats, total)
 
     return CRMPeriodStatusStats(
@@ -787,7 +802,7 @@ async def get_latest_customers(
 @router.get("/dashboard", response_model=CustomerListResponse, summary="Sales CRM Dashboard")
 async def crm_dashboard(
         search: Optional[str] = Query(None, description="Qidiruv so'zi"),
-        status_filter: Optional[CustomerStatus] = Query(None, description="Status bo'yicha filter"),
+        status_filter: Optional[str] = Query(None, description="Status bo'yicha filter"),
         show_all: bool = Query(False, description="Barcha mijozlarni ko'rsatish"),
         page: int = Query(1, ge=1, description="Sahifa raqami"),
         page_size: int = Query(50, ge=1, le=50, description="Sahifadagi mijozlar soni (max 50)"),
@@ -818,10 +833,11 @@ async def crm_dashboard(
     
     # Default holatda rejected customerlar chiqmasin.
     # Faqat status_filter orqali rejected tanlanganda ko'rsatiladi.
-    if not status_filter:
-        base_query = base_query.where(customer.c.status != CustomerStatus.rejected)
+    normalized_status_filter = _normalize_status_value(status_filter)
+    if not normalized_status_filter:
+        base_query = base_query.where(status_expr != CustomerStatus.rejected.value)
     else:
-        base_query = base_query.where(status_expr == status_filter.value)
+        base_query = base_query.where(status_expr == normalized_status_filter)
     
     customers_result = await session.execute(base_query)
     customers_data = customers_result.fetchall()
@@ -850,11 +866,11 @@ async def crm_dashboard(
                 continue  # Bu customer mos kelmasa, keyingisiga o'tamiz
         
         # Default holatda rejected customerlarni chiqarib yubormaymiz
-        if not status_filter and c.status == CustomerStatus.rejected:
+        if not normalized_status_filter and _get_customer_status_value(c) == CustomerStatus.rejected.value:
             continue
 
         # Status filter
-        if status_filter and _get_customer_status_value(c) != status_filter.value:
+        if normalized_status_filter and _get_customer_status_value(c) != normalized_status_filter:
             continue
         
         # Audio URL yaratish
@@ -895,20 +911,6 @@ async def crm_dashboard(
     end_idx = start_idx + page_size
     paginated_customers = filtered_customers[start_idx:end_idx]
 
-    # СЂСџвЂќв„– Statistikalarni hisoblash (o'zgarmaydi)
-    status_stats_result = await session.execute(
-        select(
-            func.count(customer.c.id).label('total_customers'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.need_to_call.value).label('need_to_call'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.contacted.value).label('contacted'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.project_started.value).label('project_started'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.continuing.value).label('continuing'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.finished.value).label('finished'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.rejected.value).label('rejected')
-        ).where(customer.c.is_archived.is_not(True))
-    )
-    stats = status_stats_result.fetchone()
-
     status_counts_result = await session.execute(
         select(status_expr.label('status_key'), func.count(customer.c.id).label('count'))
         .where(customer.c.is_archived.is_not(True))
@@ -921,14 +923,23 @@ async def crm_dashboard(
         for item in status_counts_data
         if _normalize_status_value(item.status_key)
     }
+    total_customers_count = sum(int(count or 0) for count in status_dict.values())
 
-    total = stats.total_customers
+    total = total_customers_count
     status_percentages = {}
     if total > 0:
         for status_key, count in status_dict.items():
             status_percentages[status_key] = round((count / total) * 100, 1)
 
-    status_choices = [{"value": s.value, "label": s.value.replace("_", " ").title()} for s in CustomerStatus]
+    status_choices_result = await session.execute(
+        select(customer_status_table)
+        .where(customer_status_table.c.is_active == True)
+        .order_by(customer_status_table.c.order)
+    )
+    status_choices = [
+        {"value": item.name, "label": item.display_name}
+        for item in status_choices_result.fetchall()
+    ]
 
     permissions = await get_user_permission_names(session, current_user.id)
     page_display_map = {
@@ -964,19 +975,14 @@ async def crm_dashboard(
         total_items=total_items,
         total_pages=total_pages,
         status_stats={
-            "total_customers": stats.total_customers,
-            "need_to_call": stats.need_to_call,
-            "contacted": stats.contacted,
-            "project_started": stats.project_started,
-            "continuing": stats.continuing,
-            "finished": stats.finished,
-            "rejected": stats.rejected
+            "total_customers": total_customers_count,
+            **{key: int(status_dict.get(key, 0)) for key in CRM_STATUS_KEYS},
         },
         status_dict=status_dict,
         status_percentages=status_percentages,
         status_choices=status_choices,
         permissions=modified_permissions,
-        selected_status=status_filter.value if status_filter else None,
+        selected_status=normalized_status_filter,
         period_stats={
             "today": period_stats.today,
             "this_week": period_stats.this_week,
@@ -1283,6 +1289,7 @@ async def update_customer(
     if getattr(existing_customer, "is_archived", None) and current_user.company_code != "ceo":
         raise HTTPException(status_code=404, detail="Mijoz topilmadi")
     previous_status = existing_customer.status
+    previous_status_name = existing_customer.status_name or (existing_customer.status.value if hasattr(existing_customer.status, "value") else str(existing_customer.status))
     resolved_customer_status, resolved_status_name = await _resolve_customer_status_input(session, customer_status)
     current_full_name = _safe_decrypt(existing_customer.full_name)
     current_phone_number = _safe_decrypt(existing_customer.phone_number)
@@ -1367,7 +1374,9 @@ async def update_customer(
             session=session,
             customer_id=customer_id,
             from_status=previous_status,
-            to_status=resolved_customer_status
+            to_status=resolved_customer_status,
+            from_status_name=previous_status_name,
+            to_status_name=resolved_status_name,
         )
         await log_audit_event(
             session,
@@ -1451,6 +1460,7 @@ async def patch_customer(
     if getattr(existing, "is_archived", None) and current_user.company_code != "ceo":
         raise HTTPException(status_code=404, detail="Mijoz topilmadi")
     previous_status = existing.status
+    previous_status_name = existing.status_name or (existing.status.value if hasattr(existing.status, "value") else str(existing.status))
     resolved_customer_status, resolved_status_name = await _resolve_customer_status_input(session, customer_status)
     current_full_name = _safe_decrypt(existing.full_name)
     current_phone_number = _safe_decrypt(existing.phone_number)
@@ -1528,7 +1538,9 @@ async def patch_customer(
             session=session,
             customer_id=customer_id,
             from_status=previous_status,
-            to_status=resolved_customer_status
+            to_status=resolved_customer_status,
+            from_status_name=previous_status_name,
+            to_status_name=resolved_status_name,
         )
         await log_audit_event(
             session,
@@ -1684,22 +1696,6 @@ async def get_customer_stats(
 
     status_expr = _get_customer_status_sql_expr()
 
-    # Status statistikalarini hisoblash
-    status_stats_result = await session.execute(
-        select(
-            func.count(customer.c.id).label('total_customers'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.need_to_call.value).label('need_to_call'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.contacted.value).label('contacted'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.project_started.value).label(
-                'project_started'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.continuing.value).label('continuing'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.finished.value).label('finished'),
-            func.count(customer.c.id).filter(status_expr == CustomerStatus.rejected.value).label('rejected')
-        ).where(customer.c.is_archived.is_not(True))
-    )
-    stats = status_stats_result.fetchone()
-
-    # Status counts
     status_counts_result = await session.execute(
         select(status_expr.label('status_key'), func.count(customer.c.id).label('count'))
         .where(customer.c.is_archived.is_not(True))
@@ -1714,21 +1710,23 @@ async def get_customer_stats(
         if _normalize_status_value(item.status_key)
     }
 
-    # Foizlarni hisoblash
-    total = stats.total_customers
+    total = sum(status_dict.values())
     status_percentages = {}
     if total > 0:
         for status_key, count in status_dict.items():
             status_percentages[status_key] = round((count / total) * 100, 1)
 
     return CustomerStatsResponse(
-        total_customers=stats.total_customers,
-        need_to_call=stats.need_to_call,
-        contacted=stats.contacted,
-        project_started=stats.project_started,
-        continuing=stats.continuing,
-        finished=stats.finished,
-        rejected=stats.rejected,
+        total_customers=total,
+        need_to_call=int(status_dict.get("need_to_call", 0)),
+        contacted=int(status_dict.get("contacted", 0)),
+        delayed=int(status_dict.get("delayed", 0)),
+        meeting_scheduled=int(status_dict.get("meeting_scheduled", 0)),
+        creating_kp_tz=int(status_dict.get("creating_kp_tz", 0)),
+        payment_pending=int(status_dict.get("payment_pending", 0)),
+        project_started=int(status_dict.get("project_started", 0)),
+        project_finished=int(status_dict.get("project_finished", 0)),
+        rejected=int(status_dict.get("rejected", 0)),
         status_dict=status_dict,
         status_percentages=status_percentages
     )
@@ -2061,7 +2059,7 @@ async def customers_period_report(
         description="Davr: 3d, 7d, 15d, 30d. Agar from_date/to_date berilsa custom ishlaydi"
     ),
     search: Optional[str] = Query(None, description="Qidiruv so'zi"),
-    status_filter: Optional[CustomerStatus] = Query(None, description="Status bo'yicha filter"),
+    status_filter: Optional[str] = Query(None, description="Status bo'yicha filter"),
     from_date: Optional[date] = Query(None, description="Boshlanish sana (YYYY-MM-DD)"),
     to_date: Optional[date] = Query(None, description="Tugash sana (YYYY-MM-DD)"),
     session: AsyncSession = Depends(get_async_session),
@@ -2118,8 +2116,10 @@ async def customers_period_report(
             customer.c.is_archived.is_not(True)
         )
     )
-    if status_filter:
-        base_query = base_query.where(customer.c.status == status_filter)
+    normalized_status_filter = _normalize_status_value(status_filter)
+    status_expr = _get_customer_status_sql_expr()
+    if normalized_status_filter:
+        base_query = base_query.where(status_expr == normalized_status_filter)
 
     result = await session.execute(base_query.order_by(desc(customer.c.created_at)))
     customers = result.fetchall()
@@ -2131,7 +2131,7 @@ async def customers_period_report(
     for c in customers:
         decrypted_name = decrypt_text(c.full_name)
         decrypted_phone = decrypt_text(c.phone_number)
-        status_key = c.status.value if hasattr(c.status, "value") else str(c.status)
+        status_key = _get_customer_status_value(c) or ""
 
         if search_term:
             if not any([
@@ -2165,7 +2165,7 @@ async def customers_period_report(
             )
         )
 
-    status_stats = {s.value: status_dict.get(s.value, 0) for s in CustomerStatus}
+    status_stats = {key: int(status_dict.get(key, 0)) for key in CRM_STATUS_KEYS}
 
     total = len(customer_items)
     status_percentages: dict[str, float] = {}
