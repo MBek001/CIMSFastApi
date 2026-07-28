@@ -82,8 +82,10 @@ AI_STAGE_ALIASES = {
     "not_fit": "lost",
 }
 COGNILABSAI_BEHAVIOR_PROMPT = (
-    "When the user provides all needed details (name, business field/job, phone, preferred call time), "
-    "you must call the register_customer tool once. Otherwise continue the script and ask only one question per message. "
+    "When the user provides phone number, you must call register_customer immediately even if preferred call time is missing. "
+    "After phone is saved, ask for preferred call time if it is missing. "
+    "When the user later provides preferred call time, call update_lead to save it. "
+    "Otherwise continue the script and ask only one question per message. "
     "If the user gives a short Uzbekistan number like 991234567, normalize it to +998991234567. "
     "Always greet with 'Assalomu Alaykum' on first reply. Reply in the customer's language. "
     "Do not mention you are an AI unless directly asked. Do not repeat the same confirmation twice. "
@@ -92,9 +94,7 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
     "NOT the name of the IT system they want. "
     "Always ask 'Qaysi sohada faoliyat yuritasiz?' as a separate step before asking for phone number. "
     "Never skip the business field question even if the client already described the IT system they need. "
-    "IMPORTANT: Do NOT call register_customer unless the client has explicitly provided a preferred call time in the conversation. "
-    "If scheduled_time is missing or empty, ask for it first: 'Qo\'ng\'iroq uchun qaysi vaqt qulay bo\'ladi?' — then call register_customer only after receiving the answer. "
-    "If the client already gave a phone number but did not give preferred call time, ask only for preferred call time and do not call register_customer yet. "
+    "IMPORTANT: preferred call time is useful but not required for creating the lead. "
     "AFTER LEAD IS CREATED: Act as a knowledgeable IT consultant named Alisher from Cognilabs. "
     "Answer questions naturally. If asked about price: it depends on project scope, will be discussed on the call. "
     "If asked about office or address: Toshkent shahar, Xadra 9 — 'Cognilabs' on maps, call +998 33 323 22 32 before visiting. "
@@ -2554,6 +2554,8 @@ async def request_lead_confirmation_ai_reply(
                 "Do not repeat any previous confirmation wording from this conversation. "
                 "Acknowledge useful new details such as preferred call time when present. "
                 "Do not ask for phone number again. Do not say the same template sentence. "
+                "If scheduled_time is missing, confirm the phone number was saved and ask what time is convenient for a call. "
+                "If scheduled_time is present, confirm the team will call around that time. "
                 "Reply in the customer's language. Keep it warm, natural, 1 sentence."
             ),
         },
@@ -3071,8 +3073,8 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             {
                 "role": "system",
                 "content": (
-                    "Use tools proactively, but never call register_customer until phone_number and scheduled_time are both explicitly available. "
-                    "If client gives phone number but no preferred call time, ask only for preferred call time. "
+                    "Use tools proactively. If client gives phone_number, call register_customer immediately even if scheduled_time is missing. "
+                    "If lead is created and scheduled_time is missing, ask only for preferred call time. "
                     "If lead already exists and client later provides name, business field, or call time, call update_lead. "
                     "Always call set_conversation_stage when chat state changes. "
                     "If you call only set_conversation_stage, you still must include a customer-facing text reply in content. "
@@ -3199,7 +3201,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                                     "full_name": {"type": "string"},
                                     "phone_number": {"type": "string"},
                                 },
-                                "required": ["phone_number", "scheduled_time"],
+                                "required": ["phone_number"],
                             },
                         },
                     },
@@ -3286,8 +3288,6 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                 phone_number = normalize_uzbek_phone((tool_data.get("phone_number") or (conversation or {}).get("lead_phone_number") or "").strip())
                 if is_missing_required_value(phone_number):
                     continue
-                if tool_name == "register_customer" and is_missing_required_value(scheduled_time):
-                    return build_preferred_call_time_question(language)
                 try:
                     await save_lead_state(
                         session,
