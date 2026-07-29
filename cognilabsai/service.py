@@ -62,23 +62,35 @@ DEFAULT_VERIFY_TOKEN = "cognilabsai-verify-token"
 DEFAULT_WS_KEY = "cognilabsai-websocket-key"
 LEAD_COOLDOWN_HOURS = 24
 AI_STAGE_LABELS = {
-    "new_request": "Yangi murojat",
-    "greeted": "Salomlashildi",
-    "field_provided": "Sohasini yozdi",
-    "field_years_provided": "Sohadagi yil etildi",
+    "service_interest": "Xizmatga qiziqdi",
+    "business_field": "Sohasini yozdi",
+    "experience_years": "Sohadagi yil etildi",
+    "phone_discussion": "Telefon orqali muhokama",
     "phone_collected": "Telefon olindi",
+    "call_time_collected": "Qulay vaqt olindi",
+    "name_collected": "Ism olindi",
+    "agreement_confirmed": "Kelishuv tasdiqlandi",
     "lead_created": "Lead yaratildi",
     "lost": "Yoqotildi",
 }
 AI_STAGE_VALUES = tuple(AI_STAGE_LABELS.keys())
 AI_STAGE_ALIASES = {
-    "new": "new_request",
-    "interested_crm": "field_provided",
-    "interested_ai": "field_provided",
-    "interested_website": "field_provided",
-    "interested_automation": "field_provided",
-    "interested_other": "field_years_provided",
+    "new": "service_interest",
+    "new_request": "service_interest",
+    "greeted": "service_interest",
+    "interested_crm": "service_interest",
+    "interested_ai": "service_interest",
+    "interested_website": "service_interest",
+    "interested_automation": "service_interest",
+    "interested_other": "experience_years",
+    "field_provided": "business_field",
+    "field_years_provided": "experience_years",
+    "phone_offer": "phone_discussion",
     "phone_received": "phone_collected",
+    "scheduled_time": "call_time_collected",
+    "time_collected": "call_time_collected",
+    "full_name_collected": "name_collected",
+    "confirmed": "agreement_confirmed",
     "not_fit": "lost",
 }
 COGNILABSAI_BEHAVIOR_PROMPT = (
@@ -95,6 +107,17 @@ COGNILABSAI_BEHAVIOR_PROMPT = (
     "Always ask 'Qaysi sohada faoliyat yuritasiz?' as a separate step before asking for phone number. "
     "Never skip the business field question even if the client already described the IT system they need. "
     "IMPORTANT: preferred call time is useful but not required for creating the lead. "
+    "Dialogue steps and AI kanban stages: "
+    "Step 1 service_interest: greet once, introduce yourself, ask what service interests the client. "
+    "Step 2 business_field: ask separate question 'Qaysi sohada faoliyat yuritasiz?' if business field is not explicitly known. IT product name is not business field. "
+    "Step 3 experience_years: ask how many years the client has worked in that field. "
+    "Step 4 phone_discussion: offer a 5-10 minute phone discussion. "
+    "Step 5 phone_collected: ask for phone number and call register_customer immediately when phone is provided. "
+    "Step 6 call_time_collected: ask convenient call time; if client says hozir/now, confirm without insisting. "
+    "Step 7 name_collected: ask client name for call confirmation. "
+    "Step 8 agreement_confirmed: briefly confirm agreement and offer to answer questions. "
+    "Step 9 lead_created: after all data is collected or updated, make sure CRM lead is saved/updated. "
+    "Use lost only when client is not fit, refuses, or asks to stop. "
     "AFTER LEAD IS CREATED: Act as a knowledgeable IT consultant named Alisher from Cognilabs. "
     "Answer questions naturally. If asked about price: it depends on project scope, will be discussed on the call. "
     "If asked about office or address: Toshkent shahar, Xadra 9 — 'Cognilabs' on maps, call +998 33 323 22 32 before visiting. "
@@ -939,29 +962,28 @@ async def ensure_schema(session: AsyncSession):
             UPDATE cognilabsai_conversation
             SET
                 ai_stage = CASE
-                    WHEN ai_stage = 'new' THEN 'new_request'
-                    WHEN ai_stage IN ('interested_crm', 'interested_ai', 'interested_website', 'interested_automation') THEN 'field_provided'
-                    WHEN ai_stage = 'interested_other' THEN 'field_years_provided'
+                    WHEN ai_stage IN ('new', 'new_request', 'greeted', 'interested_crm', 'interested_ai', 'interested_website', 'interested_automation') THEN 'service_interest'
+                    WHEN ai_stage = 'field_provided' THEN 'business_field'
+                    WHEN ai_stage IN ('interested_other', 'field_years_provided') THEN 'experience_years'
                     WHEN ai_stage = 'phone_received' THEN 'phone_collected'
                     WHEN ai_stage = 'not_fit' THEN 'lost'
                     ELSE ai_stage
                 END,
                 ai_stage_label = CASE
-                    WHEN ai_stage = 'new' THEN 'Yangi murojat'
-                    WHEN ai_stage = 'greeted' THEN 'Salomlashildi'
-                    WHEN ai_stage IN ('interested_crm', 'interested_ai', 'interested_website', 'interested_automation') THEN 'Sohasini yozdi'
-                    WHEN ai_stage = 'interested_other' THEN 'Sohadagi yil etildi'
+                    WHEN ai_stage IN ('new', 'new_request', 'greeted', 'interested_crm', 'interested_ai', 'interested_website', 'interested_automation') THEN 'Xizmatga qiziqdi'
+                    WHEN ai_stage = 'field_provided' THEN 'Sohasini yozdi'
+                    WHEN ai_stage IN ('interested_other', 'field_years_provided') THEN 'Sohadagi yil etildi'
                     WHEN ai_stage = 'phone_received' THEN 'Telefon olindi'
                     WHEN ai_stage = 'lead_created' THEN 'Lead yaratildi'
                     WHEN ai_stage IN ('not_fit', 'lost') THEN 'Yoqotildi'
                     ELSE ai_stage_label
                 END
-            WHERE ai_stage IN ('new', 'greeted', 'interested_crm', 'interested_ai', 'interested_website', 'interested_automation', 'interested_other', 'phone_received', 'lead_created', 'not_fit', 'lost')
+            WHERE ai_stage IN ('new', 'new_request', 'greeted', 'interested_crm', 'interested_ai', 'interested_website', 'interested_automation', 'interested_other', 'field_provided', 'field_years_provided', 'phone_received', 'lead_created', 'not_fit', 'lost')
         """))
         await session.execute(text("""
             UPDATE cognilabsai_conversation
-            SET ai_stage = 'new_request',
-                ai_stage_label = 'Yangi murojat'
+            SET ai_stage = 'service_interest',
+                ai_stage_label = 'Xizmatga qiziqdi'
             WHERE ai_stage IS NULL
         """))
         await session.execute(text("""
@@ -1965,8 +1987,8 @@ async def upsert_conversation(
         last_message_preview=None,
         last_operator_user_id=None,
         last_operator_name=None,
-        ai_stage="new_request",
-        ai_stage_label=AI_STAGE_LABELS["new_request"],
+        ai_stage="service_interest",
+        ai_stage_label=AI_STAGE_LABELS["service_interest"],
         is_imported=is_imported,
         created_at=now,
         updated_at=now,
@@ -2644,10 +2666,10 @@ def extract_ai_tool_calls(message: dict) -> list[tuple[str, dict]]:
 
 
 async def set_ai_conversation_stage(session: AsyncSession, conversation_id: int, *, stage: str, label: str = "", interest: str = "") -> None:
-    normalized_stage = (stage or "new_request").strip().lower()
+    normalized_stage = (stage or "service_interest").strip().lower()
     normalized_stage = AI_STAGE_ALIASES.get(normalized_stage, normalized_stage)
     if normalized_stage not in AI_STAGE_LABELS:
-        normalized_stage = "new_request"
+        normalized_stage = "service_interest"
     values = {
         "ai_stage": normalized_stage,
         "ai_stage_label": (label or AI_STAGE_LABELS[normalized_stage])[:255],
@@ -3002,6 +3024,15 @@ async def save_lead_state(
     resolved_phone_number = phone_number if phone_number and not is_missing_required_value(phone_number) else ((conversation or {}).get("lead_phone_number") or "")
     resolved_business_field = business_field if business_field and not is_missing_required_value(business_field) else ((conversation or {}).get("lead_business_field") or "")
     resolved_scheduled_time = scheduled_time if scheduled_time and not is_missing_required_value(scheduled_time) else ((conversation or {}).get("lead_scheduled_time") or "")
+    next_stage = "lead_created"
+    if not is_missing_required_value(resolved_full_name) and not is_missing_required_value(resolved_scheduled_time):
+        next_stage = "lead_created"
+    elif not is_missing_required_value(resolved_full_name):
+        next_stage = "name_collected"
+    elif not is_missing_required_value(resolved_scheduled_time):
+        next_stage = "call_time_collected"
+    elif not is_missing_required_value(resolved_phone_number):
+        next_stage = "phone_collected"
     values = {
         "lead_created": True,
         "lead_phone_number": resolved_phone_number,
@@ -3009,8 +3040,8 @@ async def save_lead_state(
         "lead_scheduled_time": resolved_scheduled_time,
         "last_lead_created_at": lead_created_at,
         "ai_follow_up_due_at": None,
-        "ai_stage": "lead_created",
-        "ai_stage_label": "Lead yaratildi",
+        "ai_stage": next_stage,
+        "ai_stage_label": AI_STAGE_LABELS[next_stage],
         "updated_at": utcnow(),
     }
     if resolved_full_name:
@@ -3062,14 +3093,14 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                     "If lead already exists and client later provides name, business field, or call time, call update_lead. "
                     "Always call set_conversation_stage when chat state changes. "
                     "If you call only set_conversation_stage, you still must include a customer-facing text reply in content. "
-                    "Allowed AI stages only: new_request=Yangi murojat, greeted=Salomlashildi, field_provided=Sohasini yozdi, field_years_provided=Sohadagi yil etildi, phone_collected=Telefon olindi, lead_created=Lead yaratildi, lost=Yoqotildi. "
+                    "Allowed AI stages only: service_interest=Xizmatga qiziqdi, business_field=Sohasini yozdi, experience_years=Sohadagi yil etildi, phone_discussion=Telefon orqali muhokama, phone_collected=Telefon olindi, call_time_collected=Qulay vaqt olindi, name_collected=Ism olindi, agreement_confirmed=Kelishuv tasdiqlandi, lead_created=Lead yaratildi, lost=Yoqotildi. "
                     "Lead goal: explain the exact Instagram media context when present, answer customer question, then ask for phone number naturally."
                 ),
             },
         ]
         if conversation:
             stage_context = (
-                f"Current AI stage: {conversation.get('ai_stage') or 'new_request'}; "
+                f"Current AI stage: {conversation.get('ai_stage') or 'service_interest'}; "
                 f"interest: {conversation.get('ai_interest') or ''}; "
                 f"saved phone: {conversation.get('lead_phone_number') or ''}; "
                 f"saved CRM customer id: {conversation.get('crm_customer_id') or ''}."
@@ -3260,7 +3291,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                 await set_ai_conversation_stage(
                     session,
                     conversation_id,
-                    stage=tool_data.get("stage") or "new_request",
+                    stage=tool_data.get("stage") or "service_interest",
                     label=tool_data.get("label") or "",
                     interest=tool_data.get("interest") or "",
                 )

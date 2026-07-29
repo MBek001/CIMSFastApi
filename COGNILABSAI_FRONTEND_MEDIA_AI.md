@@ -117,7 +117,7 @@ Conversation response ichiga yangi fields qo'shildi:
 
 ```json
 {
-  "ai_stage": "field_provided",
+  "ai_stage": "business_field",
   "ai_stage_label": "Sohasini yozdi",
   "ai_interest": "farmatseptika",
   "instagram_media_context_id": 1,
@@ -131,11 +131,14 @@ Frontend kanban uchun `ai_stage` bo'yicha group qilish mumkin.
 Recommended columns:
 
 ```text
-new_request
-greeted
-field_provided
-field_years_provided
+service_interest
+business_field
+experience_years
+phone_discussion
 phone_collected
+call_time_collected
+name_collected
+agreement_confirmed
 lead_created
 lost
 ```
@@ -143,14 +146,34 @@ lost
 Column labels:
 
 ```text
-new_request -> Yangi murojat
-greeted -> Salomlashildi
-field_provided -> Sohasini yozdi
-field_years_provided -> Sohadagi yil etildi
+service_interest -> Xizmatga qiziqdi
+business_field -> Sohasini yozdi
+experience_years -> Sohadagi yil etildi
+phone_discussion -> Telefon orqali muhokama
 phone_collected -> Telefon olindi
+call_time_collected -> Qulay vaqt olindi
+name_collected -> Ism olindi
+agreement_confirmed -> Kelishuv tasdiqlandi
 lead_created -> Lead yaratildi
 lost -> Yoqotildi
 ```
+
+Backenddan tayyor status list olish:
+
+```http
+GET /cognilabsai/chat/ai-stages
+```
+
+Response:
+
+```json
+[
+  {"value": "service_interest", "label": "Xizmatga qiziqdi", "order": 1},
+  {"value": "business_field", "label": "Sohasini yozdi", "order": 2}
+]
+```
+
+Frontend hardcode qilmasin, shu API bo'yicha column chizsin.
 
 Column label uchun:
 
