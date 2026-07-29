@@ -2237,6 +2237,29 @@ async def create_message(
                 )
             )
     await session.commit()
+    if is_client_message and channel in {"instagram", "telegram", "website_ai"}:
+        extracted_phone = extract_phone_number_from_text(text_value)
+        already_has_lead = bool(
+            conversation_before
+            and (
+                conversation_before.get("lead_phone_number")
+                or conversation_before.get("crm_customer_id")
+                or conversation_before.get("lead_created")
+            )
+        )
+        if extracted_phone and not already_has_lead:
+            try:
+                await save_lead_state(
+                    session,
+                    conversation_id,
+                    full_name=(conversation_before or {}).get("client_full_name") or "",
+                    phone_number=extracted_phone,
+                    business_field=(conversation_before or {}).get("lead_business_field") or "",
+                    scheduled_time=(conversation_before or {}).get("lead_scheduled_time") or "",
+                    language="uz",
+                )
+            except Exception as exc:
+                print(f"[cognilabsai] auto phone lead save error (conversation {conversation_id}): {exc}", flush=True)
     message = await get_message_by_id(session, message_id)
     await manager.broadcast(
         {
@@ -2489,6 +2512,25 @@ def normalize_uzbek_phone(phone_number: Optional[str]) -> str:
     if raw.startswith("0") and len(raw) == 10:
         return f"+998{raw[1:]}"
     return phone_number or ""
+
+
+def extract_phone_number_from_text(text_value: Optional[str]) -> Optional[str]:
+    text_value = (text_value or "").strip()
+    if not text_value:
+        return None
+    candidates = re.findall(r"(?<!\w)\+?\d[\d\s().-]{6,}\d(?!\w)", text_value)
+    for candidate in candidates:
+        normalized = normalize_uzbek_phone(candidate)
+        digits = re.sub(r"\D+", "", normalized)
+        if normalized.startswith("+998") and len(digits) == 12:
+            return normalized
+    digits = re.sub(r"\D+", "", text_value)
+    if 9 <= len(digits) <= 12:
+        normalized = normalize_uzbek_phone(digits)
+        normalized_digits = re.sub(r"\D+", "", normalized)
+        if normalized.startswith("+998") and len(normalized_digits) == 12:
+            return normalized
+    return None
 
 
 def sanitize_ai_reply_text(reply_text: Optional[str]) -> str:
