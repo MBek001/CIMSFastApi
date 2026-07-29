@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File
 from sqlalchemy import String, cast, distinct, select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, date, time
-from typing import List
+from typing import List, Literal
 import calendar
 
 # Import qilinadigan modellar
@@ -25,7 +25,7 @@ from utils.page_permissions import (
     validate_page_names,
 )
 from utils.audit import log_audit_event
-from utils.crm_lead_response import get_lead_response_dashboard_stats
+from utils.crm_lead_response import get_lead_response_dashboard_stats_for_period
 
 from  schemes.schemes_users import TodayCustomerInfo,DailyMetricsResponse
 from models.user_models import  user_payment
@@ -319,6 +319,7 @@ def require_ceo_access(current_user=Depends(get_current_active_user)):
 # --- 1. CEO DASHBOARD - Barcha userlar ro'yxati ---
 @router.get("/dashboard", response_model=DashboardResponse, summary="CEO Dashboard - barcha userlar")
 async def ceo_dashboard(
+        lead_response_days: Literal[3, 7] = Query(default=7),
         session: AsyncSession = Depends(get_async_session),
         current_user=Depends(require_ceo_access)
 ):
@@ -336,7 +337,7 @@ async def ceo_dashboard(
     messages_result = await session.execute(select(func.count(message.c.id)))
     messages_count = messages_result.scalar()
     instagram_media_stats = await _get_instagram_media_dashboard_stats(session)
-    lead_response_stats = await get_lead_response_dashboard_stats(session)
+    lead_response_stats = await get_lead_response_dashboard_stats_for_period(session, days=lead_response_days)
 
     # Har bir user uchun permissions olish
     page_rows = await get_all_pages(session)

@@ -32,6 +32,7 @@ from cognilabsai.schemas import (
     WebsiteSessionResponse,
 )
 from cognilabsai.service import (
+    AI_STAGE_LABELS,
     delete_conversation,
     delete_instagram_media_context,
     create_instagram_media_context,
@@ -77,6 +78,20 @@ async def chat_conversations(
     current_user=Depends(require_cognilabsai_chat),
 ):
     return await list_conversations(session, channel=channel, limit=limit, offset=offset)
+
+
+@chat_router.get("/ai-stages", response_model=list[dict])
+async def chat_ai_stages(
+    current_user=Depends(require_cognilabsai_chat),
+):
+    return [
+        {
+            "value": value,
+            "label": label,
+            "order": index + 1,
+        }
+        for index, (value, label) in enumerate(AI_STAGE_LABELS.items())
+    ]
 
 
 @chat_router.get("/conversations/{conversation_id}", response_model=ConversationItem)

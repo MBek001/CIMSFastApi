@@ -44,6 +44,26 @@ def _to_uz_iso(value: Optional[datetime]) -> Optional[str]:
     return value.replace(tzinfo=timezone.utc).astimezone(UZBEKISTAN_TZ).isoformat()
 
 
+def _local_naive_to_uz_iso(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UZBEKISTAN_TZ)
+    else:
+        value = value.astimezone(UZBEKISTAN_TZ)
+    return value.isoformat()
+
+
+def _local_naive_to_utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UZBEKISTAN_TZ)
+    else:
+        value = value.astimezone(UZBEKISTAN_TZ)
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _minutes_between(start: Optional[datetime], end: Optional[datetime]) -> Optional[float]:
     start = _normalize_dt(start)
     end = _normalize_dt(end)
@@ -165,6 +185,7 @@ def build_lead_response_metric(
     first_note_at: Optional[datetime],
 ) -> dict:
     created_at = _normalize_dt(row.created_at)
+    created_at_for_diff = _local_naive_to_utc_naive(created_at)
     current_status = getattr(row, "status_name", None) or (
         row.status.value if hasattr(row.status, "value") else str(row.status or "")
     )
@@ -172,9 +193,9 @@ def build_lead_response_metric(
     first_status_to = first_status["status"] if first_status else None
     main_note = _empty_to_none(getattr(row, "notes", None))
     if main_note and first_note_at is None:
-        first_note_at = created_at
-    response_minutes = _minutes_between(created_at, first_status_at)
-    note_minutes = _minutes_between(created_at, first_note_at)
+        first_note_at = created_at_for_diff
+    response_minutes = _minutes_between(created_at_for_diff, first_status_at)
+    note_minutes = _minutes_between(created_at_for_diff, first_note_at)
     late_minutes = max((response_minutes or 0) - LEAD_RESPONSE_LIMIT_MINUTES, 0) if response_minutes is not None else None
     status_changed = first_status_at is not None
     note_written = first_note_at is not None
@@ -189,7 +210,7 @@ def build_lead_response_metric(
     else:
         message = f"O'z vaqtida bog'lanildi: {response_minutes:.1f} minutda status {first_status_to} ga o'zgardi"
     return {
-        "lead_created_at": _to_uz_iso(created_at),
+        "lead_created_at": _local_naive_to_uz_iso(created_at),
         "current_status": current_status,
         "first_status_changed_at": _to_uz_iso(first_status_at),
         "first_status_changed_to": first_status_to,
@@ -234,8 +255,22 @@ async def get_lead_response_metrics_for_customers(session: AsyncSession, custome
 
 
 async def get_lead_response_dashboard_stats(session: AsyncSession) -> dict:
+    return await get_lead_response_dashboard_stats_for_period(session)
+
+
+async def get_lead_response_dashboard_stats_for_period(session: AsyncSession, days: Optional[int] = None) -> dict:
+    period_start = None
+    period_end = None
+    filters = [customer.c.is_archived.is_not(True)]
+    if days is not None:
+        safe_days = 7 if int(days) == 7 else 3
+        period_end = datetime.now(UZBEKISTAN_TZ).replace(tzinfo=None)
+        period_start = period_end - timedelta(days=safe_days)
+        filters.append(customer.c.created_at >= period_start)
+        filters.append(customer.c.created_at < period_end)
+        days = safe_days
     result = await session.execute(
-        select(customer).where(customer.c.is_archived.is_not(True))
+        select(customer).where(*filters)
     )
     rows = result.fetchall()
     metrics = await get_lead_response_metrics_for_customers(session, rows)
@@ -253,8 +288,49 @@ async def get_lead_response_dashboard_stats(session: AsyncSession) -> dict:
     avg_response_with_note = round(sum(item["response_minutes"] for item in changed_with_note) / len(changed_with_note), 2) if changed_with_note else None
     avg_note = round(sum(item["note_minutes"] for item in with_note if item["note_minutes"] is not None) / len(with_note), 2) if with_note else None
     avg_late = round(sum(item["late_minutes"] for item in late if item["late_minutes"] is not None) / len(late), 2) if late else None
+    status_counts: dict[str, int] = {}
+    daily: dict[str, dict] = {}
+    for item in changed:
+        status_key = item["first_status_changed_to"] or "unknown"
+        status_counts[status_key] = status_counts.get(status_key, 0) + 1
+        day_key = (item["lead_created_at"] or "")[:10] or "unknown"
+        if day_key not in daily:
+            daily[day_key] = {
+                "date": day_key,
+                "total_count": 0,
+                "status_changed_count": 0,
+                "on_time_count": 0,
+                "late_count": 0,
+                "note_written_count": 0,
+                "note_missing_count": 0,
+            }
+        daily[day_key]["status_changed_count"] += 1
+        if item["is_late_response"]:
+            daily[day_key]["late_count"] += 1
+        else:
+            daily[day_key]["on_time_count"] += 1
+    for item in eligible:
+        day_key = (item["lead_created_at"] or "")[:10] or "unknown"
+        if day_key not in daily:
+            daily[day_key] = {
+                "date": day_key,
+                "total_count": 0,
+                "status_changed_count": 0,
+                "on_time_count": 0,
+                "late_count": 0,
+                "note_written_count": 0,
+                "note_missing_count": 0,
+            }
+        daily[day_key]["total_count"] += 1
+        if item["note_written"]:
+            daily[day_key]["note_written_count"] += 1
+        else:
+            daily[day_key]["note_missing_count"] += 1
     return {
         "lead_response_limit_minutes": LEAD_RESPONSE_LIMIT_MINUTES,
+        "lead_response_days": days,
+        "lead_response_period_start": _local_naive_to_uz_iso(period_start),
+        "lead_response_period_end": _local_naive_to_uz_iso(period_end),
         "lead_response_total_count": len(eligible),
         "lead_response_status_changed_count": len(changed),
         "lead_response_on_time_count": len([item for item in changed if not item["is_late_response"]]),
@@ -271,4 +347,6 @@ async def get_lead_response_dashboard_stats(session: AsyncSession) -> dict:
         "lead_response_average_note_human": _format_minutes(avg_note),
         "lead_response_average_late_minutes": avg_late,
         "lead_response_average_late_human": _format_minutes(avg_late),
+        "lead_response_to_status_counts": status_counts,
+        "lead_response_daily": [daily[key] for key in sorted(daily.keys())],
     }

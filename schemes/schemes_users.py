@@ -194,6 +194,11 @@ class DashboardStatistics(BaseModel):
     lead_response_average_note_human: Optional[str] = None
     lead_response_average_late_minutes: Optional[float] = None
     lead_response_average_late_human: Optional[str] = None
+    lead_response_days: Optional[int] = None
+    lead_response_period_start: Optional[str] = None
+    lead_response_period_end: Optional[str] = None
+    lead_response_to_status_counts: dict = Field(default_factory=dict)
+    lead_response_daily: List[dict] = Field(default_factory=list)
 
 class DashboardResponse(BaseModel):
     users: List[dict]
