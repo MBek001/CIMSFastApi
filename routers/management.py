@@ -51,7 +51,8 @@ REQUIRED_CUSTOMER_STATUSES = [
     {"name": "payment_pending", "display_name": "Payment Pending", "description": "Payment pending", "color": "#EAB308", "order": 6, "is_system": True},
     {"name": "project_started", "display_name": "Project Started", "description": "Project started", "color": "#10B981", "order": 7, "is_system": True},
     {"name": "project_finished", "display_name": "Project Finished", "description": "Project finished", "color": "#14B8A6", "order": 8, "is_system": True},
-    {"name": "rejected", "display_name": "Rejected", "description": "Lead rejected", "color": "#EF4444", "order": 9, "is_system": True},
+    {"name": "ndz", "display_name": "NDZ", "description": "NDZ", "color": "#64748B", "order": 9, "is_system": True},
+    {"name": "rejected", "display_name": "Rejected", "description": "Lead rejected", "color": "#EF4444", "order": 10, "is_system": True},
 ]
 REQUIRED_CUSTOMER_STATUS_NAMES = {item["name"] for item in REQUIRED_CUSTOMER_STATUSES}
 REMOVED_STATUS_MAP = {

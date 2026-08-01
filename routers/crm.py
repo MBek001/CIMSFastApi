@@ -56,6 +56,7 @@ CRM_STATUS_KEYS = [
     "payment_pending",
     "project_started",
     "project_finished",
+    "ndz",
     "rejected",
 ]
 
@@ -1726,6 +1727,7 @@ async def get_customer_stats(
         payment_pending=int(status_dict.get("payment_pending", 0)),
         project_started=int(status_dict.get("project_started", 0)),
         project_finished=int(status_dict.get("project_finished", 0)),
+        ndz=int(status_dict.get("ndz", 0)),
         rejected=int(status_dict.get("rejected", 0)),
         status_dict=status_dict,
         status_percentages=status_percentages

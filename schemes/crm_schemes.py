@@ -170,6 +170,7 @@ class CustomerStatsResponse(BaseModel):
     payment_pending: int = 0
     project_started: int
     project_finished: int = 0
+    ndz: int = 0
     rejected: int
     status_dict: Dict[str, int]
     status_percentages: Dict[str, float]
