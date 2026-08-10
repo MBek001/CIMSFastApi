@@ -35,6 +35,55 @@ class ProjectAttachmentResponse(BaseModel):
     created_by_user: Optional[UserSummaryResponse] = None
 
 
+class ProjectTeamResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+    created_by: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+    members: List[UserSummaryResponse] = Field(default_factory=list)
+
+
+class ProjectTeamCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    member_ids: List[int] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class ProjectTeamUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    member_ids: Optional[List[int]] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        return value.strip()
+
+
+class ProjectTelegramGroupRequest(BaseModel):
+    telegram_group_id: Optional[str] = Field(None, max_length=100)
+
+
+class CardStatusHistoryResponse(BaseModel):
+    id: int
+    card_id: int
+    column_id: Optional[int]
+    column_name: str
+    entered_at: datetime
+    left_at: Optional[datetime]
+    duration_seconds: Optional[int]
+    moved_by: Optional[int]
+
+
 class CardResponse(BaseModel):
     id: int
     column_id: int
@@ -45,6 +94,9 @@ class CardResponse(BaseModel):
     assignee_id: Optional[int]
     assignee_ids: List[int] = Field(default_factory=list)
     due_date: Optional[datetime]
+    completed_at: Optional[datetime] = None
+    completion_duration_seconds: Optional[int] = None
+    current_status_duration_seconds: Optional[int] = None
     created_by: Optional[int]
     created_at: datetime
     updated_at: datetime
@@ -57,6 +109,7 @@ class CardResponse(BaseModel):
 class CardDetailResponse(CardResponse):
     board_id: int
     project_id: int
+    status_history: List[CardStatusHistoryResponse] = Field(default_factory=list)
 
 
 class CardListItemResponse(CardDetailResponse):
@@ -105,28 +158,36 @@ class BoardDetailResponse(BaseModel):
 
 class ProjectSummaryResponse(BaseModel):
     id: int
+    team_id: Optional[int] = None
     project_name: str
     project_description: Optional[str]
     project_url: Optional[str]
     project_image: Optional[str]
+    deadline: Optional[datetime] = None
+    telegram_group_id: Optional[str] = None
     created_by: Optional[int]
     created_at: datetime
     updated_at: datetime
     member_count: int = 0
     board_count: int = 0
     created_by_user: Optional[UserSummaryResponse] = None
+    team: Optional[ProjectTeamResponse] = None
 
 
 class ProjectDetailResponse(BaseModel):
     id: int
+    team_id: Optional[int] = None
     project_name: str
     project_description: Optional[str]
     project_url: Optional[str]
     project_image: Optional[str]
+    deadline: Optional[datetime] = None
+    telegram_group_id: Optional[str] = None
     created_by: Optional[int]
     created_at: datetime
     updated_at: datetime
     created_by_user: Optional[UserSummaryResponse] = None
+    team: Optional[ProjectTeamResponse] = None
     members: List[UserSummaryResponse] = Field(default_factory=list)
     boards: List[BoardListItemResponse] = Field(default_factory=list)
     attachments: List[ProjectAttachmentResponse] = Field(default_factory=list)
@@ -158,6 +219,9 @@ class ProjectCreateRequest(BaseModel):
     project_description: Optional[str] = None
     project_url: Optional[str] = Field(None, max_length=500)
     project_image: Optional[str] = Field(None, max_length=500)
+    team_id: Optional[int] = None
+    deadline: Optional[datetime] = None
+    telegram_group_id: Optional[str] = Field(None, max_length=100)
     member_ids: List[int] = Field(default_factory=list)
 
     @field_validator("project_name")
@@ -171,6 +235,9 @@ class ProjectUpdateRequest(BaseModel):
     project_description: Optional[str] = None
     project_url: Optional[str] = Field(None, max_length=500)
     project_image: Optional[str] = Field(None, max_length=500)
+    team_id: Optional[int] = None
+    deadline: Optional[datetime] = None
+    telegram_group_id: Optional[str] = Field(None, max_length=100)
     member_ids: Optional[List[int]] = None
 
     @field_validator("project_name")

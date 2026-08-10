@@ -19,7 +19,7 @@ from routers.update_tracking import router as update_tracking_router
 from routers.management import router as management_router, initialize_default_statuses
 from routers.instagram import router as instagram_router
 from routers.recall_bot import router as recall_bot_router
-from routers.projects import router as projects_router
+from routers.projects import router as projects_router, shutdown_project_task_bot, start_project_task_bot
 from routers.ai_chat import router as ai_chat_router
 from routers.attendance import router as attendance_router
 from routers.audit import router as audit_router
@@ -133,6 +133,7 @@ async def app_startup():
         await initialize_default_statuses(session)
     await startup_cognilabsai()
     await start_backup_bot()
+    await start_project_task_bot()
     _scheduler.add_job(send_daily_backup, "cron", hour=3, minute=0)
     _scheduler.start()
     print("[backup] Scheduler ishga tushdi — har kuni 03:00 (Toshkent)")
@@ -142,6 +143,7 @@ async def app_startup():
 async def app_shutdown():
     await shutdown_cognilabsai()
     await shutdown_backup_bot()
+    await shutdown_project_task_bot()
     _scheduler.shutdown(wait=False)
 
 

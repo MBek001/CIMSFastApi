@@ -60,7 +60,7 @@ import os
 
 load_dotenv()
 
-bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN)
+bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN) if TELEGRAM_UPDATE_BOT_TOKEN else None
 
 DEFAULT_UPDATE_ACCEPT_HOUR_NEXT_DAY = 4
 try:
@@ -1816,9 +1816,7 @@ async def delete_workday_override(
 
 @router.on_event("startup")
 async def start_update_tracking_scheduler() -> None:
-    global _update_bot_scheduler_task
-    if _update_bot_scheduler_task is None or _update_bot_scheduler_task.done():
-        _update_bot_scheduler_task = asyncio.create_task(_update_bot_scheduler_loop())
+    return None
 
 
 @router.on_event("shutdown")
@@ -1858,6 +1856,7 @@ async def telegram_webhook(
     Regular messages:
     - Update messages in format: "Update for <date>\\n#username\\n- task1\\n- task2"
     """
+    return {"status": "disabled", "reason": "Update bot removed. Project moves create updates automatically."}
     message = payload.message or payload.edited_message
     is_edited = payload.edited_message is not None
 

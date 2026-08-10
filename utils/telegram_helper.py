@@ -5,7 +5,7 @@ from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from fastapi import UploadFile, HTTPException
 import io
-from config import TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID, TELEGRAM_UPDATE_BOT_TOKEN
+from config import PROJECT_TASK_BOT_TOKEN, TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID
 
 # Log konfiguratsiyasi
 logging.basicConfig(
@@ -142,7 +142,8 @@ async def send_card_assignment_notification(
     assigner_name: str,
     project_name: str | None = None,
 ) -> None:
-    if not TELEGRAM_UPDATE_BOT_TOKEN:
+    token = PROJECT_TASK_BOT_TOKEN
+    if not token:
         return
     try:
         lines = ["📋 <b>Sizga yangi task berildi!</b>", ""]
@@ -162,7 +163,7 @@ async def send_card_assignment_notification(
             lines.append(f"📅 <b>Muddat:</b> {due_date_text}")
         lines.append(f"👤 <b>Kim berdi:</b> {assigner_name}")
 
-        update_bot = Bot(token=TELEGRAM_UPDATE_BOT_TOKEN, request=request)
+        update_bot = Bot(token=token, request=request)
         await update_bot.send_message(
             chat_id=chat_id,
             text="\n".join(lines),

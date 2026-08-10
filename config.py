@@ -44,6 +44,7 @@ PASSWORD_RESET_EXPIRE_MINUTES = 30
 TELEGRAM_AUDIO_BOT_TOKEN = os.environ.get('TELEGRAM_AUDIO_BOT_TOKEN')  # Audio bot tokeni
 TELEGRAM_UPDATE_BOT_TOKEN = os.environ.get('TELEGRAM_UPDATE_BOT_TOKEN')  # Update bot tokeni
 TELEGRAM_RECALL_BOT_TOKEN = os.environ.get('TELEGRAM_RECALL_BOT_TOKEN')  # Recall reminder bot tokeni
+PROJECT_TASK_BOT_TOKEN = os.environ.get('PROJECT_TASK_BOT_TOKEN')
 
 # Telegram Chat IDs - har bir bot uchun alohida guruh
 TELEGRAM_AUDIO_CHAT_ID = os.environ.get('TELEGRAM_AUDIO_CHAT_ID')  # Audio yuborilayotgan guruh ID

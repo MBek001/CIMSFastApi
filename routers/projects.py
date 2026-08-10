@@ -1,23 +1,32 @@
-from datetime import datetime
+import asyncio
+import re
+from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy import delete, exists, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from telegram import Update as TelegramUpdate
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 from auth_utils.auth_func import get_current_active_user
-from database import engine, get_async_session
+from config import PROJECT_TASK_BOT_TOKEN
+from database import async_session_maker, engine, get_async_session
+from models.admin_models import daily_update_log
 from models.projects_models import (
     CardPriority,
     project,
     project_attachment,
+    project_team,
+    project_team_member,
     project_member,
     project_board,
     project_board_column,
     project_board_card,
     project_board_card_assignee,
     project_board_card_file,
+    project_board_card_status_history,
     ProjectAttachmentType,
 )
 from models.user_models import PageName, user, user_page_permission
@@ -34,6 +43,7 @@ from schemes.projects_schemes import (
     CardListResponse,
     CardMoveRequest,
     CardResponse,
+    CardStatusHistoryResponse,
     ColumnCreateRequest,
     ColumnMoveRequest,
     ColumnUpdateRequest,
@@ -42,6 +52,10 @@ from schemes.projects_schemes import (
     ProjectDetailResponse,
     ProjectListResponse,
     ProjectSummaryResponse,
+    ProjectTeamCreateRequest,
+    ProjectTeamResponse,
+    ProjectTeamUpdateRequest,
+    ProjectTelegramGroupRequest,
     UserSummaryResponse,
 )
 from schemes.schemes_users import CreateResponse, SuccessResponse
@@ -59,6 +73,7 @@ DEFAULT_BOARD_COLUMNS = [
 ]
 
 _project_card_schema_ready = False
+_project_task_bot_app: Optional[Application] = None
 PROJECTS_TZ = ZoneInfo("Asia/Tashkent")
 
 
@@ -119,6 +134,69 @@ async def ensure_project_card_schema() -> None:
         return
 
     async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS project_team (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL UNIQUE,
+                    description TEXT NULL,
+                    created_by INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS project_team_member (
+                    id SERIAL PRIMARY KEY,
+                    team_id INTEGER NOT NULL REFERENCES project_team(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    CONSTRAINT uq_project_team_member UNIQUE (team_id, user_id)
+                )
+                """
+            )
+        )
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_team_member_team_id ON project_team_member(team_id)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_team_member_user_id ON project_team_member(user_id)"""))
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE project
+                ADD COLUMN IF NOT EXISTS team_id INTEGER NULL REFERENCES project_team(id) ON DELETE SET NULL
+                """
+            )
+        )
+        await conn.execute(text("""ALTER TABLE project ADD COLUMN IF NOT EXISTS deadline TIMESTAMP NULL"""))
+        await conn.execute(text("""ALTER TABLE project ADD COLUMN IF NOT EXISTS telegram_group_id VARCHAR(100) NULL"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_team_id ON project(team_id)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_deadline ON project(deadline)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_telegram_group_id ON project(telegram_group_id)"""))
+        await conn.execute(text("""ALTER TABLE project_board_card ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP NULL"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_board_card_due_date ON project_board_card(due_date)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_board_card_completed_at ON project_board_card(completed_at)"""))
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS project_board_card_status_history (
+                    id SERIAL PRIMARY KEY,
+                    card_id INTEGER NOT NULL REFERENCES project_board_card(id) ON DELETE CASCADE,
+                    column_id INTEGER NULL REFERENCES project_board_column(id) ON DELETE SET NULL,
+                    column_name VARCHAR(80) NOT NULL,
+                    entered_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    left_at TIMESTAMP NULL,
+                    duration_seconds INTEGER NULL,
+                    moved_by INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL
+                )
+                """
+            )
+        )
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_card_status_history_card_id ON project_board_card_status_history(card_id)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_card_status_history_open ON project_board_card_status_history(card_id, left_at)"""))
         await conn.execute(
             text(
                 """
@@ -184,6 +262,21 @@ async def ensure_project_card_schema() -> None:
                         END;
                     END IF;
                 END $$;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO project_board_card_status_history (card_id, column_id, column_name, entered_at, moved_by)
+                SELECT card.id, col.id, col.name, COALESCE(card.created_at, NOW()), card.created_by
+                FROM project_board_card AS card
+                JOIN project_board_column AS col ON col.id = card.column_id
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM project_board_card_status_history AS history
+                    WHERE history.card_id = card.id
+                )
                 """
             )
         )
@@ -633,6 +726,419 @@ def delete_card_file_paths(file_rows: Sequence) -> None:
         delete_image_if_exists(file_row.url_path)
 
 
+async def ensure_team_exists(session: AsyncSession, team_id: Optional[int]) -> None:
+    if team_id is None:
+        return
+    result = await session.execute(select(project_team.c.id).where(project_team.c.id == team_id))
+    if result.scalar() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team topilmadi")
+
+
+async def get_project_team_response(session: AsyncSession, team_id: Optional[int]) -> Optional[ProjectTeamResponse]:
+    if team_id is None:
+        return None
+    team_result = await session.execute(select(project_team).where(project_team.c.id == team_id))
+    team_row = team_result.fetchone()
+    if not team_row:
+        return None
+    members_result = await session.execute(
+        select(user.c.id, user.c.name, user.c.surname, user.c.email)
+        .join(project_team_member, project_team_member.c.user_id == user.c.id)
+        .where(project_team_member.c.team_id == team_id)
+        .order_by(user.c.name.asc(), user.c.surname.asc(), user.c.id.asc())
+    )
+    return ProjectTeamResponse(
+        id=team_row.id,
+        name=team_row.name,
+        description=team_row.description,
+        created_by=team_row.created_by,
+        created_at=team_row.created_at,
+        updated_at=team_row.updated_at,
+        members=[
+            UserSummaryResponse(id=row.id, name=row.name, surname=row.surname, email=row.email)
+            for row in members_result.fetchall()
+        ],
+    )
+
+
+async def sync_team_members(session: AsyncSession, team_id: int, member_ids: Sequence[int]) -> None:
+    validated_ids = await ensure_user_ids_exist(session, member_ids, "Team user topilmadi")
+    await session.execute(delete(project_team_member).where(project_team_member.c.team_id == team_id))
+    if validated_ids:
+        await session.execute(
+            insert(project_team_member).values(
+                [
+                    {"team_id": team_id, "user_id": member_id, "created_at": datetime.utcnow()}
+                    for member_id in validated_ids
+                ]
+            )
+        )
+
+
+def is_done_column_name(name: str) -> bool:
+    return str(name or "").strip().lower() in {"done", "completed", "finish", "finished", "yakunlandi", "bajarildi"}
+
+
+async def open_card_status_history(
+    session: AsyncSession,
+    card_id: int,
+    column_id: int,
+    column_name: str,
+    moved_by: Optional[int],
+) -> None:
+    await session.execute(
+        insert(project_board_card_status_history).values(
+            card_id=card_id,
+            column_id=column_id,
+            column_name=column_name,
+            entered_at=datetime.utcnow(),
+            moved_by=moved_by,
+        )
+    )
+
+
+async def close_open_card_status_history(session: AsyncSession, card_id: int) -> None:
+    now = datetime.utcnow()
+    rows = (
+        await session.execute(
+            select(project_board_card_status_history)
+            .where(
+                project_board_card_status_history.c.card_id == card_id,
+                project_board_card_status_history.c.left_at.is_(None),
+            )
+            .order_by(project_board_card_status_history.c.entered_at.desc(), project_board_card_status_history.c.id.desc())
+        )
+    ).fetchall()
+    for row in rows:
+        seconds = max(int((now - row.entered_at).total_seconds()), 0) if row.entered_at else 0
+        await session.execute(
+            update(project_board_card_status_history)
+            .where(project_board_card_status_history.c.id == row.id)
+            .values(left_at=now, duration_seconds=seconds)
+        )
+
+
+async def get_card_status_history_payload(session: AsyncSession, card_id: int) -> List[CardStatusHistoryResponse]:
+    rows = (
+        await session.execute(
+            select(project_board_card_status_history)
+            .where(project_board_card_status_history.c.card_id == card_id)
+            .order_by(project_board_card_status_history.c.entered_at.asc(), project_board_card_status_history.c.id.asc())
+        )
+    ).fetchall()
+    now = datetime.utcnow()
+    payload = []
+    for row in rows:
+        duration_seconds = row.duration_seconds
+        if row.left_at is None and row.entered_at:
+            duration_seconds = max(int((now - row.entered_at).total_seconds()), 0)
+        payload.append(
+            CardStatusHistoryResponse(
+                id=row.id,
+                card_id=row.card_id,
+                column_id=row.column_id,
+                column_name=row.column_name,
+                entered_at=row.entered_at,
+                left_at=row.left_at,
+                duration_seconds=duration_seconds,
+                moved_by=row.moved_by,
+            )
+        )
+    return payload
+
+
+async def get_current_status_duration_seconds(session: AsyncSession, card_id: int) -> Optional[int]:
+    row = (
+        await session.execute(
+            select(project_board_card_status_history.c.entered_at)
+            .where(
+                project_board_card_status_history.c.card_id == card_id,
+                project_board_card_status_history.c.left_at.is_(None),
+            )
+            .order_by(project_board_card_status_history.c.entered_at.desc(), project_board_card_status_history.c.id.desc())
+            .limit(1)
+        )
+    ).fetchone()
+    if not row or not row.entered_at:
+        return None
+    return max(int((datetime.utcnow() - row.entered_at).total_seconds()), 0)
+
+
+def completion_duration_seconds(card_row) -> Optional[int]:
+    if not getattr(card_row, "completed_at", None) or not getattr(card_row, "created_at", None):
+        return None
+    return max(int((card_row.completed_at - card_row.created_at).total_seconds()), 0)
+
+
+async def write_task_move_daily_update(
+    session: AsyncSession,
+    actor_user_id: int,
+    card_title: str,
+    source_name: str,
+    target_name: str,
+) -> None:
+    today = date.today()
+    line = f"- Task move: {card_title} ({source_name} -> {target_name})"
+    marker = f"system-task-move:{actor_user_id}:{today.isoformat()}"
+    existing = (
+        await session.execute(
+            select(daily_update_log)
+            .where(
+                daily_update_log.c.user_id == actor_user_id,
+                daily_update_log.c.update_date == today,
+                daily_update_log.c.telegram_message_id == marker,
+            )
+            .order_by(daily_update_log.c.id.desc())
+            .limit(1)
+        )
+    ).fetchone()
+    if existing:
+        content = f"{existing.update_content}\n{line}" if existing.update_content else line
+        await session.execute(
+            update(daily_update_log)
+            .where(daily_update_log.c.id == existing.id)
+            .values(update_content=content, parsed_at=datetime.utcnow())
+        )
+        return
+    actor = (
+        await session.execute(select(user.c.telegram_id).where(user.c.id == actor_user_id))
+    ).fetchone()
+    await session.execute(
+        insert(daily_update_log).values(
+            user_id=actor_user_id,
+            telegram_username=actor.telegram_id if actor else None,
+            update_date=today,
+            update_content=line,
+            telegram_message_id=marker,
+            is_valid=True,
+            parsed_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+
+
+def parse_project_task_command(text_value: str) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
+    text_value = text_value.strip()
+    command_match = re.match(r"^/(backend|frontend)(?:@\w+)?\s*(.*)$", text_value, re.IGNORECASE | re.DOTALL)
+    if not command_match:
+        return None, None, None
+    body = command_match.group(2).strip()
+    assignee_username = None
+    username_match = re.search(r"@([A-Za-z0-9_]{3,})", body)
+    if username_match:
+        assignee_username = username_match.group(1).lower()
+        body = body.replace(username_match.group(0), " ", 1)
+    due_date = None
+    due_match = re.search(
+        r"\b(?:deadline|due|muddat):\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?",
+        body,
+        re.IGNORECASE,
+    )
+    if due_match:
+        raw_date = due_match.group(1)
+        raw_time = due_match.group(2) or "23:59"
+        due_date = datetime.strptime(f"{raw_date} {raw_time}", "%Y-%m-%d %H:%M")
+        body = body[: due_match.start()] + body[due_match.end() :]
+    body = re.sub(r"\s+", " ", body).strip(" -:\n\t")
+    return body or None, assignee_username, due_date
+
+
+async def find_user_by_telegram_username(session: AsyncSession, username: Optional[str]):
+    if not username:
+        return None
+    normalized = username.strip().lower().lstrip("@")
+    return (
+        await session.execute(
+            select(user)
+            .where(func.lower(func.replace(user.c.telegram_id, "@", "")) == normalized)
+            .limit(1)
+        )
+    ).fetchone()
+
+
+async def get_or_create_project_board_by_name(
+    session: AsyncSession,
+    project_id: int,
+    board_name: str,
+    created_by: Optional[int],
+):
+    board_row = (
+        await session.execute(
+            select(project_board)
+            .where(
+                project_board.c.project_id == project_id,
+                func.lower(project_board.c.name) == board_name.lower(),
+                project_board.c.is_archived == False,
+            )
+            .limit(1)
+        )
+    ).fetchone()
+    if board_row:
+        return board_row
+    result = await session.execute(
+        insert(project_board)
+        .values(
+            project_id=project_id,
+            name=board_name,
+            description=None,
+            created_by=created_by,
+            created_at=datetime.utcnow(),
+            is_archived=False,
+        )
+        .returning(project_board)
+    )
+    board_row = result.fetchone()
+    await session.execute(
+        insert(project_board_column).values(
+            [
+                {
+                    "board_id": board_row.id,
+                    "name": column_data["name"],
+                    "order": index,
+                    "color": column_data["color"],
+                    "created_at": datetime.utcnow(),
+                }
+                for index, column_data in enumerate(DEFAULT_BOARD_COLUMNS)
+            ]
+        )
+    )
+    return board_row
+
+
+async def get_first_board_column(session: AsyncSession, board_id: int):
+    column_row = (
+        await session.execute(
+            select(project_board_column)
+            .where(project_board_column.c.board_id == board_id)
+            .order_by(project_board_column.c.order.asc(), project_board_column.c.id.asc())
+            .limit(1)
+        )
+    ).fetchone()
+    if column_row:
+        return column_row
+    result = await session.execute(
+        insert(project_board_column)
+        .values(
+            board_id=board_id,
+            name=DEFAULT_BOARD_COLUMNS[0]["name"],
+            order=0,
+            color=DEFAULT_BOARD_COLUMNS[0]["color"],
+            created_at=datetime.utcnow(),
+        )
+        .returning(project_board_column)
+    )
+    return result.fetchone()
+
+
+async def create_project_task_from_group_message(kind: str, chat_id: int, sender_username: Optional[str], text_value: str) -> dict:
+    await ensure_project_card_schema()
+    task_title, assignee_username, due_date = parse_project_task_command(text_value)
+    if not task_title:
+        return {"status": "error", "message": "Task text topilmadi"}
+    async with async_session_maker() as session:
+        project_row = (
+            await session.execute(
+                select(project)
+                .where(project.c.telegram_group_id == str(chat_id))
+                .order_by(project.c.id.desc())
+                .limit(1)
+            )
+        ).fetchone()
+        if not project_row:
+            return {"status": "error", "message": "Bu Telegram group projectga bog'lanmagan"}
+        sender_row = await find_user_by_telegram_username(session, sender_username)
+        assignee_row = await find_user_by_telegram_username(session, assignee_username)
+        board_row = await get_or_create_project_board_by_name(
+            session,
+            project_row.id,
+            "Backend" if kind == "backend" else "Frontend",
+            sender_row.id if sender_row else None,
+        )
+        column_row = await get_first_board_column(session, board_row.id)
+        count_result = await session.execute(
+            select(func.count(project_board_card.c.id)).where(project_board_card.c.column_id == column_row.id)
+        )
+        next_order = int(count_result.scalar() or 0)
+        result = await session.execute(
+            insert(project_board_card)
+            .values(
+                column_id=column_row.id,
+                title=task_title,
+                description=f"Telegram groupdan qo'shildi: {kind}",
+                order=next_order,
+                priority=CardPriority.medium,
+                assignee_id=assignee_row.id if assignee_row else None,
+                due_date=normalize_project_datetime(due_date),
+                created_by=sender_row.id if sender_row else None,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            .returning(project_board_card.c.id)
+        )
+        card_id = result.scalar_one()
+        await sync_card_assignees(session, card_id, [assignee_row.id] if assignee_row else [])
+        await open_card_status_history(session, card_id, column_row.id, column_row.name, sender_row.id if sender_row else None)
+        await session.commit()
+        if assignee_row and assignee_row.chat_id:
+            await send_card_assignment_notification(
+                assignee_row.chat_id,
+                task_title,
+                f"Telegram groupdan qo'shildi: {kind}",
+                CardPriority.medium.value,
+                due_date,
+                sender_username or "Telegram group",
+                project_row.project_name,
+            )
+        return {
+            "status": "ok",
+            "card_id": card_id,
+            "project_id": project_row.id,
+            "board": board_row.name,
+            "assignee_id": assignee_row.id if assignee_row else None,
+        }
+
+
+async def project_task_command_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update_obj.effective_message
+    if not message or not message.text or not update_obj.effective_chat:
+        return
+    command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
+    result = await create_project_task_from_group_message(
+        command,
+        update_obj.effective_chat.id,
+        update_obj.effective_user.username if update_obj.effective_user else None,
+        message.text,
+    )
+    if result.get("status") != "ok":
+        await message.reply_text(result.get("message", "Task yaratilmadi"))
+        return
+    assignee_text = f" assignee_id={result.get('assignee_id')}" if result.get("assignee_id") else " assignee topilmadi"
+    await message.reply_text(f"Task yaratildi: #{result['card_id']} ({result['board']}){assignee_text}")
+
+
+async def start_project_task_bot() -> None:
+    global _project_task_bot_app
+    if _project_task_bot_app or not PROJECT_TASK_BOT_TOKEN:
+        return
+    _project_task_bot_app = Application.builder().token(PROJECT_TASK_BOT_TOKEN).build()
+    _project_task_bot_app.add_handler(CommandHandler("backend", project_task_command_handler))
+    _project_task_bot_app.add_handler(CommandHandler("frontend", project_task_command_handler))
+    await _project_task_bot_app.initialize()
+    await _project_task_bot_app.start()
+    await _project_task_bot_app.updater.start_polling(drop_pending_updates=True)
+    print("[projects] Project task bot ishga tushdi")
+
+
+async def shutdown_project_task_bot() -> None:
+    global _project_task_bot_app
+    if not _project_task_bot_app:
+        return
+    await _project_task_bot_app.updater.stop()
+    await _project_task_bot_app.stop()
+    await _project_task_bot_app.shutdown()
+    _project_task_bot_app = None
+
+
 async def get_project_attachments_map(
     session: AsyncSession, project_ids: Sequence[int]
 ) -> Dict[int, List[ProjectAttachmentResponse]]:
@@ -737,6 +1243,8 @@ async def build_board_detail(
                 assignee_id=assignee_ids[0] if assignee_ids else None,
                 assignee_ids=assignee_ids,
                 due_date=card_row.due_date,
+                completed_at=card_row.completed_at,
+                completion_duration_seconds=completion_duration_seconds(card_row),
                 created_by=card_row.created_by,
                 created_at=card_row.created_at,
                 updated_at=card_row.updated_at,
@@ -780,6 +1288,7 @@ async def build_card_detail(session: AsyncSession, card_row) -> CardDetailRespon
     user_ids = {user_id for user_id in [card_row.created_by, *assignee_ids] if user_id}
     user_map = await get_user_map(session, user_ids)
     files_map = await get_card_files_map(session, [card_row.id])
+    status_history = await get_card_status_history_payload(session, card_row.id)
 
     return CardDetailResponse(
         id=card_row.id,
@@ -793,6 +1302,9 @@ async def build_card_detail(session: AsyncSession, card_row) -> CardDetailRespon
         assignee_id=assignee_ids[0] if assignee_ids else None,
         assignee_ids=assignee_ids,
         due_date=card_row.due_date,
+        completed_at=card_row.completed_at,
+        completion_duration_seconds=completion_duration_seconds(card_row),
+        current_status_duration_seconds=await get_current_status_duration_seconds(session, card_row.id),
         created_by=card_row.created_by,
         created_at=card_row.created_at,
         updated_at=card_row.updated_at,
@@ -800,6 +1312,7 @@ async def build_card_detail(session: AsyncSession, card_row) -> CardDetailRespon
         assignees=[user_map[assignee_id] for assignee_id in assignee_ids if assignee_id in user_map],
         created_by_user=user_map.get(card_row.created_by),
         files=files_map.get(card_row.id, []),
+        status_history=status_history,
     )
 
 
@@ -831,10 +1344,13 @@ async def list_projects(
     projects_payload = [
         ProjectSummaryResponse(
             id=project_row.id,
+            team_id=project_row.team_id,
             project_name=project_row.project_name,
             project_description=project_row.project_description,
             project_url=project_row.project_url,
             project_image=project_row.project_image,
+            deadline=project_row.deadline,
+            telegram_group_id=project_row.telegram_group_id,
             created_by=project_row.created_by,
             created_at=project_row.created_at,
             updated_at=project_row.updated_at,
@@ -872,11 +1388,107 @@ async def list_all_users_for_assignment(
     ]
 
 
+@router.get("/projects/teams", response_model=List[ProjectTeamResponse], summary="Project teamlar")
+async def list_project_teams(
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_card_schema()
+    await ensure_projects_page_access(session, current_user)
+    rows = (
+        await session.execute(select(project_team).order_by(project_team.c.name.asc(), project_team.c.id.asc()))
+    ).fetchall()
+    teams = []
+    for row in rows:
+        team_response = await get_project_team_response(session, row.id)
+        if team_response:
+            teams.append(team_response)
+    return teams
+
+
+@router.post("/projects/teams", response_model=CreateResponse, summary="Project team yaratish")
+async def create_project_team(
+    team_data: ProjectTeamCreateRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_card_schema()
+    await ensure_projects_page_access(session, current_user)
+    result = await session.execute(
+        insert(project_team)
+        .values(
+            name=team_data.name,
+            description=team_data.description,
+            created_by=current_user.id,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        .returning(project_team.c.id)
+    )
+    team_id = result.scalar_one()
+    await sync_team_members(session, team_id, team_data.member_ids)
+    await session.commit()
+    return CreateResponse(message="Team yaratildi", id=team_id)
+
+
+@router.get("/projects/teams/{team_id}", response_model=ProjectTeamResponse, summary="Project team detail")
+async def get_project_team_detail(
+    team_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_card_schema()
+    await ensure_projects_page_access(session, current_user)
+    team_response = await get_project_team_response(session, team_id)
+    if not team_response:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team topilmadi")
+    return team_response
+
+
+@router.patch("/projects/teams/{team_id}", response_model=SuccessResponse, summary="Project team yangilash")
+async def update_project_team(
+    team_id: int,
+    team_data: ProjectTeamUpdateRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_card_schema()
+    await ensure_projects_page_access(session, current_user)
+    await ensure_team_exists(session, team_id)
+    update_values = team_data.model_dump(exclude_unset=True, exclude={"member_ids"})
+    if update_values:
+        update_values["updated_at"] = datetime.utcnow()
+        await session.execute(update(project_team).where(project_team.c.id == team_id).values(**update_values))
+    if team_data.member_ids is not None:
+        await sync_team_members(session, team_id, team_data.member_ids)
+    if not update_values and team_data.member_ids is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Yangilanadigan ma'lumot topilmadi")
+    await session.commit()
+    return SuccessResponse(message="Team yangilandi")
+
+
+@router.delete("/projects/teams/{team_id}", response_model=SuccessResponse, summary="Project team o'chirish")
+async def delete_project_team(
+    team_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_card_schema()
+    await ensure_projects_page_access(session, current_user)
+    await ensure_team_exists(session, team_id)
+    await session.execute(delete(project_team).where(project_team.c.id == team_id))
+    await session.commit()
+    return SuccessResponse(message="Team o'chirildi")
+
+
 @router.post("/projects", response_model=CreateResponse, summary="Yangi project yaratish")
 async def create_project(
     project_name: str = Form(...),
     project_description: Optional[str] = Form(None),
     project_url: Optional[str] = Form(None),
+    team_id: Optional[int] = Form(None),
+    deadline: Optional[datetime] = Form(None),
+    telegram_group_id: Optional[str] = Form(None),
     member_ids: Optional[List[str]] = Form(None),
     image: Optional[UploadFile] = File(None),
     session: AsyncSession = Depends(get_async_session),
@@ -893,15 +1505,19 @@ async def create_project(
 
     parsed_member_ids = parse_member_ids_form(member_ids) or []
     validated_member_ids = await ensure_valid_member_ids(session, parsed_member_ids, current_user.id)
+    await ensure_team_exists(session, team_id)
     image_path = await save_image(image, "project") if image else None
 
     result = await session.execute(
         insert(project)
         .values(
             project_name=project_name,
+            team_id=team_id,
             project_description=project_description,
             project_url=project_url,
             project_image=image_path,
+            deadline=normalize_project_datetime(deadline),
+            telegram_group_id=telegram_group_id.strip() if telegram_group_id else None,
             created_by=current_user.id,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
@@ -974,14 +1590,18 @@ async def get_project_detail(
 
     return ProjectDetailResponse(
         id=project_row.id,
+        team_id=project_row.team_id,
         project_name=project_row.project_name,
         project_description=project_row.project_description,
         project_url=project_row.project_url,
         project_image=project_row.project_image,
+        deadline=project_row.deadline,
+        telegram_group_id=project_row.telegram_group_id,
         created_by=project_row.created_by,
         created_at=project_row.created_at,
         updated_at=project_row.updated_at,
         created_by_user=user_map.get(project_row.created_by),
+        team=await get_project_team_response(session, project_row.team_id),
         members=members,
         boards=boards,
         attachments=attachments_map.get(project_id, []),
@@ -1025,6 +1645,9 @@ async def update_project(
     project_name: Optional[str] = Form(None),
     project_description: Optional[str] = Form(None),
     project_url: Optional[str] = Form(None),
+    team_id: Optional[int] = Form(None),
+    deadline: Optional[datetime] = Form(None),
+    telegram_group_id: Optional[str] = Form(None),
     member_ids: Optional[List[str]] = Form(None),
     image: Optional[UploadFile] = File(None),
     session: AsyncSession = Depends(get_async_session),
@@ -1046,6 +1669,13 @@ async def update_project(
         update_values["project_description"] = project_description
     if project_url is not None:
         update_values["project_url"] = project_url
+    if team_id is not None:
+        await ensure_team_exists(session, team_id)
+        update_values["team_id"] = team_id
+    if deadline is not None:
+        update_values["deadline"] = normalize_project_datetime(deadline)
+    if telegram_group_id is not None:
+        update_values["telegram_group_id"] = telegram_group_id.strip() or None
 
     parsed_member_ids = parse_member_ids_form(member_ids)
     if parsed_member_ids is not None:
@@ -1085,6 +1715,27 @@ async def update_project(
 
     await session.commit()
     return SuccessResponse(message="Project muvaffaqiyatli yangilandi")
+
+
+@router.patch("/projects/{project_id}/telegram-group", response_model=SuccessResponse, summary="Project Telegram group bog'lash")
+async def update_project_telegram_group(
+    project_id: int,
+    group_data: ProjectTelegramGroupRequest,
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_project_card_schema()
+    await ensure_project_member_access(session, project_id, current_user)
+    await session.execute(
+        update(project)
+        .where(project.c.id == project_id)
+        .values(
+            telegram_group_id=group_data.telegram_group_id.strip() if group_data.telegram_group_id else None,
+            updated_at=datetime.utcnow(),
+        )
+    )
+    await session.commit()
+    return SuccessResponse(message="Project Telegram group yangilandi")
 
 
 @router.delete("/projects/{project_id}", response_model=SuccessResponse, summary="Projectni o'chirish")
@@ -1638,6 +2289,7 @@ async def create_card(
     card_id = result.scalar_one()
 
     await sync_card_assignees(session, card_id, validated_assignee_ids)
+    await open_card_status_history(session, card_id, column_row.id, column_row.name, current_user.id)
     await save_card_images(session, card_id, images)
     sibling_ids.insert(target_order, card_id)
     await resequence_cards(session, sibling_ids)
@@ -1715,10 +2367,13 @@ async def open_list_projects_by_user(
     projects_payload = [
         ProjectSummaryResponse(
             id=project_row.id,
+            team_id=project_row.team_id,
             project_name=project_row.project_name,
             project_description=project_row.project_description,
             project_url=project_row.project_url,
             project_image=project_row.project_image,
+            deadline=project_row.deadline,
+            telegram_group_id=project_row.telegram_group_id,
             created_by=project_row.created_by,
             created_at=project_row.created_at,
             updated_at=project_row.updated_at,
@@ -1784,14 +2439,18 @@ async def open_get_project_detail_by_user(
 
     return ProjectDetailResponse(
         id=project_row.id,
+        team_id=project_row.team_id,
         project_name=project_row.project_name,
         project_description=project_row.project_description,
         project_url=project_row.project_url,
         project_image=project_row.project_image,
+        deadline=project_row.deadline,
+        telegram_group_id=project_row.telegram_group_id,
         created_by=project_row.created_by,
         created_at=project_row.created_at,
         updated_at=project_row.updated_at,
         created_by_user=user_map.get(project_row.created_by),
+        team=await get_project_team_response(session, project_row.team_id),
         members=members,
         boards=boards,
         attachments=attachments_map.get(project_id, []),
@@ -1894,6 +2553,8 @@ async def open_list_cards_by_user(
                 assignee_id=assignee_ids[0] if assignee_ids else None,
                 assignee_ids=assignee_ids,
                 due_date=row.due_date,
+                completed_at=row.completed_at,
+                completion_duration_seconds=completion_duration_seconds(row),
                 created_by=row.created_by,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
@@ -2107,6 +2768,20 @@ async def move_card(
         target_ids.insert(clamp_position(move_data.order, len(target_ids)), card_id)
         await resequence_cards(session, source_ids)
         await resequence_cards(session, target_ids)
+        await close_open_card_status_history(session, card_id)
+        await open_card_status_history(session, card_id, target_column.id, target_column.name, current_user.id)
+        complete_values = {}
+        if is_done_column_name(target_column.name) and card_row.completed_at is None:
+            complete_values["completed_at"] = datetime.utcnow()
+        elif not is_done_column_name(target_column.name):
+            complete_values["completed_at"] = None
+        if complete_values:
+            await session.execute(
+                update(project_board_card)
+                .where(project_board_card.c.id == card_id)
+                .values(**complete_values)
+            )
+        await write_task_move_daily_update(session, current_user.id, card_row.title, source_column.name, target_column.name)
 
     await session.execute(
         update(project_board_card)

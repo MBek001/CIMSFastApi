@@ -35,13 +35,39 @@ project = Table(
     "project",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("team_id", Integer, ForeignKey("project_team.id", ondelete="SET NULL"), nullable=True),
     Column("project_name", String(255), nullable=False),
     Column("project_description", Text, nullable=True),
     Column("project_url", String(500), nullable=True),
     Column("project_image", String(500), nullable=True),
+    Column("deadline", DateTime, nullable=True),
+    Column("telegram_group_id", String(100), nullable=True),
     Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
+)
+
+
+project_team = Table(
+    "project_team",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(255), nullable=False, unique=True),
+    Column("description", Text, nullable=True),
+    Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
+)
+
+
+project_team_member = Table(
+    "project_team_member",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("team_id", Integer, ForeignKey("project_team.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    UniqueConstraint("team_id", "user_id", name="uq_project_team_member"),
 )
 
 
@@ -93,10 +119,25 @@ project_board_card = Table(
     Column("priority", Enum(CardPriority, name="cardpriority"), default=CardPriority.medium, nullable=False),
     Column("assignee_id", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("due_date", DateTime, nullable=True),
+    Column("completed_at", DateTime, nullable=True),
     Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
     UniqueConstraint("column_id", "order", name="uq_project_board_card_order"),
+)
+
+
+project_board_card_status_history = Table(
+    "project_board_card_status_history",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("card_id", Integer, ForeignKey("project_board_card.id", ondelete="CASCADE"), nullable=False),
+    Column("column_id", Integer, ForeignKey("project_board_column.id", ondelete="SET NULL"), nullable=True),
+    Column("column_name", String(80), nullable=False),
+    Column("entered_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("left_at", DateTime, nullable=True),
+    Column("duration_seconds", Integer, nullable=True),
+    Column("moved_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
 )
 
 
@@ -140,10 +181,20 @@ project_attachment = Table(
 
 Index("idx_project_member_project_id", project_member.c.project_id)
 Index("idx_project_member_user_id", project_member.c.user_id)
+Index("idx_project_team_member_team_id", project_team_member.c.team_id)
+Index("idx_project_team_member_user_id", project_team_member.c.user_id)
+Index("idx_project_team_created_by", project_team.c.created_by)
+Index("idx_project_team_id", project.c.team_id)
+Index("idx_project_deadline", project.c.deadline)
+Index("idx_project_telegram_group_id", project.c.telegram_group_id)
 Index("idx_project_board_project_id", project_board.c.project_id)
 Index("idx_project_board_column_board_id", project_board_column.c.board_id)
 Index("idx_project_board_card_column_id", project_board_card.c.column_id)
 Index("idx_project_board_card_assignee_id", project_board_card.c.assignee_id)
+Index("idx_project_board_card_due_date", project_board_card.c.due_date)
+Index("idx_project_board_card_completed_at", project_board_card.c.completed_at)
+Index("idx_project_card_status_history_card_id", project_board_card_status_history.c.card_id)
+Index("idx_project_card_status_history_open", project_board_card_status_history.c.card_id, project_board_card_status_history.c.left_at)
 Index("idx_project_board_card_assignee_card_id", project_board_card_assignee.c.card_id)
 Index("idx_project_board_card_assignee_user_id", project_board_card_assignee.c.user_id)
 Index("idx_project_board_card_file_card_id", project_board_card_file.c.card_id)
