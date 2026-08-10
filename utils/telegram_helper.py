@@ -5,7 +5,7 @@ from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from fastapi import UploadFile, HTTPException
 import io
-from config import PROJECT_TASK_BOT_TOKEN, TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID
+from config import PROJECT_TASK_BOT_TOKEN, TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID, TELEGRAM_UPDATE_BOT_TOKEN
 
 # Log konfiguratsiyasi
 logging.basicConfig(
@@ -142,7 +142,7 @@ async def send_card_assignment_notification(
     assigner_name: str,
     project_name: str | None = None,
 ) -> None:
-    token = PROJECT_TASK_BOT_TOKEN
+    token = PROJECT_TASK_BOT_TOKEN or TELEGRAM_UPDATE_BOT_TOKEN
     if not token:
         return
     try:

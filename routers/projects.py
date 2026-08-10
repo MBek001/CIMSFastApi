@@ -11,7 +11,7 @@ from telegram import Update as TelegramUpdate
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from auth_utils.auth_func import get_current_active_user
-from config import PROJECT_TASK_BOT_TOKEN
+from config import PROJECT_TASK_BOT_TOKEN, TELEGRAM_UPDATE_BOT_TOKEN
 from database import async_session_maker, engine, get_async_session
 from models.admin_models import daily_update_log
 from models.projects_models import (
@@ -917,17 +917,12 @@ async def write_task_move_daily_update(
     )
 
 
-def parse_project_task_command(text_value: str) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
+def parse_project_task_command(text_value: str) -> Tuple[Optional[str], Optional[datetime]]:
     text_value = text_value.strip()
     command_match = re.match(r"^/(backend|frontend)(?:@\w+)?\s*(.*)$", text_value, re.IGNORECASE | re.DOTALL)
     if not command_match:
-        return None, None, None
+        return None, None
     body = command_match.group(2).strip()
-    assignee_username = None
-    username_match = re.search(r"@([A-Za-z0-9_]{3,})", body)
-    if username_match:
-        assignee_username = username_match.group(1).lower()
-        body = body.replace(username_match.group(0), " ", 1)
     due_date = None
     due_match = re.search(
         r"\b(?:deadline|due|muddat):\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?",
@@ -940,7 +935,7 @@ def parse_project_task_command(text_value: str) -> Tuple[Optional[str], Optional
         due_date = datetime.strptime(f"{raw_date} {raw_time}", "%Y-%m-%d %H:%M")
         body = body[: due_match.start()] + body[due_match.end() :]
     body = re.sub(r"\s+", " ", body).strip(" -:\n\t")
-    return body or None, assignee_username, due_date
+    return body or None, due_date
 
 
 async def find_user_by_telegram_username(session: AsyncSession, username: Optional[str]):
@@ -954,6 +949,62 @@ async def find_user_by_telegram_username(session: AsyncSession, username: Option
             .limit(1)
         )
     ).fetchone()
+
+
+async def register_project_task_chat(session: AsyncSession, username: Optional[str], chat_id: int) -> bool:
+    if not username:
+        return False
+    target = await find_user_by_telegram_username(session, username)
+    if not target:
+        return False
+    await session.execute(
+        update(user)
+        .where(user.c.id == target.id)
+        .values(chat_id=str(chat_id))
+    )
+    await session.commit()
+    return True
+
+
+def user_matches_task_kind(row, kind: str) -> bool:
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in [
+            getattr(row, "job_title", None),
+            getattr(row, "role_name", None),
+            getattr(row, "company_code", None),
+            getattr(row, "email", None),
+        ]
+    )
+    aliases = {
+        "backend": ["backend", "back-end", "python", "fastapi", "api"],
+        "frontend": ["frontend", "front-end", "react", "vue", "next", "web"],
+    }
+    return any(alias in haystack for alias in aliases.get(kind, [kind]))
+
+
+async def resolve_project_task_assignees(session: AsyncSession, project_row, kind: str) -> List:
+    source = project_team_member if project_row.team_id else project_member
+    project_filter = source.c.team_id == project_row.team_id if project_row.team_id else source.c.project_id == project_row.id
+    rows = (
+        await session.execute(
+            select(
+                user.c.id,
+                user.c.name,
+                user.c.surname,
+                user.c.email,
+                user.c.telegram_id,
+                user.c.chat_id,
+                user.c.job_title,
+                user.c.role_name,
+                user.c.company_code,
+            )
+            .join(source, source.c.user_id == user.c.id)
+            .where(project_filter)
+            .order_by(user.c.id.asc())
+        )
+    ).fetchall()
+    return [row for row in rows if user_matches_task_kind(row, kind)]
 
 
 async def get_or_create_project_board_by_name(
@@ -1032,7 +1083,7 @@ async def get_first_board_column(session: AsyncSession, board_id: int):
 
 async def create_project_task_from_group_message(kind: str, chat_id: int, sender_username: Optional[str], text_value: str) -> dict:
     await ensure_project_card_schema()
-    task_title, assignee_username, due_date = parse_project_task_command(text_value)
+    task_title, due_date = parse_project_task_command(text_value)
     if not task_title:
         return {"status": "error", "message": "Task text topilmadi"}
     async with async_session_maker() as session:
@@ -1047,7 +1098,8 @@ async def create_project_task_from_group_message(kind: str, chat_id: int, sender
         if not project_row:
             return {"status": "error", "message": "Bu Telegram group projectga bog'lanmagan"}
         sender_row = await find_user_by_telegram_username(session, sender_username)
-        assignee_row = await find_user_by_telegram_username(session, assignee_username)
+        assignee_rows = await resolve_project_task_assignees(session, project_row, kind)
+        assignee_ids = [row.id for row in assignee_rows]
         board_row = await get_or_create_project_board_by_name(
             session,
             project_row.id,
@@ -1067,7 +1119,7 @@ async def create_project_task_from_group_message(kind: str, chat_id: int, sender
                 description=f"Telegram groupdan qo'shildi: {kind}",
                 order=next_order,
                 priority=CardPriority.medium,
-                assignee_id=assignee_row.id if assignee_row else None,
+                assignee_id=assignee_ids[0] if assignee_ids else None,
                 due_date=normalize_project_datetime(due_date),
                 created_by=sender_row.id if sender_row else None,
                 created_at=datetime.utcnow(),
@@ -1076,10 +1128,12 @@ async def create_project_task_from_group_message(kind: str, chat_id: int, sender
             .returning(project_board_card.c.id)
         )
         card_id = result.scalar_one()
-        await sync_card_assignees(session, card_id, [assignee_row.id] if assignee_row else [])
+        await sync_card_assignees(session, card_id, assignee_ids)
         await open_card_status_history(session, card_id, column_row.id, column_row.name, sender_row.id if sender_row else None)
         await session.commit()
-        if assignee_row and assignee_row.chat_id:
+        for assignee_row in assignee_rows:
+            if not assignee_row.chat_id:
+                continue
             await send_card_assignment_notification(
                 assignee_row.chat_id,
                 task_title,
@@ -1094,8 +1148,27 @@ async def create_project_task_from_group_message(kind: str, chat_id: int, sender
             "card_id": card_id,
             "project_id": project_row.id,
             "board": board_row.name,
-            "assignee_id": assignee_row.id if assignee_row else None,
+            "assignee_ids": assignee_ids,
         }
+
+
+async def project_task_start_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update_obj.effective_message
+    if not message or not update_obj.effective_chat or not update_obj.effective_user:
+        return
+    if update_obj.effective_chat.type not in {"private"}:
+        await message.reply_text("Botga private chatda /start yuboring.")
+        return
+    async with async_session_maker() as session:
+        registered = await register_project_task_chat(
+            session,
+            update_obj.effective_user.username,
+            update_obj.effective_chat.id,
+        )
+    if registered:
+        await message.reply_text("Task bot ulandi. Endi tasklar shu chatga keladi.")
+    else:
+        await message.reply_text("User topilmadi. CIMS profile telegram_id username bilan bir xil bo'lishi kerak.")
 
 
 async def project_task_command_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1112,15 +1185,18 @@ async def project_task_command_handler(update_obj: TelegramUpdate, context: Cont
     if result.get("status") != "ok":
         await message.reply_text(result.get("message", "Task yaratilmadi"))
         return
-    assignee_text = f" assignee_id={result.get('assignee_id')}" if result.get("assignee_id") else " assignee topilmadi"
+    assignee_count = len(result.get("assignee_ids") or [])
+    assignee_text = f" assignees={assignee_count}" if assignee_count else " assignee topilmadi"
     await message.reply_text(f"Task yaratildi: #{result['card_id']} ({result['board']}){assignee_text}")
 
 
 async def start_project_task_bot() -> None:
     global _project_task_bot_app
-    if _project_task_bot_app or not PROJECT_TASK_BOT_TOKEN:
+    token = PROJECT_TASK_BOT_TOKEN or TELEGRAM_UPDATE_BOT_TOKEN
+    if _project_task_bot_app or not token:
         return
-    _project_task_bot_app = Application.builder().token(PROJECT_TASK_BOT_TOKEN).build()
+    _project_task_bot_app = Application.builder().token(token).build()
+    _project_task_bot_app.add_handler(CommandHandler("start", project_task_start_handler))
     _project_task_bot_app.add_handler(CommandHandler("backend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("frontend", project_task_command_handler))
     await _project_task_bot_app.initialize()

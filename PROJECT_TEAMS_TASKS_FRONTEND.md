@@ -33,10 +33,13 @@ Backend changes:
 
 - Telegram group task:
   - Projectga `telegram_group_id` bind qilinadi.
-  - Bot token server `.env`: `PROJECT_TASK_BOT_TOKEN`.
+  - Bot token server `.env`: `PROJECT_TASK_BOT_TOKEN` yoki mavjud `TELEGRAM_UPDATE_BOT_TOKEN`.
+  - User botga private chatda `/start` yuboradi; backend `user.chat_id` ni saqlaydi.
   - Group command:
-    - `/backend @telegram_username deadline:2026-08-15 Task text`
-    - `/frontend @telegram_username deadline:2026-08-15 18:00 Task text`
+    - `/backend deadline:2026-08-15 Task text`
+    - `/frontend deadline:2026-08-15 18:00 Task text`
   - Backend/Frontend board alohida yaratiladi.
   - Task birinchi column (`To Do`) ga tushadi.
+  - Assignee project team/project member ichidan `job_title`, `role_name`, `email`, `company_code` bo‘yicha backend/frontend qilib topiladi.
   - Assignee topilsa userga Telegram xabar boradi.
+  - CIMS UI dan task qo‘shilganda ham assignee userlarga Telegram xabar boradi.
