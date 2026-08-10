@@ -1,3 +1,6 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -122,6 +125,11 @@ async def root():
         "approach": "Table-based SQLAlchemy",
         "docs": "/docs",
     }
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "time": datetime.now(ZoneInfo("Asia/Tashkent")).isoformat()}
 
 
 _scheduler = AsyncIOScheduler(timezone="Asia/Tashkent")

@@ -4,13 +4,13 @@ from datetime import datetime, date as date_type
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import and_, delete, insert, or_, select, update
+from sqlalchemy import String, and_, delete, extract, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_utils.auth_func import get_current_active_user
 from config import ATTENDANCE_API_KEY
-from database import get_async_session
+from database import engine, get_async_session
 from models.user_models import UserRole, attendance_daily_record, attendance_log, attendance_raw_event, user
 from schemes.schemes_attendance import (
     AttendanceCreateRequest,
@@ -23,6 +23,86 @@ from schemes.schemes_attendance import (
 
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
+_attendance_schema_ready = False
+
+
+async def ensure_attendance_schema() -> None:
+    global _attendance_schema_ready
+    if _attendance_schema_ready:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ADD COLUMN IF NOT EXISTS check_in_at TIMESTAMPTZ NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ADD COLUMN IF NOT EXISTS check_out_at TIMESTAMPTZ NULL"""))
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'attendance_daily_record'
+                      AND column_name = 'source_updated_at'
+                      AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE attendance_daily_record
+                    ALTER COLUMN source_updated_at TYPE TIMESTAMPTZ
+                    USING source_updated_at AT TIME ZONE 'Asia/Tashkent';
+                END IF;
+            END $$;
+        """))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ADD COLUMN IF NOT EXISTS shift_id VARCHAR(100) NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ADD COLUMN IF NOT EXISTS came_event_id VARCHAR(100) NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ADD COLUMN IF NOT EXISTS gone_event_id VARCHAR(100) NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ADD COLUMN IF NOT EXISTS event_ids JSONB NOT NULL DEFAULT '[]'::jsonb"""))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ALTER COLUMN source_system SET DEFAULT 'faceid'"""))
+        await conn.execute(text("""UPDATE attendance_daily_record SET source_system = 'faceid' WHERE source_system IS NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ALTER COLUMN source_system SET NOT NULL"""))
+        await conn.execute(text("""UPDATE attendance_daily_record SET source_session_id = CONCAT('legacy:', id) WHERE source_session_id IS NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ALTER COLUMN source_session_id SET NOT NULL"""))
+        await conn.execute(text("""UPDATE attendance_daily_record SET source_updated_at = COALESCE(updated_at, created_at, NOW()) WHERE source_updated_at IS NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_daily_record ALTER COLUMN source_updated_at SET NOT NULL"""))
+        await conn.execute(text("""CREATE UNIQUE INDEX IF NOT EXISTS uq_attendance_daily_record_source_session_idx ON attendance_daily_record(source_system, source_session_id)"""))
+        await conn.execute(text("""CREATE UNIQUE INDEX IF NOT EXISTS uq_attendance_daily_record_source_employee_date_idx ON attendance_daily_record(source_system, employee_id, attendance_date)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_attendance_daily_record_source_system ON attendance_daily_record(source_system)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_attendance_daily_record_status ON attendance_daily_record(status)"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS source_event_id VARCHAR(100) NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'auto'"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS face_confidence NUMERIC(5,4) NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS photo_available BOOLEAN NOT NULL DEFAULT FALSE"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS photo_url TEXT NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS manual_created_by VARCHAR(150) NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS manual_created_at TIMESTAMPTZ NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS manual_comment TEXT NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS source_created_at TIMESTAMPTZ NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()"""))
+        await conn.execute(text("""UPDATE attendance_raw_event SET source_system = 'faceid' WHERE source_system IS NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ALTER COLUMN source_system SET DEFAULT 'faceid'"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ALTER COLUMN source_system SET NOT NULL"""))
+        await conn.execute(text("""UPDATE attendance_raw_event SET source_event_id = CONCAT('legacy:', id) WHERE source_event_id IS NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ALTER COLUMN source_event_id SET NOT NULL"""))
+        await conn.execute(text("""UPDATE attendance_raw_event SET source_created_at = COALESCE(source_created_at, created_at, NOW()) WHERE source_created_at IS NULL"""))
+        await conn.execute(text("""ALTER TABLE attendance_raw_event ALTER COLUMN source_created_at SET NOT NULL"""))
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'attendance_raw_event'
+                      AND column_name = 'event_time'
+                      AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE attendance_raw_event
+                    ALTER COLUMN event_time TYPE TIMESTAMPTZ
+                    USING event_time AT TIME ZONE 'Asia/Tashkent';
+                END IF;
+            END $$;
+        """))
+        await conn.execute(text("""CREATE UNIQUE INDEX IF NOT EXISTS uq_attendance_raw_event_source_event_idx ON attendance_raw_event(source_system, source_event_id)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_attendance_raw_event_source_system ON attendance_raw_event(source_system)"""))
+    _attendance_schema_ready = True
+
+
+@router.on_event("startup")
+async def warm_attendance_schema() -> None:
+    await ensure_attendance_schema()
 
 
 def serialize_role(role_value, role_name: Optional[str]) -> Optional[str]:
@@ -97,9 +177,13 @@ async def ensure_unique_attendance(
 @router.get("/users", summary="Attendance uchun userlar ro'yxati")
 async def list_attendance_users(
     search: Optional[str] = Query(default=None, description="Ism, familiya yoki email bo'yicha qidirish"),
+    is_active: Optional[bool] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=500),
     session: AsyncSession = Depends(get_async_session),
     _: None = Depends(require_attendance_api_key),
 ):
+    await ensure_attendance_schema()
     query = (
         select(
             user.c.id,
@@ -108,16 +192,17 @@ async def list_attendance_users(
             user.c.email,
             user.c.role,
             user.c.role_name,
+            user.c.job_title,
+            user.c.is_active,
         )
         .where(
-            and_(
-                user.c.is_active == True,  # noqa: E712
-                user.c.role != UserRole.customer,
-            )
+            user.c.role != UserRole.customer
         )
-        .order_by(user.c.name.asc(), user.c.surname.asc())
+        .order_by(user.c.name.asc(), user.c.surname.asc(), user.c.id.asc())
     )
 
+    if is_active is not None:
+        query = query.where(user.c.is_active == is_active)
     if search:
         normalized = f"%{search.strip()}%"
         query = query.where(
@@ -125,10 +210,13 @@ async def list_attendance_users(
                 user.c.name.ilike(normalized),
                 user.c.surname.ilike(normalized),
                 user.c.email.ilike(normalized),
+                user.c.id.cast(String).ilike(normalized),
             )
         )
 
-    rows = (await session.execute(query)).fetchall()
+    count_query = select(func.count()).select_from(query.order_by(None).subquery())
+    total_count = int((await session.execute(count_query)).scalar() or 0)
+    rows = (await session.execute(query.offset((page - 1) * page_size).limit(page_size))).fetchall()
     return {
         "items": [
             {
@@ -137,12 +225,17 @@ async def list_attendance_users(
                 "surname": row.surname,
                 "full_name": f"{row.name} {row.surname}".strip(),
                 "email": row.email,
+                "department": None,
+                "position": row.job_title,
                 "role": serialize_role(row.role, row.role_name),
                 "role_name": row.role_name,
+                "is_active": row.is_active,
             }
             for row in rows
         ],
-        "total_count": len(rows),
+        "page": page,
+        "page_size": page_size,
+        "total_count": total_count,
     }
 
 
@@ -596,18 +689,25 @@ async def get_monthly_attendance_summary(
 
 def _serialize_daily_record(row) -> dict:
     return {
+        "record_id": row.id,
         "id": row.id,
+        "source_system": row.source_system,
+        "source_session_id": row.source_session_id,
         "employee_id": row.employee_id,
         "attendance_date": row.attendance_date.isoformat(),
+        "check_in_at": row.check_in_at.isoformat() if row.check_in_at else None,
+        "check_out_at": row.check_out_at.isoformat() if row.check_out_at else None,
         "check_in_time": row.check_in_time.isoformat() if row.check_in_time else None,
         "check_out_time": row.check_out_time.isoformat() if row.check_out_time else None,
         "worked_minutes": row.worked_minutes,
         "worked_hours_decimal": float(row.worked_hours_decimal) if row.worked_hours_decimal is not None else None,
         "status": row.status,
+        "shift_id": row.shift_id,
         "shift_name": row.shift_name,
-        "source_system": row.source_system,
-        "source_session_id": row.source_session_id,
         "is_manual": row.is_manual,
+        "came_event_id": row.came_event_id,
+        "gone_event_id": row.gone_event_id,
+        "event_ids": row.event_ids or [],
         "note": row.note,
         "source_updated_at": row.source_updated_at.isoformat() if row.source_updated_at else None,
         "is_deleted": row.is_deleted,
@@ -620,17 +720,23 @@ def _serialize_daily_record(row) -> dict:
 async def _upsert_daily_record(session: AsyncSession, payload: AttendanceDailyRecordRequest) -> int:
     now = datetime.utcnow()
     values = {
+        "source_system": payload.source_system,
+        "source_session_id": payload.source_session_id,
         "employee_id": payload.employee_id,
         "attendance_date": payload.attendance_date,
+        "check_in_at": payload.check_in_at,
+        "check_out_at": payload.check_out_at,
         "check_in_time": payload.check_in_time,
         "check_out_time": payload.check_out_time,
         "worked_minutes": payload.worked_minutes,
         "worked_hours_decimal": payload.worked_hours_decimal,
         "status": payload.status,
+        "shift_id": payload.shift_id,
         "shift_name": payload.shift_name,
-        "source_system": payload.source_system,
-        "source_session_id": payload.source_session_id,
         "is_manual": payload.is_manual,
+        "came_event_id": payload.came_event_id,
+        "gone_event_id": payload.gone_event_id,
+        "event_ids": payload.event_ids,
         "note": payload.note,
         "source_updated_at": payload.source_updated_at,
         "is_deleted": False,
@@ -643,7 +749,11 @@ async def _upsert_daily_record(session: AsyncSession, payload: AttendanceDailyRe
         pg_insert(attendance_daily_record)
         .values(**values)
         .on_conflict_do_update(
-            constraint="uq_attendance_daily_record_employee_date",
+            index_elements=[
+                attendance_daily_record.c.source_system,
+                attendance_daily_record.c.employee_id,
+                attendance_daily_record.c.attendance_date,
+            ],
             set_={**update_cols, "updated_at": now},
         )
         .returning(attendance_daily_record.c.id)
@@ -663,12 +773,19 @@ async def upsert_daily_record(
     session: AsyncSession = Depends(get_async_session),
     _: None = Depends(require_attendance_api_key),
 ):
+    await ensure_attendance_schema()
     payload.employee_id = employee_id
     payload.attendance_date = attendance_date
     await ensure_employee_exists(session, employee_id)
     record_id = await _upsert_daily_record(session, payload)
     await session.commit()
-    return {"success": True, "record_id": record_id}
+    return {
+        "success": True,
+        "record_id": record_id,
+        "employee_id": employee_id,
+        "attendance_date": attendance_date.isoformat(),
+        "source_session_id": payload.source_session_id,
+    }
 
 
 @router.post(
@@ -680,6 +797,7 @@ async def bulk_upsert_daily_records(
     session: AsyncSession = Depends(get_async_session),
     _: None = Depends(require_attendance_api_key),
 ):
+    await ensure_attendance_schema()
     results = []
     success_count = 0
     failed_count = 0
@@ -692,6 +810,7 @@ async def bulk_upsert_daily_records(
                 "success": True,
                 "employee_id": record.employee_id,
                 "attendance_date": record.attendance_date.isoformat(),
+                "source_session_id": record.source_session_id,
                 "record_id": record_id,
             })
             success_count += 1
@@ -701,6 +820,7 @@ async def bulk_upsert_daily_records(
                 "success": False,
                 "employee_id": record.employee_id,
                 "attendance_date": record.attendance_date.isoformat(),
+                "source_session_id": record.source_session_id,
                 "error": str(e),
             })
             failed_count += 1
@@ -717,6 +837,7 @@ async def get_daily_record(
     session: AsyncSession = Depends(get_async_session),
     _: None = Depends(require_attendance_api_key),
 ):
+    await ensure_attendance_schema()
     result = await session.execute(
         select(attendance_daily_record).where(
             and_(
@@ -743,6 +864,7 @@ async def patch_daily_record(
     session: AsyncSession = Depends(get_async_session),
     _: None = Depends(require_attendance_api_key),
 ):
+    await ensure_attendance_schema()
     result = await session.execute(
         select(attendance_daily_record.c.id).where(
             and_(
@@ -771,18 +893,24 @@ async def patch_daily_record(
 
 @router.get(
     "/daily-records",
-    summary="Kunlik davomat yozuvlari ro'yxati (JWT auth)",
+    summary="FaceID: Kunlik davomat yozuvlari ro'yxati",
 )
 async def list_daily_records(
     employee_id: Optional[int] = Query(default=None),
     date_from: Optional[date_type] = Query(default=None),
     date_to: Optional[date_type] = Query(default=None),
+    year: Optional[int] = Query(default=None, ge=2000, le=2100),
+    month: Optional[int] = Query(default=None, ge=1, le=12),
+    day: Optional[int] = Query(default=None, ge=1, le=31),
     status_filter: Optional[str] = Query(default=None, alias="status"),
+    source_system: Optional[str] = Query(default=None),
+    is_manual: Optional[bool] = Query(default=None),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=50, ge=1, le=200),
+    page_size: int = Query(default=50, ge=1, le=500),
     session: AsyncSession = Depends(get_async_session),
-    current_user=Depends(get_current_active_user),
+    _: None = Depends(require_attendance_api_key),
 ):
+    await ensure_attendance_schema()
     conditions = [attendance_daily_record.c.is_deleted == False]  # noqa: E712
     if employee_id is not None:
         conditions.append(attendance_daily_record.c.employee_id == employee_id)
@@ -790,8 +918,22 @@ async def list_daily_records(
         conditions.append(attendance_daily_record.c.attendance_date >= date_from)
     if date_to is not None:
         conditions.append(attendance_daily_record.c.attendance_date <= date_to)
+    if year is not None:
+        conditions.append(extract("year", attendance_daily_record.c.attendance_date) == year)
+    if month is not None:
+        conditions.append(extract("month", attendance_daily_record.c.attendance_date) == month)
+    if day is not None:
+        conditions.append(extract("day", attendance_daily_record.c.attendance_date) == day)
     if status_filter is not None:
         conditions.append(attendance_daily_record.c.status == status_filter)
+    if source_system is not None:
+        conditions.append(attendance_daily_record.c.source_system == source_system)
+    if is_manual is not None:
+        conditions.append(attendance_daily_record.c.is_manual == is_manual)
+
+    total_count = (await session.execute(
+        select(func.count()).select_from(attendance_daily_record).where(and_(*conditions))
+    )).scalar_one()
 
     query = (
         select(
@@ -818,19 +960,24 @@ async def list_daily_records(
         ],
         "page": page,
         "page_size": page_size,
-        "total_count": len(rows),
+        "total_count": total_count,
     }
 
 
 @router.post(
+    "/raw-events/bulk-upsert",
+    summary="FaceID: Bir nechta raw event upsert",
+)
+@router.post(
     "/raw-events/bulk",
-    summary="FaceID: Bir nechta raw event saqlash",
+    include_in_schema=False,
 )
 async def bulk_create_raw_events(
     payload: BulkRawEventsRequest,
     session: AsyncSession = Depends(get_async_session),
     _: None = Depends(require_attendance_api_key),
 ):
+    await ensure_attendance_schema()
     if not payload.events:
         return {"success_count": 0, "failed_count": 0, "results": []}
 
@@ -841,26 +988,69 @@ async def bulk_create_raw_events(
 
     for event in payload.events:
         try:
+            await ensure_employee_exists(session, event.employee_id)
             result = await session.execute(
-                insert(attendance_raw_event)
+                pg_insert(attendance_raw_event)
                 .values(
+                    source_system=event.source_system,
+                    source_event_id=event.source_event_id,
                     employee_id=event.employee_id,
                     event_time=event.event_time,
                     action=event.action,
-                    source_system=event.source_system,
+                    source=event.source,
                     terminal_ip=event.terminal_ip,
+                    face_confidence=event.face_confidence,
+                    photo_available=event.photo_available,
+                    photo_url=event.photo_url,
                     is_manual=event.is_manual,
+                    manual_created_by=event.manual_created_by,
+                    manual_created_at=event.manual_created_at,
+                    manual_comment=event.manual_comment,
+                    source_created_at=event.source_created_at,
                     created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_update(
+                    index_elements=[
+                        attendance_raw_event.c.source_system,
+                        attendance_raw_event.c.source_event_id,
+                    ],
+                    set_={
+                        "employee_id": event.employee_id,
+                        "event_time": event.event_time,
+                        "action": event.action,
+                        "source": event.source,
+                        "terminal_ip": event.terminal_ip,
+                        "face_confidence": event.face_confidence,
+                        "photo_available": event.photo_available,
+                        "photo_url": event.photo_url,
+                        "is_manual": event.is_manual,
+                        "manual_created_by": event.manual_created_by,
+                        "manual_created_at": event.manual_created_at,
+                        "manual_comment": event.manual_comment,
+                        "source_created_at": event.source_created_at,
+                        "updated_at": now,
+                    },
                 )
                 .returning(attendance_raw_event.c.id)
             )
             event_id = result.scalar_one()
             await session.commit()
-            results.append({"success": True, "employee_id": event.employee_id, "event_id": event_id})
+            results.append({
+                "success": True,
+                "source_event_id": event.source_event_id,
+                "employee_id": event.employee_id,
+                "event_id": event_id,
+            })
             success_count += 1
         except Exception as e:
             await session.rollback()
-            results.append({"success": False, "employee_id": event.employee_id, "error": str(e)})
+            results.append({
+                "success": False,
+                "source_event_id": event.source_event_id,
+                "employee_id": event.employee_id,
+                "error": str(e),
+            })
             failed_count += 1
 
     return {"success_count": success_count, "failed_count": failed_count, "results": results}

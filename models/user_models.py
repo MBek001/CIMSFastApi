@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Table,UniqueConstraint,
-    Column, Integer, String, Boolean, DateTime, Date, Time, DECIMAL, Text, Enum, ForeignKey, MetaData, Index
+    Column, Integer, String, Boolean, DateTime, Date, Time, DECIMAL, Text, Enum, ForeignKey, MetaData, Index, JSON
 )
 import enum
 from datetime import datetime
@@ -210,24 +210,32 @@ attendance_daily_record = Table(
     "attendance_daily_record",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("source_system", String(50), nullable=False, default="faceid"),
+    Column("source_session_id", String(100), nullable=False),
     Column("employee_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
     Column("attendance_date", Date, nullable=False),
+    Column("check_in_at", DateTime(timezone=True), nullable=True),
+    Column("check_out_at", DateTime(timezone=True), nullable=True),
     Column("check_in_time", Time, nullable=True),
     Column("check_out_time", Time, nullable=True),
     Column("worked_minutes", Integer, nullable=True),
     Column("worked_hours_decimal", DECIMAL(6, 2), nullable=True),
     Column("status", String(20), nullable=False, default="present"),
+    Column("shift_id", String(100), nullable=True),
     Column("shift_name", String(100), nullable=True),
-    Column("source_system", String(50), nullable=True, default="faceid"),
-    Column("source_session_id", String(100), nullable=True),
     Column("is_manual", Boolean, nullable=False, default=False),
+    Column("came_event_id", String(100), nullable=True),
+    Column("gone_event_id", String(100), nullable=True),
+    Column("event_ids", JSON, nullable=False, default=list),
     Column("note", Text, nullable=True),
-    Column("source_updated_at", DateTime, nullable=True),
+    Column("source_updated_at", DateTime(timezone=True), nullable=False, default=datetime.utcnow),
     Column("is_deleted", Boolean, nullable=False, default=False),
     Column("delete_reason", Text, nullable=True),
     Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
     Column("updated_at", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
     UniqueConstraint("employee_id", "attendance_date", name="uq_attendance_daily_record_employee_date"),
+    UniqueConstraint("source_system", "source_session_id", name="uq_attendance_daily_record_source_session"),
+    UniqueConstraint("source_system", "employee_id", "attendance_date", name="uq_attendance_daily_record_source_employee_date"),
 )
 
 Index("idx_attendance_daily_record_employee_date", attendance_daily_record.c.employee_id, attendance_daily_record.c.attendance_date)
@@ -238,13 +246,24 @@ attendance_raw_event = Table(
     "attendance_raw_event",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("source_system", String(50), nullable=False, default="faceid"),
+    Column("source_event_id", String(100), nullable=False),
     Column("employee_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
-    Column("event_time", DateTime, nullable=False),
+    Column("event_time", DateTime(timezone=True), nullable=False),
     Column("action", String(20), nullable=False),
-    Column("source_system", String(50), nullable=True),
+    Column("source", String(20), nullable=False, default="auto"),
     Column("terminal_ip", String(50), nullable=True),
+    Column("face_confidence", DECIMAL(5, 4), nullable=True),
+    Column("photo_available", Boolean, nullable=False, default=False),
+    Column("photo_url", Text, nullable=True),
     Column("is_manual", Boolean, nullable=False, default=False),
+    Column("manual_created_by", String(150), nullable=True),
+    Column("manual_created_at", DateTime(timezone=True), nullable=True),
+    Column("manual_comment", Text, nullable=True),
+    Column("source_created_at", DateTime(timezone=True), nullable=False, default=datetime.utcnow),
     Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+    UniqueConstraint("source_system", "source_event_id", name="uq_attendance_raw_event_source_event"),
 )
 
 Index("idx_attendance_raw_event_employee", attendance_raw_event.c.employee_id)
