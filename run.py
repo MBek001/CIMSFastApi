@@ -57,6 +57,7 @@ origins = [
     "http://localhost:3000",
     "http://localhost:5173",
     "https://cims.cognilabs.org",
+    "https://cims-cognilabs.vercel.app",
     "https://cognilabs.org",
     "https://www.cognilabs.org",
 ]
