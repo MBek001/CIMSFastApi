@@ -18,6 +18,7 @@ cognilabsai_global_integration = Table(
     Column("openai_base_url", String(500), nullable=True),
     Column("system_prompt", Text, nullable=True),
     Column("instagram_access_token", Text, nullable=True),
+    Column("instagram_access_token_refreshed_at", DateTime, nullable=True),
     Column("instagram_business_id", String(255), nullable=True),
     Column("instagram_verify_token", String(255), nullable=True),
     Column("telegram_api_id", String(100), nullable=True),

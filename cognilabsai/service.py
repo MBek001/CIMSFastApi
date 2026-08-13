@@ -662,6 +662,7 @@ async def ensure_schema(session: AsyncSession):
             openai_base_url VARCHAR(500),
             system_prompt TEXT,
             instagram_access_token TEXT,
+            instagram_access_token_refreshed_at TIMESTAMP NULL,
             instagram_business_id VARCHAR(255),
             instagram_verify_token VARCHAR(255),
             telegram_api_id VARCHAR(100),
@@ -696,6 +697,10 @@ async def ensure_schema(session: AsyncSession):
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
             ADD COLUMN IF NOT EXISTS cognilabs_telegram_token TEXT
+        """))
+        await session.execute(text("""
+            ALTER TABLE cognilabsai_global_integration
+            ADD COLUMN IF NOT EXISTS instagram_access_token_refreshed_at TIMESTAMP NULL
         """))
         await session.execute(text("""
             ALTER TABLE cognilabsai_global_integration
@@ -2416,6 +2421,67 @@ async def send_instagram_message(access_token: str, recipient_id: str, text_valu
         return data.get("message_id")
 
 
+async def refresh_instagram_access_token(access_token: str) -> Optional[str]:
+    token = (access_token or "").strip()
+    if not token:
+        return None
+    params = {
+        "grant_type": "ig_refresh_token",
+        "access_token": token,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get("https://graph.instagram.com/refresh_access_token", params=params)
+    if response.status_code >= 400:
+        error_message = response.text
+        with contextlib.suppress(Exception):
+            error_payload = response.json().get("error") or {}
+            error_message = error_payload.get("message") or response.text
+        print(f"Instagram token refresh error status={response.status_code}: {error_message}", flush=True)
+        return None
+    data = response.json()
+    refreshed_token = (data.get("access_token") or "").strip()
+    return refreshed_token or None
+
+
+async def maybe_refresh_instagram_access_token(session: AsyncSession, config: dict, *, force: bool = False) -> str:
+    current_token = (config.get("instagram_access_token") or "").strip()
+    if not current_token:
+        return ""
+    refreshed_at = normalize_datetime(config.get("instagram_access_token_refreshed_at"))
+    if not force and refreshed_at and refreshed_at > utcnow() - timedelta(days=25):
+        return current_token
+    refreshed_token = await refresh_instagram_access_token(current_token)
+    if not refreshed_token:
+        return current_token
+    await session.execute(
+        update(cognilabsai_global_integration)
+        .where(cognilabsai_global_integration.c.id == 1)
+        .values(
+            instagram_access_token=refreshed_token,
+            instagram_access_token_refreshed_at=utcnow(),
+            updated_at=utcnow(),
+        )
+    )
+    await session.commit()
+    config["instagram_access_token"] = refreshed_token
+    config["instagram_access_token_refreshed_at"] = utcnow()
+    return refreshed_token
+
+
+async def send_instagram_message_from_config(session: AsyncSession, config: dict, recipient_id: str, text_value: str) -> str | None:
+    access_token = await maybe_refresh_instagram_access_token(session, config)
+    if not access_token:
+        raise RuntimeError("Instagram access token is not configured")
+    try:
+        return await send_instagram_message(access_token, recipient_id, text_value)
+    except InstagramSendError as exc:
+        if exc.status_code == 401 or exc.error_code == 190:
+            refreshed_token = await maybe_refresh_instagram_access_token(session, config, force=True)
+            if refreshed_token and refreshed_token != access_token:
+                return await send_instagram_message(refreshed_token, recipient_id, text_value)
+        raise
+
+
 async def send_operator_message(session: AsyncSession, conversation_id: int, text_value: str, current_user) -> dict:
     conversation = await get_conversation(session, conversation_id)
     if not conversation:
@@ -2423,10 +2489,7 @@ async def send_operator_message(session: AsyncSession, conversation_id: int, tex
     operator_name = " ".join(value for value in [getattr(current_user, "name", None), getattr(current_user, "surname", None)] if value) or getattr(current_user, "email", None)
     if conversation["channel"] == "instagram":
         config = await get_integration_config(session)
-        access_token = config.get("instagram_access_token")
-        if not access_token:
-            raise RuntimeError("Instagram access token is not configured")
-        instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], text_value)
+        instagram_message_id = await send_instagram_message_from_config(session, config, conversation["client_external_id"], text_value)
         message = await create_message(
             session,
             conversation_id=conversation_id,
@@ -3316,14 +3379,13 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
             )
         else:
             return None
+    if conversation["channel"] == "instagram" and not (config.get("instagram_access_token") or "").strip():
+        return None
     reply_text = await generate_ai_reply(session, conversation_id)
     if not reply_text:
         return None
     if conversation["channel"] == "instagram":
-        access_token = config.get("instagram_access_token")
-        if not access_token:
-            return None
-        instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], reply_text)
+        instagram_message_id = await send_instagram_message_from_config(session, config, conversation["client_external_id"], reply_text)
         return await create_message(
             session,
             conversation_id=conversation_id,
@@ -3718,11 +3780,8 @@ async def send_follow_up_message(session: AsyncSession, conversation_id: int) ->
     instagram_message_id = None
     telegram_message_id = None
     if conversation["channel"] == "instagram":
-        access_token = config.get("instagram_access_token")
-        if not access_token:
-            return False
         try:
-            instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
+            instagram_message_id = await send_instagram_message_from_config(session, config, conversation["client_external_id"], message)
         except InstagramSendError as exc:
             if exc.is_permanent:
                 await session.execute(
@@ -3812,12 +3871,9 @@ async def send_default_instagram_follow_up_message(session: AsyncSession, conver
         await session.commit()
         return False
     next_step_number, _, message = steps[next_index]
-    access_token = config.get("instagram_access_token")
-    if not access_token:
-        return False
     sent_at = utcnow()
     try:
-        instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
+        instagram_message_id = await send_instagram_message_from_config(session, config, conversation["client_external_id"], message)
     except InstagramSendError as exc:
         if exc.is_permanent:
             await session.execute(
@@ -3936,8 +3992,7 @@ async def send_instagram_ai_follow_up_message(session: AsyncSession, conversatio
         await session.commit()
         return False
     config = await get_integration_config(session)
-    access_token = config.get("instagram_access_token")
-    if not access_token:
+    if not (config.get("instagram_access_token") or "").strip():
         return False
     await session.execute(
         update(cognilabsai_conversation)
@@ -3949,7 +4004,7 @@ async def send_instagram_ai_follow_up_message(session: AsyncSession, conversatio
     if not message:
         return False
     sent_at = utcnow()
-    instagram_message_id = await send_instagram_message(access_token, conversation["client_external_id"], message)
+    instagram_message_id = await send_instagram_message_from_config(session, config, conversation["client_external_id"], message)
     await create_message(
         session,
         conversation_id=conversation_id,

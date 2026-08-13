@@ -10,6 +10,7 @@ class IntegrationConfigPayload(BaseModel):
     openai_base_url: Optional[str] = None
     system_prompt: Optional[str] = None
     instagram_access_token: Optional[str] = None
+    instagram_access_token_refreshed_at: Optional[datetime] = None
     instagram_business_id: Optional[str] = None
     instagram_verify_token: Optional[str] = None
     telegram_api_id: Optional[str] = None
