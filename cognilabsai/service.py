@@ -2567,39 +2567,6 @@ def sanitize_ai_reply_text(reply_text: Optional[str]) -> str:
     return text_value
 
 
-def build_local_lead_confirmation_reply(*, full_name: str = "", scheduled_time: str = "") -> str:
-    has_name = bool((full_name or "").strip()) and not is_missing_required_value(full_name)
-    has_time = bool((scheduled_time or "").strip()) and not is_missing_required_value(scheduled_time)
-    if not has_name and not has_time:
-        return "Raqamingiz qabul qilindi. Qo'ng'iroqni kim nomiga va qaysi vaqtga rejalashtiraylik?"
-    if not has_time:
-        return "Raqamingiz qabul qilindi. Qaysi vaqt qo'ng'iroq qilishimiz sizga qulay?"
-    if not has_name:
-        return f"Raqamingiz qabul qilindi, {scheduled_time} atrofida bog'lanamiz. Qo'ng'iroqni kim nomiga belgilaylik?"
-    return f"{full_name}, ma'lumotlaringiz qabul qilindi. Jamoamiz {scheduled_time or 'tez orada'} siz bilan bog'lanadi."
-
-
-def build_local_tool_reply(tool_calls: list[tuple[str, dict]]) -> str:
-    for tool_name, tool_data in tool_calls:
-        if tool_name == "set_conversation_stage":
-            stage = tool_data.get("stage") or ""
-            if stage == "business_field":
-                return "Qaysi sohada faoliyat yuritasiz?"
-            if stage == "experience_years":
-                return "Shu sohada necha yildan beri ishlaysiz?"
-            if stage == "phone_discussion":
-                return "Buni 5-10 daqiqalik qo'ng'iroqda aniqroq tushuntirib beramiz. Sizga telefon orqali gaplashish qulaymi?"
-            if stage == "phone_collected":
-                return "Telefon raqamingizni yozib yuboring, mutaxassisimiz siz bilan bog'lanadi."
-            if stage == "call_time_collected":
-                return "Qaysi vaqt qo'ng'iroq qilishimiz sizga qulay?"
-            if stage == "name_collected":
-                return "Qo'ng'iroqni kim nomiga belgilaylik?"
-            if stage == "lost":
-                return "Tushunarli, rahmat. Agar keyinroq kerak bo'lsa, bemalol yozing."
-    return "Tushunarli. Davom etishimiz uchun sizga qulay bo'lgan ma'lumotni yozib yuboring."
-
-
 def is_gpt5_model(model: Optional[str]) -> bool:
     return (model or "").strip().lower().startswith("gpt-5")
 
@@ -2608,105 +2575,6 @@ def apply_reasoning_defaults(payload: dict, model: Optional[str]) -> dict:
     if is_gpt5_model(model):
         payload["reasoning_effort"] = "low"
     return payload
-
-
-async def request_text_only_ai_reply(
-    *,
-    base_url: str,
-    api_key: str,
-    model: str,
-    messages: list[dict],
-) -> Optional[str]:
-    text_messages = [
-        *messages,
-        {
-            "role": "system",
-            "content": (
-                "Previous model response only used an internal tool and produced no customer-facing text. "
-                "Now write the exact Instagram DM reply to the customer. Do not call tools. "
-                "Answer naturally from conversation context, then move toward getting phone number if it is missing. "
-                "Keep it short, useful, and in the customer's language."
-            ),
-        },
-    ]
-    payload = apply_reasoning_defaults({
-        "model": model,
-        "messages": text_messages,
-        "max_completion_tokens": 500,
-    }, model)
-    async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-        )
-        if response.status_code >= 400:
-            print(f"OpenAI text-only error {response.status_code}: {response.text}", flush=True)
-            return None
-        data = response.json()
-    choices = data.get("choices") or []
-    if not choices:
-        return None
-    return sanitize_ai_reply_text(extract_chat_message_text(choices[0].get("message") or {}))
-
-
-async def request_lead_confirmation_ai_reply(
-    *,
-    base_url: str,
-    api_key: str,
-    model: str,
-    messages: list[dict],
-    language: str,
-    full_name: str,
-    phone_number: str,
-    business_field: str,
-    scheduled_time: str,
-) -> Optional[str]:
-    text_messages = [
-        *messages,
-        {
-            "role": "system",
-            "content": (
-                "CRM lead has just been saved successfully. "
-                "Write one short customer-facing confirmation message. Do not call tools. "
-                "Do not repeat any previous confirmation wording from this conversation. "
-                "Acknowledge useful new details such as preferred call time when present. "
-                "Do not ask for phone number again. Do not say the same template sentence. "
-                "If full_name is missing, ask for the client's name. "
-                "If scheduled_time is missing, ask what time is convenient for a call. "
-                "If both full_name and scheduled_time are missing, ask for both in one short sentence. "
-                "If scheduled_time is present, confirm the team will call around that time. "
-                "Reply in the customer's language. Keep it warm, natural, 1 sentence."
-            ),
-        },
-        {
-            "role": "system",
-            "content": (
-                f"Saved lead details: language={language or ''}; full_name={full_name or ''}; "
-                f"phone_number={phone_number or ''}; business_field={business_field or ''}; "
-                f"scheduled_time={scheduled_time or ''}."
-            ),
-        },
-    ]
-    payload = apply_reasoning_defaults({
-        "model": model,
-        "messages": text_messages,
-        "max_completion_tokens": 300,
-    }, model)
-    async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-        )
-        if response.status_code >= 400:
-            print(f"OpenAI lead-confirmation error {response.status_code}: {response.text}", flush=True)
-            return None
-        data = response.json()
-    choices = data.get("choices") or []
-    if not choices:
-        return None
-    return sanitize_ai_reply_text(extract_chat_message_text(choices[0].get("message") or {}))
 
 
 def extract_chat_message_text(message: dict) -> str:
@@ -3374,13 +3242,6 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
 
         tool_calls = extract_ai_tool_calls(message)
         lead_tool_called = False
-        lead_language = "uzbek"
-        lead_confirmation_data = {
-            "full_name": "",
-            "phone_number": "",
-            "business_field": "",
-            "scheduled_time": "",
-        }
         for tool_name, tool_data in tool_calls:
             if tool_name == "set_conversation_stage":
                 await set_ai_conversation_stage(
@@ -3409,30 +3270,18 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                         language=language,
                     )
                     lead_tool_called = True
-                    lead_language = language
-                    lead_confirmation_data = {
-                        "full_name": full_name,
-                        "phone_number": phone_number,
-                        "business_field": business_field,
-                        "scheduled_time": scheduled_time,
-                    }
                 except Exception as lead_exc:
                     print(f"[cognilabsai] save_lead_state error (conversation {conversation_id}): {lead_exc}", flush=True)
         if lead_tool_called:
             inline_reply = sanitize_ai_reply_text(extract_chat_message_text(message))
             if inline_reply:
                 return inline_reply
-            return build_local_lead_confirmation_reply(
-                full_name=lead_confirmation_data["full_name"],
-                scheduled_time=lead_confirmation_data["scheduled_time"],
-            )
+            return None
 
         # Tool call yo'q — oddiy text reply
         reply_text = sanitize_ai_reply_text(extract_chat_message_text(message))
         if reply_text:
             return reply_text
-        if tool_calls:
-            return build_local_tool_reply(tool_calls)
         return None
     except Exception as exc:
         import traceback
@@ -3467,11 +3316,7 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
             )
         else:
             return None
-    quick_reply = await build_cost_saving_ai_reply(session, conversation_id, conversation)
-    if quick_reply:
-        reply_text = quick_reply
-    else:
-        reply_text = await generate_ai_reply(session, conversation_id)
+    reply_text = await generate_ai_reply(session, conversation_id)
     if not reply_text:
         return None
     if conversation["channel"] == "instagram":
@@ -3509,41 +3354,6 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
             client_external_id=conversation["client_external_id"],
         )
     return None
-
-
-async def build_cost_saving_ai_reply(session: AsyncSession, conversation_id: int, conversation: dict) -> Optional[str]:
-    if not (conversation.get("lead_phone_number") or conversation.get("crm_customer_id") or conversation.get("lead_created")):
-        return None
-    latest_result = await session.execute(
-        select(cognilabsai_message.c.text, cognilabsai_message.c.created_at)
-        .where(
-            cognilabsai_message.c.conversation_id == conversation_id,
-            cognilabsai_message.c.sender_type == "client",
-        )
-        .order_by(cognilabsai_message.c.created_at.desc(), cognilabsai_message.c.id.desc())
-        .limit(1)
-    )
-    latest = latest_result.first()
-    if not latest:
-        return None
-    latest_text = latest.text or ""
-    if not extract_phone_number_from_text(latest_text):
-        return None
-    ai_after_result = await session.execute(
-        select(cognilabsai_message.c.id)
-        .where(
-            cognilabsai_message.c.conversation_id == conversation_id,
-            cognilabsai_message.c.sender_type == "ai",
-            cognilabsai_message.c.created_at >= latest.created_at,
-        )
-        .limit(1)
-    )
-    if ai_after_result.scalar_one_or_none():
-        return None
-    return build_local_lead_confirmation_reply(
-        full_name=conversation.get("lead_full_name") or conversation.get("client_full_name") or "",
-        scheduled_time=conversation.get("lead_scheduled_time") or "",
-    )
 
 
 MEDIA_ID_KEYS = ("ig_post_media_id", "ig_reel_media_id", "reel_video_id", "reel_media_id", "media_id", "media_share_id", "media_product_id", "story_media_id", "story_id", "id", "source_id", "target_id")
@@ -4129,6 +3939,12 @@ async def send_instagram_ai_follow_up_message(session: AsyncSession, conversatio
     access_token = config.get("instagram_access_token")
     if not access_token:
         return False
+    await session.execute(
+        update(cognilabsai_conversation)
+        .where(cognilabsai_conversation.c.id == conversation_id)
+        .values(ai_follow_up_due_at=None, updated_at=utcnow())
+    )
+    await session.commit()
     message = await generate_instagram_ai_follow_up(session, conversation_id)
     if not message:
         return False
