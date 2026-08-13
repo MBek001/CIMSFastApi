@@ -130,9 +130,23 @@ FOLLOW_UP_POLL_INTERVAL_SECONDS = 60
 follow_up_scheduler_task: Optional[asyncio.Task] = None
 schema_ready = False
 schema_lock = asyncio.Lock()
+
+
+def int_env(name: str, default: int, minimum: int) -> int:
+    try:
+        value = int(os.getenv(name) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
 FOLLOW_UPS_ENABLED = False
-INSTAGRAM_AI_FOLLOW_UP_ENABLED = True
+INSTAGRAM_AI_FOLLOW_UP_ENABLED = (os.getenv("COGNILABSAI_AI_FOLLOW_UP_ENABLED") or "false").strip().lower() in {"1", "true", "yes", "on"}
 INSTAGRAM_AI_FOLLOW_UP_DELAY_HOURS = 22
+COGNILABSAI_AI_HISTORY_LIMIT = int_env("COGNILABSAI_AI_HISTORY_LIMIT", 12, 4)
+COGNILABSAI_AI_MAX_COMPLETION_TOKENS = int_env("COGNILABSAI_AI_MAX_COMPLETION_TOKENS", 650, 200)
+COGNILABSAI_AI_FOLLOW_UP_HISTORY_LIMIT = int_env("COGNILABSAI_AI_FOLLOW_UP_HISTORY_LIMIT", 10, 4)
+COGNILABSAI_AI_FOLLOW_UP_BATCH_LIMIT = int_env("COGNILABSAI_AI_FOLLOW_UP_BATCH_LIMIT", 5, 1)
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_DELAY_MINUTES = 180
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_DELAY_MINUTES = 360
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES = 1200
@@ -953,6 +967,11 @@ async def ensure_schema(session: AsyncSession):
             )
         """))
         await session.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_cognilabsai_message_instagram_message_id
+            ON cognilabsai_message (instagram_message_id)
+            WHERE instagram_message_id IS NOT NULL
+        """))
+        await session.execute(text("""
             UPDATE cognilabsai_conversation
             SET last_lead_created_at = updated_at
             WHERE lead_created = TRUE
@@ -1544,6 +1563,8 @@ async def should_disable_follow_up_from_client_reply(
     normalized = (text_value or "").strip()
     if not normalized:
         return False
+    if should_disable_follow_up_from_client_reply_fallback(conversation, normalized):
+        return True
     config = await get_integration_config(session)
     api_key = (config.get("openai_api_key") or "").strip()
     if not api_key:
@@ -2546,6 +2567,39 @@ def sanitize_ai_reply_text(reply_text: Optional[str]) -> str:
     return text_value
 
 
+def build_local_lead_confirmation_reply(*, full_name: str = "", scheduled_time: str = "") -> str:
+    has_name = bool((full_name or "").strip()) and not is_missing_required_value(full_name)
+    has_time = bool((scheduled_time or "").strip()) and not is_missing_required_value(scheduled_time)
+    if not has_name and not has_time:
+        return "Raqamingiz qabul qilindi. Qo'ng'iroqni kim nomiga va qaysi vaqtga rejalashtiraylik?"
+    if not has_time:
+        return "Raqamingiz qabul qilindi. Qaysi vaqt qo'ng'iroq qilishimiz sizga qulay?"
+    if not has_name:
+        return f"Raqamingiz qabul qilindi, {scheduled_time} atrofida bog'lanamiz. Qo'ng'iroqni kim nomiga belgilaylik?"
+    return f"{full_name}, ma'lumotlaringiz qabul qilindi. Jamoamiz {scheduled_time or 'tez orada'} siz bilan bog'lanadi."
+
+
+def build_local_tool_reply(tool_calls: list[tuple[str, dict]]) -> str:
+    for tool_name, tool_data in tool_calls:
+        if tool_name == "set_conversation_stage":
+            stage = tool_data.get("stage") or ""
+            if stage == "business_field":
+                return "Qaysi sohada faoliyat yuritasiz?"
+            if stage == "experience_years":
+                return "Shu sohada necha yildan beri ishlaysiz?"
+            if stage == "phone_discussion":
+                return "Buni 5-10 daqiqalik qo'ng'iroqda aniqroq tushuntirib beramiz. Sizga telefon orqali gaplashish qulaymi?"
+            if stage == "phone_collected":
+                return "Telefon raqamingizni yozib yuboring, mutaxassisimiz siz bilan bog'lanadi."
+            if stage == "call_time_collected":
+                return "Qaysi vaqt qo'ng'iroq qilishimiz sizga qulay?"
+            if stage == "name_collected":
+                return "Qo'ng'iroqni kim nomiga belgilaylik?"
+            if stage == "lost":
+                return "Tushunarli, rahmat. Agar keyinroq kerak bo'lsa, bemalol yozing."
+    return "Tushunarli. Davom etishimiz uchun sizga qulay bo'lgan ma'lumotni yozib yuboring."
+
+
 def is_gpt5_model(model: Optional[str]) -> bool:
     return (model or "").strip().lower().startswith("gpt-5")
 
@@ -3123,7 +3177,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         prompt = config.get("system_prompt") or "You are Cognilabs company's AI sales bot"
         lead_created = bool(conversation and conversation.get("lead_created"))
 
-        history = await get_messages(session, conversation_id, limit=30, offset=0)
+        history = await get_messages(session, conversation_id, limit=COGNILABSAI_AI_HISTORY_LIMIT, offset=0)
         messages = [
             {"role": "system", "content": prompt},
             {"role": "system", "content": COGNILABSAI_BEHAVIOR_PROMPT},
@@ -3237,7 +3291,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                     },
                 ],
                 "tool_choice": "auto",
-                "max_completion_tokens": 1200,
+                "max_completion_tokens": COGNILABSAI_AI_MAX_COMPLETION_TOKENS,
             }, model)
         else:
             payload = apply_reasoning_defaults({
@@ -3300,7 +3354,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                     }
                 ],
                 "tool_choice": "auto",
-                "max_completion_tokens": 1200,
+                "max_completion_tokens": COGNILABSAI_AI_MAX_COMPLETION_TOKENS,
             }, model)
 
         headers = {
@@ -3317,7 +3371,6 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
         if not choices:
             return None
         message = choices[0].get("message") or {}
-        print("GPT Message Structure:", json.dumps(message, indent=2, ensure_ascii=False), flush=True)
 
         tool_calls = extract_ai_tool_calls(message)
         lead_tool_called = False
@@ -3369,49 +3422,17 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
             inline_reply = sanitize_ai_reply_text(extract_chat_message_text(message))
             if inline_reply:
                 return inline_reply
-            generated_confirmation = await request_lead_confirmation_ai_reply(
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
-                messages=messages,
-                language=lead_language,
+            return build_local_lead_confirmation_reply(
                 full_name=lead_confirmation_data["full_name"],
-                phone_number=lead_confirmation_data["phone_number"],
-                business_field=lead_confirmation_data["business_field"],
                 scheduled_time=lead_confirmation_data["scheduled_time"],
             )
-            if generated_confirmation:
-                return generated_confirmation
-            retry_text = await request_text_only_ai_reply(
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
-                messages=[
-                    *messages,
-                    {
-                        "role": "system",
-                        "content": (
-                            "Lead was saved. Write a natural short customer reply. "
-                            "Do not use a fixed template. Ask for missing full_name and preferred call time if missing."
-                        ),
-                    },
-                ],
-            )
-            return retry_text
 
         # Tool call yo'q — oddiy text reply
         reply_text = sanitize_ai_reply_text(extract_chat_message_text(message))
         if reply_text:
             return reply_text
         if tool_calls:
-            retry_text = await request_text_only_ai_reply(
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
-                messages=messages,
-            )
-            if retry_text:
-                return retry_text
+            return build_local_tool_reply(tool_calls)
         return None
     except Exception as exc:
         import traceback
@@ -3446,7 +3467,11 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
             )
         else:
             return None
-    reply_text = await generate_ai_reply(session, conversation_id)
+    quick_reply = await build_cost_saving_ai_reply(session, conversation_id, conversation)
+    if quick_reply:
+        reply_text = quick_reply
+    else:
+        reply_text = await generate_ai_reply(session, conversation_id)
     if not reply_text:
         return None
     if conversation["channel"] == "instagram":
@@ -3484,6 +3509,41 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
             client_external_id=conversation["client_external_id"],
         )
     return None
+
+
+async def build_cost_saving_ai_reply(session: AsyncSession, conversation_id: int, conversation: dict) -> Optional[str]:
+    if not (conversation.get("lead_phone_number") or conversation.get("crm_customer_id") or conversation.get("lead_created")):
+        return None
+    latest_result = await session.execute(
+        select(cognilabsai_message.c.text, cognilabsai_message.c.created_at)
+        .where(
+            cognilabsai_message.c.conversation_id == conversation_id,
+            cognilabsai_message.c.sender_type == "client",
+        )
+        .order_by(cognilabsai_message.c.created_at.desc(), cognilabsai_message.c.id.desc())
+        .limit(1)
+    )
+    latest = latest_result.first()
+    if not latest:
+        return None
+    latest_text = latest.text or ""
+    if not extract_phone_number_from_text(latest_text):
+        return None
+    ai_after_result = await session.execute(
+        select(cognilabsai_message.c.id)
+        .where(
+            cognilabsai_message.c.conversation_id == conversation_id,
+            cognilabsai_message.c.sender_type == "ai",
+            cognilabsai_message.c.created_at >= latest.created_at,
+        )
+        .limit(1)
+    )
+    if ai_after_result.scalar_one_or_none():
+        return None
+    return build_local_lead_confirmation_reply(
+        full_name=conversation.get("lead_full_name") or conversation.get("client_full_name") or "",
+        scheduled_time=conversation.get("lead_scheduled_time") or "",
+    )
 
 
 MEDIA_ID_KEYS = ("ig_post_media_id", "ig_reel_media_id", "reel_video_id", "reel_media_id", "media_id", "media_share_id", "media_product_id", "story_media_id", "story_id", "id", "source_id", "target_id")
@@ -3635,6 +3695,18 @@ async def process_instagram_webhook_payload(session: AsyncSession, payload: dict
             recipient_id = str(item.get("recipient", {}).get("id") or "")
             if not sender_id or not recipient_id:
                 continue
+            message_id = str(message_data.get("mid") or item.get("message_id") or "")
+            if message_id:
+                duplicate_result = await session.execute(
+                    select(cognilabsai_message.c.id)
+                    .where(
+                        cognilabsai_message.c.instagram_message_id == message_id,
+                        cognilabsai_message.c.sender_type == "client",
+                    )
+                    .limit(1)
+                )
+                if duplicate_result.scalar_one_or_none():
+                    continue
             media_context = await find_instagram_media_context(session, extracted)
             text_value = build_instagram_media_message_text(extracted, media_context)
             if not text_value:
@@ -3998,7 +4070,7 @@ async def generate_instagram_ai_follow_up(session: AsyncSession, conversation_id
         return None
     base_url = (config.get("openai_base_url") or DEFAULT_OPENAI_BASE_URL).rstrip("/")
     model = config.get("openai_model") or DEFAULT_OPENAI_MODEL
-    history = await get_messages(session, conversation_id, limit=40, offset=0)
+    history = await get_messages(session, conversation_id, limit=COGNILABSAI_AI_FOLLOW_UP_HISTORY_LIMIT, offset=0)
     messages = [
         {
             "role": "system",
@@ -4095,7 +4167,7 @@ async def process_pending_follow_ups():
                 cognilabsai_conversation.c.ai_follow_up_due_at <= now,
             )
             .order_by(cognilabsai_conversation.c.ai_follow_up_due_at.asc())
-            .limit(50)
+            .limit(COGNILABSAI_AI_FOLLOW_UP_BATCH_LIMIT)
         )
         ai_conversation_ids = [row[0] for row in ai_result.all()] if INSTAGRAM_AI_FOLLOW_UP_ENABLED else []
         if not FOLLOW_UPS_ENABLED:
