@@ -2640,6 +2640,46 @@ def apply_reasoning_defaults(payload: dict, model: Optional[str]) -> dict:
     return payload
 
 
+async def request_customer_facing_ai_reply(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    messages: list[dict],
+    context_note: str = "",
+) -> str:
+    retry_messages = list(messages)
+    retry_messages.append({
+        "role": "system",
+        "content": (
+            "Now write exactly one customer-facing reply for the latest customer message. "
+            "Do not mention internal tools, stages, CRM, function calls, or system notes. "
+            "Do not output JSON. Keep it natural, concise, and useful. "
+            "If phone was collected, continue by asking for missing name or preferred call time naturally. "
+            f"{context_note}"
+        ).strip(),
+    })
+    payload = apply_reasoning_defaults({
+        "model": model,
+        "messages": retry_messages,
+        "max_completion_tokens": min(COGNILABSAI_AI_MAX_COMPLETION_TOKENS, 260),
+    }, model)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+        if response.status_code >= 400:
+            print(f"OpenAI text retry error {response.status_code}: {response.text}", flush=True)
+            return ""
+        data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    return sanitize_ai_reply_text(extract_chat_message_text(choices[0].get("message") or {}))
+
+
 def extract_chat_message_text(message: dict) -> str:
     content = message.get("content")
     if isinstance(content, str):
@@ -3305,6 +3345,7 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
 
         tool_calls = extract_ai_tool_calls(message)
         lead_tool_called = False
+        lead_context_note = ""
         for tool_name, tool_data in tool_calls:
             if tool_name == "set_conversation_stage":
                 await set_ai_conversation_stage(
@@ -3333,18 +3374,41 @@ async def generate_ai_reply(session: AsyncSession, conversation_id: int) -> Opti
                         language=language,
                     )
                     lead_tool_called = True
+                    lead_context_note = (
+                        "Lead data was saved from this latest message. "
+                        f"Saved phone: {phone_number}. "
+                        f"Saved name: {full_name}. "
+                        f"Saved business field: {business_field}. "
+                        f"Saved preferred call time: {scheduled_time}. "
+                        "Do not repeat a generic saved-phone confirmation."
+                    )
                 except Exception as lead_exc:
                     print(f"[cognilabsai] save_lead_state error (conversation {conversation_id}): {lead_exc}", flush=True)
         if lead_tool_called:
             inline_reply = sanitize_ai_reply_text(extract_chat_message_text(message))
             if inline_reply:
                 return inline_reply
-            return None
+            print(f"[cognilabsai] empty AI content after lead tool call, retrying text-only (conversation {conversation_id})", flush=True)
+            return await request_customer_facing_ai_reply(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                messages=messages,
+                context_note=lead_context_note,
+            )
 
-        # Tool call yo'q — oddiy text reply
         reply_text = sanitize_ai_reply_text(extract_chat_message_text(message))
         if reply_text:
             return reply_text
+        if tool_calls:
+            print(f"[cognilabsai] empty AI content after tool calls, retrying text-only (conversation {conversation_id})", flush=True)
+            return await request_customer_facing_ai_reply(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                messages=messages,
+                context_note="Conversation stage was updated internally. Still answer the customer normally.",
+            )
         return None
     except Exception as exc:
         import traceback
