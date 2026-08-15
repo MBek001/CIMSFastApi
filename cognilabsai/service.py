@@ -143,10 +143,12 @@ def int_env(name: str, default: int, minimum: int) -> int:
 FOLLOW_UPS_ENABLED = False
 INSTAGRAM_AI_FOLLOW_UP_ENABLED = (os.getenv("COGNILABSAI_AI_FOLLOW_UP_ENABLED") or "false").strip().lower() in {"1", "true", "yes", "on"}
 INSTAGRAM_AI_FOLLOW_UP_DELAY_HOURS = 22
+COGNILABSAI_AI_REPLY_DEBOUNCE_SECONDS = int_env("COGNILABSAI_AI_REPLY_DEBOUNCE_SECONDS", 7, 0)
 COGNILABSAI_AI_HISTORY_LIMIT = int_env("COGNILABSAI_AI_HISTORY_LIMIT", 60, 4)
 COGNILABSAI_AI_MAX_COMPLETION_TOKENS = int_env("COGNILABSAI_AI_MAX_COMPLETION_TOKENS", 650, 200)
 COGNILABSAI_AI_FOLLOW_UP_HISTORY_LIMIT = int_env("COGNILABSAI_AI_FOLLOW_UP_HISTORY_LIMIT", 40, 4)
 COGNILABSAI_AI_FOLLOW_UP_BATCH_LIMIT = int_env("COGNILABSAI_AI_FOLLOW_UP_BATCH_LIMIT", 5, 1)
+ai_reply_debounce_tasks: dict[int, asyncio.Task] = {}
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP1_DELAY_MINUTES = 180
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP2_DELAY_MINUTES = 360
 DEFAULT_INSTAGRAM_FOLLOWUP_STEP3_DELAY_MINUTES = 1200
@@ -2142,7 +2144,7 @@ async def send_website_message(session: AsyncSession, session_id: str, text_valu
         channel="website_ai",
         client_external_id=normalized_session_id,
     )
-    await create_message(
+    message = await create_message(
         session,
         conversation_id=conversation["id"],
         channel="website_ai",
@@ -2150,10 +2152,7 @@ async def send_website_message(session: AsyncSession, session_id: str, text_valu
         text_value=text_value,
         client_external_id=normalized_session_id,
     )
-    try:
-        await maybe_send_ai_reply(session, conversation["id"])
-    except Exception as exc:
-        print(f"Website AI reply error for conversation {conversation['id']}: {exc}", flush=True)
+    schedule_ai_reply(conversation["id"], int(message["id"]))
     return await init_website_session(session, normalized_session_id)
 
 
@@ -3482,6 +3481,43 @@ async def maybe_send_ai_reply(session: AsyncSession, conversation_id: int):
     return None
 
 
+async def send_ai_reply_after_debounce(conversation_id: int, latest_client_message_id: int):
+    try:
+        if COGNILABSAI_AI_REPLY_DEBOUNCE_SECONDS > 0:
+            await asyncio.sleep(COGNILABSAI_AI_REPLY_DEBOUNCE_SECONDS)
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(cognilabsai_message.c.id)
+                .where(
+                    cognilabsai_message.c.conversation_id == conversation_id,
+                    cognilabsai_message.c.sender_type == "client",
+                )
+                .order_by(cognilabsai_message.c.created_at.desc(), cognilabsai_message.c.id.desc())
+                .limit(1)
+            )
+            current_latest_id = result.scalar_one_or_none()
+            if current_latest_id != latest_client_message_id:
+                return
+            await maybe_send_ai_reply(session, conversation_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"[cognilabsai] Debounced AI reply error for conversation {conversation_id}: {exc}", flush=True)
+    finally:
+        current_task = asyncio.current_task()
+        if ai_reply_debounce_tasks.get(conversation_id) is current_task:
+            ai_reply_debounce_tasks.pop(conversation_id, None)
+
+
+def schedule_ai_reply(conversation_id: int, latest_client_message_id: int):
+    existing_task = ai_reply_debounce_tasks.get(conversation_id)
+    if existing_task and not existing_task.done():
+        existing_task.cancel()
+    ai_reply_debounce_tasks[conversation_id] = asyncio.create_task(
+        send_ai_reply_after_debounce(conversation_id, latest_client_message_id)
+    )
+
+
 MEDIA_ID_KEYS = ("ig_post_media_id", "ig_reel_media_id", "reel_video_id", "reel_media_id", "media_id", "media_share_id", "media_product_id", "story_media_id", "story_id", "id", "source_id", "target_id")
 URL_KEYS = ("source_url", "story_media_url", "url", "media_url", "permalink", "link", "share_url")
 
@@ -3679,7 +3715,7 @@ async def process_instagram_webhook_payload(session: AsyncSession, payload: dict
                     )
                 )
                 await session.commit()
-            await create_message(
+            message = await create_message(
                 session,
                 conversation_id=conversation["id"],
                 channel="instagram",
@@ -3690,10 +3726,7 @@ async def process_instagram_webhook_payload(session: AsyncSession, payload: dict
                 media_type=extracted.get("event_type"),
                 media_url=extracted.get("story_url"),
             )
-            try:
-                await maybe_send_ai_reply(session, conversation["id"])
-            except Exception as exc:
-                print(f"Instagram AI reply error for conversation {conversation['id']}: {exc}")
+            schedule_ai_reply(conversation["id"], int(message["id"]))
 
 
 async def process_telegram_userbot_message(
@@ -4333,4 +4366,10 @@ async def shutdown_cognilabsai():
         with contextlib.suppress(asyncio.CancelledError):
             await follow_up_scheduler_task
         follow_up_scheduler_task = None
+    for task in list(ai_reply_debounce_tasks.values()):
+        task.cancel()
+    for task in list(ai_reply_debounce_tasks.values()):
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    ai_reply_debounce_tasks.clear()
     await telegram_userbot_manager.stop()
