@@ -146,6 +146,7 @@ INSTAGRAM_AI_FOLLOW_UP_DELAY_HOURS = 22
 COGNILABSAI_AI_REPLY_DEBOUNCE_SECONDS = int_env("COGNILABSAI_AI_REPLY_DEBOUNCE_SECONDS", 7, 0)
 COGNILABSAI_AI_HISTORY_LIMIT = int_env("COGNILABSAI_AI_HISTORY_LIMIT", 60, 4)
 COGNILABSAI_AI_MAX_COMPLETION_TOKENS = int_env("COGNILABSAI_AI_MAX_COMPLETION_TOKENS", 650, 200)
+COGNILABSAI_AI_TEXT_RETRY_MAX_COMPLETION_TOKENS = int_env("COGNILABSAI_AI_TEXT_RETRY_MAX_COMPLETION_TOKENS", 1200, 500)
 COGNILABSAI_AI_FOLLOW_UP_HISTORY_LIMIT = int_env("COGNILABSAI_AI_FOLLOW_UP_HISTORY_LIMIT", 40, 4)
 COGNILABSAI_AI_FOLLOW_UP_BATCH_LIMIT = int_env("COGNILABSAI_AI_FOLLOW_UP_BATCH_LIMIT", 5, 1)
 ai_reply_debounce_tasks: dict[int, asyncio.Task] = {}
@@ -2658,21 +2659,41 @@ async def request_customer_facing_ai_reply(
             f"{context_note}"
         ).strip(),
     })
-    payload = apply_reasoning_defaults({
-        "model": model,
-        "messages": retry_messages,
-        "max_completion_tokens": min(COGNILABSAI_AI_MAX_COMPLETION_TOKENS, 260),
-    }, model)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    token_limits = [
+        COGNILABSAI_AI_TEXT_RETRY_MAX_COMPLETION_TOKENS,
+        max(COGNILABSAI_AI_TEXT_RETRY_MAX_COMPLETION_TOKENS, 1800),
+    ]
+    data = {}
     async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
-        if response.status_code >= 400:
-            print(f"OpenAI text retry error {response.status_code}: {response.text}", flush=True)
+        for token_limit in token_limits:
+            payload = apply_reasoning_defaults({
+                "model": model,
+                "messages": retry_messages,
+                "max_completion_tokens": token_limit,
+            }, model)
+            response = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+            if response.status_code < 400:
+                data = response.json()
+                break
+            response_text = response.text
+            should_retry_limit = (
+                response.status_code == 400
+                and token_limit != token_limits[-1]
+                and (
+                    "model output limit was reached" in response_text
+                    or "max_tokens" in response_text
+                    or "max_completion_tokens" in response_text
+                )
+            )
+            if should_retry_limit:
+                print(f"OpenAI text retry hit output limit at {token_limit}, retrying higher", flush=True)
+                continue
+            print(f"OpenAI text retry error {response.status_code}: {response_text}", flush=True)
             return ""
-        data = response.json()
     choices = data.get("choices") or []
     if not choices:
         return ""
