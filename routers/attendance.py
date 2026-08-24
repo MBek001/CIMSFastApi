@@ -717,6 +717,47 @@ def _serialize_daily_record(row) -> dict:
     }
 
 
+def _serialize_attendance_employee(row) -> dict:
+    return {
+        "id": row.employee_id,
+        "full_name": f"{row.name} {row.surname}".strip(),
+        "name": row.name,
+        "surname": row.surname,
+        "email": getattr(row, "email", None),
+        "role": serialize_role(getattr(row, "role", None), getattr(row, "role_name", None)),
+        "role_name": getattr(row, "role_name", None),
+        "job_title": getattr(row, "job_title", None),
+    }
+
+
+def _serialize_daily_record_with_employee(row) -> dict:
+    employee = _serialize_attendance_employee(row)
+    return {
+        **_serialize_daily_record(row),
+        "employee_name": employee["full_name"],
+        "full_name": employee["full_name"],
+        "employee": employee,
+    }
+
+
+def _build_daily_records_stats(rows: List) -> dict:
+    worked_minutes = [row.worked_minutes for row in rows if row.worked_minutes is not None]
+    status_counts = defaultdict(int)
+    for row in rows:
+        status_counts[row.status or "unknown"] += 1
+    total_minutes = sum(worked_minutes)
+    return {
+        "total_records": len(rows),
+        "present_count": int(status_counts.get("present", 0)),
+        "late_count": int(status_counts.get("late", 0)),
+        "absent_count": int(status_counts.get("absent", 0)),
+        "incomplete_count": int(status_counts.get("incomplete", 0)),
+        "total_worked_minutes": total_minutes,
+        "total_worked_hours": round(total_minutes / 60, 2),
+        "avg_worked_minutes": round(total_minutes / len(worked_minutes)) if worked_minutes else 0,
+    }
+
+
 async def _upsert_daily_record(session: AsyncSession, payload: AttendanceDailyRecordRequest) -> int:
     now = datetime.utcnow()
     values = {
@@ -828,6 +869,102 @@ async def bulk_upsert_daily_records(
 
 
 @router.get(
+    "/daily-records/user/{employee_id}",
+    summary="FaceID: Bitta userning to'liq kunlik davomati",
+)
+async def get_user_daily_records(
+    employee_id: int,
+    date_from: Optional[date_type] = Query(default=None),
+    date_to: Optional[date_type] = Query(default=None),
+    year: Optional[int] = Query(default=None, ge=2000, le=2100),
+    month: Optional[int] = Query(default=None, ge=1, le=12),
+    day: Optional[int] = Query(default=None, ge=1, le=31),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    source_system: Optional[str] = Query(default=None),
+    is_manual: Optional[bool] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_active_user),
+):
+    await ensure_attendance_schema()
+    await ensure_employee_exists(session, employee_id)
+    conditions = [
+        attendance_daily_record.c.employee_id == employee_id,
+        attendance_daily_record.c.is_deleted == False,  # noqa: E712
+    ]
+    if date_from is not None:
+        conditions.append(attendance_daily_record.c.attendance_date >= date_from)
+    if date_to is not None:
+        conditions.append(attendance_daily_record.c.attendance_date <= date_to)
+    if year is not None:
+        conditions.append(extract("year", attendance_daily_record.c.attendance_date) == year)
+    if month is not None:
+        conditions.append(extract("month", attendance_daily_record.c.attendance_date) == month)
+    if day is not None:
+        conditions.append(extract("day", attendance_daily_record.c.attendance_date) == day)
+    if status_filter is not None:
+        conditions.append(attendance_daily_record.c.status == status_filter)
+    if source_system is not None:
+        conditions.append(attendance_daily_record.c.source_system == source_system)
+    if is_manual is not None:
+        conditions.append(attendance_daily_record.c.is_manual == is_manual)
+
+    total_count = (await session.execute(
+        select(func.count()).select_from(attendance_daily_record).where(and_(*conditions))
+    )).scalar_one()
+
+    all_rows = (await session.execute(
+        select(attendance_daily_record)
+        .where(and_(*conditions))
+    )).fetchall()
+
+    rows = (await session.execute(
+        select(
+            attendance_daily_record,
+            user.c.name,
+            user.c.surname,
+            user.c.email,
+            user.c.role,
+            user.c.role_name,
+            user.c.job_title,
+        )
+        .select_from(
+            attendance_daily_record.join(user, attendance_daily_record.c.employee_id == user.c.id)
+        )
+        .where(and_(*conditions))
+        .order_by(attendance_daily_record.c.attendance_date.desc(), attendance_daily_record.c.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )).fetchall()
+
+    employee = _serialize_attendance_employee(rows[0]) if rows else None
+    if employee is None:
+        emp_row = (await session.execute(
+            select(
+                user.c.id.label("employee_id"),
+                user.c.name,
+                user.c.surname,
+                user.c.email,
+                user.c.role,
+                user.c.role_name,
+                user.c.job_title,
+            )
+            .where(user.c.id == employee_id)
+        )).fetchone()
+        employee = _serialize_attendance_employee(emp_row)
+
+    return {
+        "employee": employee,
+        "items": [_serialize_daily_record_with_employee(row) for row in rows],
+        "stats": _build_daily_records_stats(all_rows),
+        "page": page,
+        "page_size": page_size,
+        "total_count": total_count,
+    }
+
+
+@router.get(
     "/daily-records/{employee_id}/{attendance_date}",
     summary="FaceID: Bitta kunlik davomat yozuvi",
 )
@@ -839,7 +976,17 @@ async def get_daily_record(
 ):
     await ensure_attendance_schema()
     result = await session.execute(
-        select(attendance_daily_record).where(
+        select(
+            attendance_daily_record,
+            user.c.name,
+            user.c.surname,
+            user.c.email,
+            user.c.role,
+            user.c.role_name,
+            user.c.job_title,
+        )
+        .select_from(attendance_daily_record.join(user, attendance_daily_record.c.employee_id == user.c.id))
+        .where(
             and_(
                 attendance_daily_record.c.employee_id == employee_id,
                 attendance_daily_record.c.attendance_date == attendance_date,
@@ -850,7 +997,7 @@ async def get_daily_record(
     row = result.fetchone()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Davomat yozuvi topilmadi")
-    return _serialize_daily_record(row)
+    return _serialize_daily_record_with_employee(row)
 
 
 @router.patch(
@@ -940,6 +1087,10 @@ async def list_daily_records(
             attendance_daily_record,
             user.c.name,
             user.c.surname,
+            user.c.email,
+            user.c.role,
+            user.c.role_name,
+            user.c.job_title,
         )
         .select_from(
             attendance_daily_record.join(user, attendance_daily_record.c.employee_id == user.c.id)
@@ -952,10 +1103,7 @@ async def list_daily_records(
     rows = (await session.execute(query)).fetchall()
     return {
         "items": [
-            {
-                **_serialize_daily_record(row),
-                "full_name": f"{row.name} {row.surname}".strip(),
-            }
+            _serialize_daily_record_with_employee(row)
             for row in rows
         ],
         "page": page,
