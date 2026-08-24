@@ -1415,18 +1415,17 @@ async def build_user_task_report(session: AsyncSession, lookup: str) -> Tuple[Op
                 .join(project, project_board.c.project_id == project.c.id)
             )
             .where(build_card_user_filter(target_user.id))
+            .where(func.lower(project_board_column.c.name).in_(["to do", "doing"]))
             .order_by(project.c.project_name.asc(), project_board_card.c.completed_at.is_(None).desc(), project_board_card.c.due_date.asc().nullslast(), project_board_card.c.updated_at.desc())
         )
     ).fetchall()
 
     full_name = f"{target_user.name} {target_user.surname}".strip()
     role_text = target_user.job_title or target_user.role_name or "-"
-    total_open_count = sum(1 for row in rows if not row.completed_at and not is_done_column_name(row.column_name))
-    total_done_count = len(rows) - total_open_count
     lines = [
         f"👤 {full_name}",
         f"🏷 {role_text}",
-        f"📌 Jami: {len(rows)} · Ochiq: {total_open_count} · Done: {total_done_count}",
+        f"📌 To Do / Doing: {len(rows)}",
         "",
     ]
 
@@ -1440,11 +1439,9 @@ async def build_user_task_report(session: AsyncSession, lookup: str) -> Tuple[Op
         grouped.setdefault(row.project_name or "Projectsiz", []).append(row)
 
     for project_name, project_rows in grouped.items():
-        open_count = sum(1 for row in project_rows if not row.completed_at and not is_done_column_name(row.column_name))
-        done_count = len(project_rows) - open_count
         lines.append("━━━━━━━━━━━━━━")
         lines.append(f"🗂 {project_name}")
-        lines.append(f"Ochiq: {open_count} · Done: {done_count}")
+        lines.append(f"Tasklar: {len(project_rows)}")
         lines.append("")
         for index, row in enumerate(project_rows, start=1):
             status_text = row.column_name or "-"
