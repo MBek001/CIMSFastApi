@@ -75,7 +75,8 @@ DEFAULT_BOARD_COLUMNS = [
 _project_card_schema_ready = False
 _project_task_bot_app: Optional[Application] = None
 PROJECTS_TZ = ZoneInfo("Asia/Tashkent")
-TASK_COMMAND_RE = re.compile(r"/(?P<command>add_task_front|add_task_back|frontend|backend)(?:@\w+)?", re.IGNORECASE)
+TASK_COMMAND_RE = re.compile(r"/(?P<command>add_task_front|add_task_back|frontend|backend|management)(?:@\w+)?", re.IGNORECASE)
+MANAGEMENT_ASSIGNEE_LOOKUPS = {"muhammadali", "saidbek"}
 TASK_STATUS_ALIASES = {
     "todo": "To Do",
     "to_do": "To Do",
@@ -1025,7 +1026,12 @@ def parse_project_task_command(text_value: str, reply_text: Optional[str] = None
         return None, None, None, None, None, None
 
     command = command_match.group("command").lower()
-    kind = "frontend" if command in {"add_task_front", "frontend"} else "backend"
+    if command == "management":
+        kind = "management"
+    elif command in {"add_task_front", "frontend"}:
+        kind = "frontend"
+    else:
+        kind = "backend"
     body = f"{text_value[:command_match.start()]} {text_value[command_match.end():]}"
     body, status_name = parse_project_task_status(body)
     body, due_date = parse_project_task_deadline(body)
@@ -1140,6 +1146,35 @@ def user_matches_task_kind(row, kind: str) -> bool:
 
 
 async def resolve_project_task_assignees(session: AsyncSession, project_row, kind: str) -> List:
+    if kind == "management":
+        rows = (
+            await session.execute(
+                select(
+                    user.c.id,
+                    user.c.name,
+                    user.c.surname,
+                    user.c.email,
+                    user.c.telegram_id,
+                    user.c.chat_id,
+                    user.c.job_title,
+                    user.c.role_name,
+                    user.c.company_code,
+                )
+                .where(user.c.is_active == True)  # noqa: E712
+                .order_by(user.c.id.asc())
+            )
+        ).fetchall()
+        return [
+            row
+            for row in rows
+            if (
+                normalize_task_report_lookup(row.name) in MANAGEMENT_ASSIGNEE_LOOKUPS
+                or normalize_task_report_lookup(f"{row.name}{row.surname}") in MANAGEMENT_ASSIGNEE_LOOKUPS
+                or normalize_task_report_lookup(row.telegram_id) in MANAGEMENT_ASSIGNEE_LOOKUPS
+                or normalize_task_report_lookup(str(row.email or "").split("@", 1)[0]) in MANAGEMENT_ASSIGNEE_LOOKUPS
+            )
+        ]
+
     source = project_team_member if project_row.team_id else project_member
     project_filter = source.c.team_id == project_row.team_id if project_row.team_id else source.c.project_id == project_row.id
     rows = (
@@ -1310,7 +1345,7 @@ async def create_project_task_from_group_message(
         board_row = await get_or_create_project_board_by_name(
             session,
             project_row.id,
-            "Backend" if kind == "backend" else "Frontend",
+            "Management" if kind == "management" else ("Backend" if kind == "backend" else "Frontend"),
             sender_row.id if sender_row else None,
         )
         column_row, status_warning = await resolve_board_column_for_task(session, board_row.id, status_name)
@@ -1492,7 +1527,7 @@ async def project_task_report_handler(update_obj: TelegramUpdate, context: Conte
         return
 
     command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lstrip("/")
-    if command.lower() in {"start", "add_task_front", "add_task_back", "backend", "frontend"}:
+    if command.lower() in {"start", "add_task_front", "add_task_back", "backend", "frontend", "management"}:
         return
     async with async_session_maker() as session:
         report, error = await build_user_task_report(session, command)
@@ -1571,6 +1606,7 @@ async def start_project_task_bot() -> None:
     _project_task_bot_app.add_handler(CommandHandler("add_task_back", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("backend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("frontend", project_task_command_handler))
+    _project_task_bot_app.add_handler(CommandHandler("management", project_task_command_handler))
     _project_task_bot_app.add_handler(MessageHandler(filters.TEXT, project_task_text_handler))
     _project_task_bot_app.add_handler(MessageHandler(filters.COMMAND, project_task_report_handler), group=1)
     await _project_task_bot_app.initialize()

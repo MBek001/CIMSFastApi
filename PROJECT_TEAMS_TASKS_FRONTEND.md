@@ -24,6 +24,7 @@ Task bot guruhdan task yaratganda assignee team ichidan topiladi:
 
 - `/add_task_front` yoki `/frontend`: frontend user.
 - `/add_task_back` yoki `/backend`: backend user.
+- `/management`: MuhammadAli va Saidbek. Projectda `Management` board bo'lmasa backend auto ochadi.
 - Teamda 1ta user bo'lsa shu user frontend ham backend ham bo'ladi.
 
 Frontend/backend aniqlash user `job_title`, `role_name`, `company_code`, `email` ichidagi so'zlar orqali bo'ladi.
@@ -55,6 +56,7 @@ Yangi message ichida command:
 ```text
 Login page responsive fix qilish kerak /add_task_front 25.08
 Payment API bug fix /add_task_back 25.08 19:00
+Client meeting qilish kerak /management 25.08 18:00
 Login page responsive fix qilish kerak /add_task_front 25.08 status:Doing
 Payment API bug fix /add_task_back 25.08 status:To Test
 ```
@@ -64,6 +66,7 @@ Oldingi messagega reply qilib task qilish:
 ```text
 /add_task_front 25.08
 /add_task_back 25.08 19:00
+/management 25.08 18:00
 /add_task_front 25.08 status:Doing
 /add_task_back 25.08 status:Refix
 ```
