@@ -1,4 +1,5 @@
 import asyncio
+import html
 import re
 from datetime import date, datetime, time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -1421,15 +1422,15 @@ def task_priority_value(value) -> str:
 def task_status_emoji(status_name: Optional[str]) -> str:
     normalized = str(status_name or "").strip().lower()
     if normalized == "to do":
-        return "⚪"
+        return "📝"
     if normalized == "doing":
-        return "🔵"
+        return "🚧"
     if normalized == "done":
-        return "🟢"
+        return "✅"
     if normalized == "to test":
-        return "🟡"
+        return "🧪"
     if normalized == "refix":
-        return "🔴"
+        return "🛠"
     return "📍"
 
 
@@ -1449,7 +1450,7 @@ def project_task_status_markup(card_id: int, status_options: List[Tuple[int, str
 
     buttons = []
     for column_id, name in status_options:
-        prefix = "▸" if current_column_id == column_id else task_status_emoji(name)
+        prefix = "📌" if current_column_id == column_id else task_status_emoji(name)
         label = f"{prefix} {name}"
         buttons.append(InlineKeyboardButton(label, callback_data=f"task_status:{card_id}:{column_id}"))
     return InlineKeyboardMarkup([buttons[index:index + 2] for index in range(0, len(buttons), 2)]) if buttons else None
@@ -1487,6 +1488,98 @@ async def find_project_task_bot_user(session: AsyncSession, chat_id: int, userna
             .limit(1)
         )
     ).fetchone()
+
+
+async def build_private_task_rows(session: AsyncSession, target_user_id: int, limit: int = 10):
+    return (
+        await session.execute(
+            select(
+                project_board_card,
+                project_board_column.c.name.label("column_name"),
+                project_board.c.name.label("board_name"),
+                project.c.project_name.label("project_name"),
+            )
+            .select_from(
+                project_board_card
+                .join(project_board_column, project_board_card.c.column_id == project_board_column.c.id)
+                .join(project_board, project_board_column.c.board_id == project_board.c.id)
+                .join(project, project_board.c.project_id == project.c.id)
+            )
+            .where(build_card_user_filter(target_user_id))
+            .where(func.lower(project_board_column.c.name).in_(["to do", "doing", "to test", "refix"]))
+            .order_by(project_board_card.c.due_date.asc().nullslast(), project_board_card.c.updated_at.desc())
+            .limit(limit)
+        )
+    ).fetchall()
+
+
+def format_private_task_button_title(title: str, max_length: int = 34) -> str:
+    clean_title = " ".join(str(title or "").split())
+    if len(clean_title) <= max_length:
+        return clean_title
+    return clean_title[: max_length - 1].rstrip() + "…"
+
+
+def private_task_list_markup(rows):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    buttons = []
+    for row in rows:
+        label = f"#{row.id} · {task_status_emoji(row.column_name)} {format_private_task_button_title(row.title)}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"task_open:{row.id}")])
+    return InlineKeyboardMarkup(buttons) if buttons else None
+
+
+def format_private_task_list_text(rows) -> str:
+    if not rows:
+        return "📭 Aktiv task topilmadi."
+    lines = ["📋 <b>Mening tasklarim</b>", "", "Taskni tanlang, keyin statusni o'zgartiring."]
+    project_counts: Dict[str, int] = {}
+    for row in rows:
+        project_counts[row.project_name or "Projectsiz"] = project_counts.get(row.project_name or "Projectsiz", 0) + 1
+    lines.append("")
+    for project_name, count in project_counts.items():
+        lines.append(f"🗂 {project_name}: {count}")
+    return "\n".join(lines)
+
+
+async def get_private_task_detail_for_bot(
+    session: AsyncSession,
+    card_id: int,
+    chat_id: int,
+    username: Optional[str],
+) -> Tuple[bool, str, Optional[List[Tuple[int, str]]], Optional[int]]:
+    target_user = await find_project_task_bot_user(session, chat_id, username)
+    if not target_user:
+        return False, "User topilmadi. Botga /start email@example.com yuboring.", None, None
+    card_row = await get_card_or_404(session, card_id)
+    column_row = await get_column_or_404(session, card_row.column_id)
+    board_row = await get_board_or_404(session, column_row.board_id)
+    project_row = (
+        await session.execute(select(project.c.project_name).where(project.c.id == board_row.project_id))
+    ).fetchone()
+    assignee_ids_map = await get_card_assignee_ids_map(session, [card_id])
+    visible_assignee_ids = set(get_card_assignee_ids(card_row, assignee_ids_map))
+    is_allowed = target_user.id in visible_assignee_ids or card_row.created_by == target_user.id or is_ceo_user(target_user)
+    if not is_allowed:
+        return False, "Bu task sizga biriktirilmagan.", None, None
+    status_options = await get_board_status_options(session, board_row.id)
+    lines = [
+        f"📌 <b>Task #{card_row.id}</b>",
+        "",
+        f"🗂 <b>Project:</b> {html.escape(str(project_row.project_name if project_row else '-'))}",
+        f"🧩 <b>Task:</b>",
+        html.escape(str(card_row.title)),
+    ]
+    if card_row.description:
+        lines.extend(["", f"📝 <b>Izoh:</b>", html.escape(str(card_row.description))])
+    lines.extend([
+        "",
+        f"📍 <b>Status:</b> {column_row.name}",
+        f"🎯 <b>Priority:</b> {task_priority_value(card_row.priority).capitalize()}",
+        f"📅 <b>Muddat:</b> {format_project_task_date(card_row.due_date) if card_row.due_date else '-'}",
+    ])
+    return True, "\n".join(lines), status_options, column_row.id
 
 
 async def update_card_status_from_task_bot(
@@ -1585,8 +1678,60 @@ async def project_task_status_callback_handler(update_obj: TelegramUpdate, conte
         updated_text = update_task_message_status_text(query.message.text if query.message else None, message_text.split(": ", 1)[-1])
         await query.edit_message_text(
             text=updated_text,
+            parse_mode="HTML",
             reply_markup=project_task_status_markup(card_id, status_options, current_column_id)
         )
+
+
+async def project_task_open_callback_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update_obj.callback_query
+    if not query or not query.data or not update_obj.effective_chat:
+        return
+    match = re.fullmatch(r"task_open:(\d+)", query.data)
+    if not match:
+        await query.answer("Noto'g'ri callback", show_alert=True)
+        return
+    card_id = int(match.group(1))
+    async with async_session_maker() as session:
+        ok, text_value, status_options, current_column_id = await get_private_task_detail_for_bot(
+            session,
+            card_id,
+            update_obj.effective_chat.id,
+            update_obj.effective_user.username if update_obj.effective_user else None,
+        )
+    if not ok:
+        await query.answer(text_value, show_alert=True)
+        return
+    await query.answer("Task ochildi")
+    await query.edit_message_text(
+        text=text_value,
+        parse_mode="HTML",
+        reply_markup=project_task_status_markup(card_id, status_options or [], current_column_id),
+    )
+
+
+async def project_task_my_tasks_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update_obj.effective_message
+    if not message or not update_obj.effective_chat:
+        return
+    if update_obj.effective_chat.type != "private":
+        await message.reply_text("Bu command private chatda ishlaydi.")
+        return
+    async with async_session_maker() as session:
+        target_user = await find_project_task_bot_user(
+            session,
+            update_obj.effective_chat.id,
+            update_obj.effective_user.username if update_obj.effective_user else None,
+        )
+        if not target_user:
+            await message.reply_text("User topilmadi. Botga /start email@example.com yuboring.")
+            return
+        rows = await build_private_task_rows(session, target_user.id)
+    await message.reply_text(
+        format_private_task_list_text(rows),
+        parse_mode="HTML",
+        reply_markup=private_task_list_markup(rows),
+    )
 
 
 async def build_user_task_report(session: AsyncSession, lookup: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1762,11 +1907,13 @@ async def start_project_task_bot() -> None:
         return
     _project_task_bot_app = Application.builder().token(token).build()
     _project_task_bot_app.add_handler(CommandHandler("start", project_task_start_handler))
+    _project_task_bot_app.add_handler(CommandHandler("my_tasks", project_task_my_tasks_handler))
     _project_task_bot_app.add_handler(CommandHandler("add_task_front", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("add_task_back", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("backend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("frontend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("management", project_task_command_handler))
+    _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_open_callback_handler, pattern=r"^task_open:\d+$"))
     _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_status_callback_handler, pattern=r"^task_status:\d+:\d+$"))
     _project_task_bot_app.add_handler(MessageHandler(filters.TEXT, project_task_text_handler))
     _project_task_bot_app.add_handler(MessageHandler(filters.COMMAND, project_task_report_handler), group=1)
