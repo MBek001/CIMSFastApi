@@ -153,6 +153,7 @@ async def chat_delete_conversation(
 
 
 @chat_router.put("/conversations/{conversation_id}/follow-up", response_model=ConversationItem)
+@chat_router.patch("/conversations/{conversation_id}/follow-up", response_model=ConversationItem)
 async def chat_update_follow_up(
     conversation_id: int,
     request: FollowUpConfigRequest,

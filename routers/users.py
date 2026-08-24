@@ -532,6 +532,7 @@ async def create_user(
 
 # --- 3. USER YANGILASH ---
 @router.put("/users/{user_id}", response_model=SuccessResponse, summary="User ma'lumotlarini yangilash")
+@router.patch("/users/{user_id}", response_model=SuccessResponse, summary="User ma'lumotlarini qisman yangilash")
 async def update_user(
         user_id: int,
         user_data: UserUpdateRequest,
@@ -980,6 +981,7 @@ async def create_payment(
 
 
 @router.put("/payments/{payment_id}", response_model=SuccessResponse, summary="To'lov ma'lumotlarini yangilash")
+@router.patch("/payments/{payment_id}", response_model=SuccessResponse, summary="To'lov ma'lumotlarini qisman yangilash")
 async def update_payment(
         payment_id: int,
         payment_data: PaymentUpdateRequest,
@@ -1121,6 +1123,7 @@ async def create_company_payment(
 
 
 @router.put("/company-payments/{payment_id}", response_model=SuccessResponse, summary="Company recurring payment reminder yangilash")
+@router.patch("/company-payments/{payment_id}", response_model=SuccessResponse, summary="Company recurring payment reminder qisman yangilash")
 async def update_company_payment(
         payment_id: int,
         payment_data: CompanyRecurringPaymentUpdateRequest,
@@ -1262,6 +1265,7 @@ async def get_user_permissions(
 
 # --- 12. USER PERMISSIONS YANGILASH (TRUE/FALSE FORMAT) ---
 @router.put("/users/{user_id}/permissions", response_model=SuccessResponse, summary="User ruxsatlarini yangilash")
+@router.patch("/users/{user_id}/permissions", response_model=SuccessResponse, summary="User ruxsatlarini qisman yangilash")
 async def update_user_permissions(
         user_id: int,
         permissions_data: UserPermissionUpdateRequest,

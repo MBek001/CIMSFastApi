@@ -364,6 +364,7 @@ async def create_page(
 
 
 @router.put("/pages/{page_id}", response_model=AppPageResponse, summary="Sahifani yangilash")
+@router.patch("/pages/{page_id}", response_model=AppPageResponse, summary="Sahifani qisman yangilash")
 async def update_page(
     page_id: int,
     page_data: AppPageUpdate,
@@ -659,6 +660,7 @@ async def create_status(
 
 
 @router.put("/statuses/{status_id}", response_model=CustomerStatusResponse, summary="Statusni yangilash")
+@router.patch("/statuses/{status_id}", response_model=CustomerStatusResponse, summary="Statusni qisman yangilash")
 async def update_status(
     status_id: int,
     status_data: CustomerStatusUpdate,
@@ -835,6 +837,7 @@ async def create_role(
 
 
 @router.put("/roles/{role_id}", response_model=UserRoleResponse, summary="Rolni yangilash")
+@router.patch("/roles/{role_id}", response_model=UserRoleResponse, summary="Rolni qisman yangilash")
 async def update_role(
     role_id: int,
     role_data: UserRoleUpdate,

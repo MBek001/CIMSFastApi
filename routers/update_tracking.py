@@ -1709,6 +1709,11 @@ async def create_or_update_workday_overrides(
     response_model=WorkdayOverrideResponse,
     summary="Holiday yoki short day yozuvini tahrirlash"
 )
+@router.patch(
+    "/workday-overrides/{override_id}",
+    response_model=WorkdayOverrideResponse,
+    summary="Holiday yoki short day yozuvini qisman tahrirlash"
+)
 async def update_workday_override(
     override_id: int,
     payload: WorkdayOverrideUpdateRequest,

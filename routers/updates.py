@@ -1250,6 +1250,7 @@ async def create_compensation_mistake(
 
 
 @router.put("/member/mistakes/{mistake_id}", summary="Update compensation mistake incident")
+@router.patch("/member/mistakes/{mistake_id}", summary="Patch compensation mistake incident")
 async def update_compensation_mistake(
     mistake_id: int,
     payload: CompensationMistakeUpdateRequest,
@@ -1404,6 +1405,7 @@ async def create_delivery_bonus(
 
 
 @router.put("/member/delivery-bonuses/{bonus_id}", summary="Update delivery bonus record")
+@router.patch("/member/delivery-bonuses/{bonus_id}", summary="Patch delivery bonus record")
 async def update_delivery_bonus(
     bonus_id: int,
     payload: DeliveryBonusUpdateRequest,
@@ -1897,6 +1899,7 @@ async def get_member_updates(
 
 
 @router.put("/member/update/{update_id}", summary="Update'ni to'liq tahrirlash")
+@router.patch("/member/update/{update_id}", summary="Update'ni qisman tahrirlash")
 async def edit_update(
     update_id: int,
     year: int,

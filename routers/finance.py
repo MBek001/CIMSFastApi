@@ -288,6 +288,7 @@ async def create_finance(
 
 # --- 3. FINANCE YANGILASH ---
 @router.put("/{finance_id}", response_model=SuccessResponse, summary="Finance yozuvini yangilash")
+@router.patch("/{finance_id}", response_model=SuccessResponse, summary="Finance yozuvini qisman yangilash")
 async def update_finance(
         finance_id: int,
         finance_data: FinanceUpdateRequest,

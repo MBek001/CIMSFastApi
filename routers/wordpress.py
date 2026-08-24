@@ -252,6 +252,7 @@ async def create_wordpress_project(
 
 # --- 6. WordPress loyihasini yangilash ---
 @router.put("/projects/{project_id}", response_model=SuccessResponse, summary="WordPress loyihasini yangilash")
+@router.patch("/projects/{project_id}", response_model=SuccessResponse, summary="WordPress loyihasini qisman yangilash")
 async def update_wordpress_project(
         project_id: int,
         project_data: WordPressProjectUpdateRequest,

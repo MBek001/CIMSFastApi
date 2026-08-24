@@ -331,6 +331,7 @@ async def create_attendance_record(
 
 
 @router.put("/records/{attendance_id}", summary="Attendance record yangilash")
+@router.patch("/records/{attendance_id}", summary="Attendance record qisman yangilash")
 async def update_attendance_record(
     attendance_id: int,
     payload: AttendanceUpdateRequest,
@@ -806,6 +807,10 @@ async def _upsert_daily_record(session: AsyncSession, payload: AttendanceDailyRe
 @router.put(
     "/daily-records/{employee_id}/{attendance_date}",
     summary="FaceID: Kunlik davomat yozuvi upsert",
+)
+@router.patch(
+    "/daily-records/{employee_id}/{attendance_date}",
+    summary="FaceID: Kunlik davomat yozuvi qisman upsert",
 )
 async def upsert_daily_record(
     employee_id: int,

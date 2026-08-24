@@ -667,6 +667,7 @@ async def create_customer_note(
 
 
 @router.put("/customers/{customer_id}/notes/{note_id}", response_model=CustomerNoteResponse, summary="Customer note'ni yangilash")
+@router.patch("/customers/{customer_id}/notes/{note_id}", response_model=CustomerNoteResponse, summary="Customer note'ni qisman yangilash")
 async def update_customer_note(
     customer_id: int,
     note_id: int,
@@ -1237,6 +1238,7 @@ async def create_customer(
 
 
 @router.put("/customers/{customer_id}", response_model=SuccessResponse, summary="Mijoz ma'lumotlarini yangilash")
+@router.patch("/customers/{customer_id}", response_model=SuccessResponse, summary="Mijoz ma'lumotlarini qisman yangilash")
 async def update_customer(
         customer_id: int,
         full_name: Optional[str] = Form(None),
