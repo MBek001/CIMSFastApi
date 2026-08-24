@@ -1,6 +1,6 @@
 import asyncio
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
 
@@ -8,10 +8,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, 
 from sqlalchemy import delete, exists, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update as TelegramUpdate
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from auth_utils.auth_func import get_current_active_user
-from config import PROJECT_TASK_BOT_TOKEN, TELEGRAM_UPDATE_BOT_TOKEN
+from config import PROJECT_TASK_BOT_TOKEN
 from database import async_session_maker, engine, get_async_session
 from models.admin_models import daily_update_log
 from models.projects_models import (
@@ -75,6 +75,7 @@ DEFAULT_BOARD_COLUMNS = [
 _project_card_schema_ready = False
 _project_task_bot_app: Optional[Application] = None
 PROJECTS_TZ = ZoneInfo("Asia/Tashkent")
+TASK_COMMAND_RE = re.compile(r"/(?P<command>add_task_front|add_task_back|frontend|backend)(?:@\w+)?", re.IGNORECASE)
 
 
 def normalize_project_datetime(value: Optional[datetime]) -> Optional[datetime]:
@@ -177,8 +178,13 @@ async def ensure_project_card_schema() -> None:
         await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_deadline ON project(deadline)"""))
         await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_telegram_group_id ON project(telegram_group_id)"""))
         await conn.execute(text("""ALTER TABLE project_board_card ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP NULL"""))
+        await conn.execute(text("""ALTER TABLE project_board_card ADD COLUMN IF NOT EXISTS telegram_source_chat_id VARCHAR(100) NULL"""))
+        await conn.execute(text("""ALTER TABLE project_board_card ADD COLUMN IF NOT EXISTS telegram_source_message_id VARCHAR(100) NULL"""))
+        await conn.execute(text("""ALTER TABLE project_board_card ADD COLUMN IF NOT EXISTS telegram_source_command VARCHAR(50) NULL"""))
+        await conn.execute(text("""ALTER TABLE project_board_card ADD COLUMN IF NOT EXISTS telegram_source_kind VARCHAR(20) NULL"""))
         await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_board_card_due_date ON project_board_card(due_date)"""))
         await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_board_card_completed_at ON project_board_card(completed_at)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_board_card_telegram_source ON project_board_card(telegram_source_chat_id, telegram_source_message_id)"""))
         await conn.execute(
             text(
                 """
@@ -734,6 +740,17 @@ async def ensure_team_exists(session: AsyncSession, team_id: Optional[int]) -> N
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team topilmadi")
 
 
+async def get_team_member_ids(session: AsyncSession, team_id: Optional[int]) -> List[int]:
+    if team_id is None:
+        return []
+    result = await session.execute(
+        select(project_team_member.c.user_id)
+        .where(project_team_member.c.team_id == team_id)
+        .order_by(project_team_member.c.user_id.asc())
+    )
+    return [row.user_id for row in result.fetchall()]
+
+
 async def get_project_team_response(session: AsyncSession, team_id: Optional[int]) -> Optional[ProjectTeamResponse]:
     if team_id is None:
         return None
@@ -917,25 +934,66 @@ async def write_task_move_daily_update(
     )
 
 
-def parse_project_task_command(text_value: str) -> Tuple[Optional[str], Optional[datetime]]:
-    text_value = text_value.strip()
-    command_match = re.match(r"^/(backend|frontend)(?:@\w+)?\s*(.*)$", text_value, re.IGNORECASE | re.DOTALL)
-    if not command_match:
-        return None, None
-    body = command_match.group(2).strip()
-    due_date = None
+def parse_project_task_deadline(text_value: str) -> Tuple[str, Optional[datetime]]:
+    raw_text = text_value or ""
     due_match = re.search(
-        r"\b(?:deadline|due|muddat):\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?",
-        body,
+        r"(?:deadline|due|muddat):\s*(\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?:[ T]+(\d{1,2}:\d{2}))?",
+        raw_text,
         re.IGNORECASE,
     )
-    if due_match:
-        raw_date = due_match.group(1)
-        raw_time = due_match.group(2) or "23:59"
+    if not due_match:
+        due_match = re.search(
+            r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?:[ T]+(\d{1,2}:\d{2}))?\b",
+            raw_text,
+            re.IGNORECASE,
+        )
+    if not due_match:
+        return re.sub(r"\s+", " ", raw_text).strip(" -:\n\t"), None
+
+    raw_date = due_match.group(1)
+    raw_time = due_match.group(2) or "18:00"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date):
         due_date = datetime.strptime(f"{raw_date} {raw_time}", "%Y-%m-%d %H:%M")
-        body = body[: due_match.start()] + body[due_match.end() :]
-    body = re.sub(r"\s+", " ", body).strip(" -:\n\t")
-    return body or None, due_date
+    else:
+        parts = re.split(r"[./-]", raw_date)
+        day = int(parts[0])
+        month = int(parts[1])
+        if len(parts) >= 3:
+            year = int(parts[2])
+            year = 2000 + year if year < 100 else year
+        else:
+            today = datetime.now(PROJECTS_TZ).date()
+            year = today.year
+            if date(year, month, day) < today:
+                year += 1
+        hour, minute = [int(piece) for piece in raw_time.split(":", 1)]
+        due_date = datetime.combine(date(year, month, day), time(hour, minute))
+
+    cleaned = raw_text[: due_match.start()] + raw_text[due_match.end() :]
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:\n\t")
+    return cleaned, due_date
+
+
+def parse_project_task_command(text_value: str, reply_text: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[datetime], Optional[str]]:
+    text_value = text_value.strip()
+    command_match = TASK_COMMAND_RE.search(text_value)
+    if not command_match:
+        return None, None, None, None, None
+
+    command = command_match.group("command").lower()
+    kind = "frontend" if command in {"add_task_front", "frontend"} else "backend"
+    body = f"{text_value[:command_match.start()]} {text_value[command_match.end():]}"
+    body, due_date = parse_project_task_deadline(body)
+    reply_body = re.sub(r"\s+", " ", str(reply_text or "")).strip()
+
+    if reply_body:
+        title = reply_body[:200]
+        description = body or f"Telegram groupdan qo'shildi: {kind}"
+    else:
+        title = body[:200]
+        description = f"Telegram groupdan qo'shildi: {kind}"
+
+    return kind, title or None, description, due_date, command
 
 
 async def find_user_by_telegram_username(session: AsyncSession, username: Optional[str]):
@@ -951,10 +1009,16 @@ async def find_user_by_telegram_username(session: AsyncSession, username: Option
     ).fetchone()
 
 
-async def register_project_task_chat(session: AsyncSession, username: Optional[str], chat_id: int) -> bool:
-    if not username:
-        return False
+async def register_project_task_chat(session: AsyncSession, username: Optional[str], chat_id: int, email: Optional[str] = None) -> bool:
     target = await find_user_by_telegram_username(session, username)
+    if not target and email:
+        target = (
+            await session.execute(
+                select(user)
+                .where(func.lower(user.c.email) == email.strip().lower())
+                .limit(1)
+            )
+        ).fetchone()
     if not target:
         return False
     await session.execute(
@@ -1004,6 +1068,8 @@ async def resolve_project_task_assignees(session: AsyncSession, project_row, kin
             .order_by(user.c.id.asc())
         )
     ).fetchall()
+    if len(rows) == 1:
+        return list(rows)
     return [row for row in rows if user_matches_task_kind(row, kind)]
 
 
@@ -1081,9 +1147,22 @@ async def get_first_board_column(session: AsyncSession, board_id: int):
     return result.fetchone()
 
 
-async def create_project_task_from_group_message(kind: str, chat_id: int, sender_username: Optional[str], text_value: str) -> dict:
+async def create_project_task_from_group_message(
+    chat_id: int,
+    sender_username: Optional[str],
+    text_value: str,
+    source_message_id: int,
+    reply_text: Optional[str] = None,
+    reply_message_id: Optional[int] = None,
+) -> dict:
     await ensure_project_card_schema()
-    task_title, due_date = parse_project_task_command(text_value)
+    try:
+        kind, task_title, task_description, due_date, command = parse_project_task_command(text_value, reply_text)
+    except ValueError:
+        return {"status": "error", "message": "Sana formati noto'g'ri. Masalan: /add_task_front 25.08 yoki /add_task_front 25.08 19:00"}
+    duplicate_message_id = reply_message_id or source_message_id
+    if not kind:
+        return {"status": "ignored"}
     if not task_title:
         return {"status": "error", "message": "Task text topilmadi"}
     async with async_session_maker() as session:
@@ -1097,6 +1176,19 @@ async def create_project_task_from_group_message(kind: str, chat_id: int, sender
         ).fetchone()
         if not project_row:
             return {"status": "error", "message": "Bu Telegram group projectga bog'lanmagan"}
+        duplicate_row = (
+            await session.execute(
+                select(project_board_card.c.id)
+                .where(
+                    project_board_card.c.telegram_source_chat_id == str(chat_id),
+                    project_board_card.c.telegram_source_message_id == str(duplicate_message_id),
+                    project_board_card.c.telegram_source_kind == kind,
+                )
+                .limit(1)
+            )
+        ).fetchone()
+        if duplicate_row:
+            return {"status": "duplicate", "card_id": duplicate_row.id}
         sender_row = await find_user_by_telegram_username(session, sender_username)
         assignee_rows = await resolve_project_task_assignees(session, project_row, kind)
         assignee_ids = [row.id for row in assignee_rows]
@@ -1116,11 +1208,15 @@ async def create_project_task_from_group_message(kind: str, chat_id: int, sender
             .values(
                 column_id=column_row.id,
                 title=task_title,
-                description=f"Telegram groupdan qo'shildi: {kind}",
+                description=task_description,
                 order=next_order,
                 priority=CardPriority.medium,
                 assignee_id=assignee_ids[0] if assignee_ids else None,
                 due_date=normalize_project_datetime(due_date),
+                telegram_source_chat_id=str(chat_id),
+                telegram_source_message_id=str(duplicate_message_id),
+                telegram_source_command=command,
+                telegram_source_kind=kind,
                 created_by=sender_row.id if sender_row else None,
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
@@ -1137,7 +1233,7 @@ async def create_project_task_from_group_message(kind: str, chat_id: int, sender
             await send_card_assignment_notification(
                 assignee_row.chat_id,
                 task_title,
-                f"Telegram groupdan qo'shildi: {kind}",
+                task_description,
                 CardPriority.medium.value,
                 due_date,
                 sender_username or "Telegram group",
@@ -1149,6 +1245,7 @@ async def create_project_task_from_group_message(kind: str, chat_id: int, sender
             "project_id": project_row.id,
             "board": board_row.name,
             "assignee_ids": assignee_ids,
+            "due_date": due_date,
         }
 
 
@@ -1164,24 +1261,38 @@ async def project_task_start_handler(update_obj: TelegramUpdate, context: Contex
             session,
             update_obj.effective_user.username,
             update_obj.effective_chat.id,
+            context.args[0] if context.args else None,
         )
     if registered:
         await message.reply_text("Task bot ulandi. Endi tasklar shu chatga keladi.")
     else:
-        await message.reply_text("User topilmadi. CIMS profile telegram_id username bilan bir xil bo'lishi kerak.")
+        await message.reply_text("User topilmadi. CIMS profile telegram_id username bilan bir xil bo'lishi kerak yoki /start email@example.com yuboring.")
 
 
 async def project_task_command_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update_obj.effective_message
     if not message or not message.text or not update_obj.effective_chat:
         return
-    command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
+    if update_obj.effective_chat.type not in {"group", "supergroup"}:
+        return
+    reply_text = None
+    reply_message_id = None
+    if message.reply_to_message:
+        reply_text = message.reply_to_message.text or message.reply_to_message.caption
+        reply_message_id = message.reply_to_message.message_id
     result = await create_project_task_from_group_message(
-        command,
         update_obj.effective_chat.id,
         update_obj.effective_user.username if update_obj.effective_user else None,
         message.text,
+        message.message_id,
+        reply_text,
+        reply_message_id,
     )
+    if result.get("status") == "ignored":
+        return
+    if result.get("status") == "duplicate":
+        await message.reply_text(f"Bu message oldin task qilingan: #{result['card_id']}")
+        return
     if result.get("status") != "ok":
         await message.reply_text(result.get("message", "Task yaratilmadi"))
         return
@@ -1190,15 +1301,22 @@ async def project_task_command_handler(update_obj: TelegramUpdate, context: Cont
     await message.reply_text(f"Task yaratildi: #{result['card_id']} ({result['board']}){assignee_text}")
 
 
+async def project_task_text_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await project_task_command_handler(update_obj, context)
+
+
 async def start_project_task_bot() -> None:
     global _project_task_bot_app
-    token = PROJECT_TASK_BOT_TOKEN or TELEGRAM_UPDATE_BOT_TOKEN
+    token = PROJECT_TASK_BOT_TOKEN
     if _project_task_bot_app or not token:
         return
     _project_task_bot_app = Application.builder().token(token).build()
     _project_task_bot_app.add_handler(CommandHandler("start", project_task_start_handler))
+    _project_task_bot_app.add_handler(CommandHandler("add_task_front", project_task_command_handler))
+    _project_task_bot_app.add_handler(CommandHandler("add_task_back", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("backend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("frontend", project_task_command_handler))
+    _project_task_bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, project_task_text_handler))
     await _project_task_bot_app.initialize()
     await _project_task_bot_app.start()
     await _project_task_bot_app.updater.start_polling(drop_pending_updates=True)
@@ -1320,6 +1438,10 @@ async def build_board_detail(
                 assignee_ids=assignee_ids,
                 due_date=card_row.due_date,
                 completed_at=card_row.completed_at,
+                telegram_source_chat_id=card_row.telegram_source_chat_id,
+                telegram_source_message_id=card_row.telegram_source_message_id,
+                telegram_source_command=card_row.telegram_source_command,
+                telegram_source_kind=card_row.telegram_source_kind,
                 completion_duration_seconds=completion_duration_seconds(card_row),
                 created_by=card_row.created_by,
                 created_at=card_row.created_at,
@@ -1379,6 +1501,10 @@ async def build_card_detail(session: AsyncSession, card_row) -> CardDetailRespon
         assignee_ids=assignee_ids,
         due_date=card_row.due_date,
         completed_at=card_row.completed_at,
+        telegram_source_chat_id=card_row.telegram_source_chat_id,
+        telegram_source_message_id=card_row.telegram_source_message_id,
+        telegram_source_command=card_row.telegram_source_command,
+        telegram_source_kind=card_row.telegram_source_kind,
         completion_duration_seconds=completion_duration_seconds(card_row),
         current_status_duration_seconds=await get_current_status_duration_seconds(session, card_row.id),
         created_by=card_row.created_by,
@@ -1565,6 +1691,7 @@ async def create_project(
     team_id: Optional[int] = Form(None),
     deadline: Optional[datetime] = Form(None),
     telegram_group_id: Optional[str] = Form(None),
+    telegram_group_chat_id: Optional[str] = Form(None),
     member_ids: Optional[List[str]] = Form(None),
     image: Optional[UploadFile] = File(None),
     session: AsyncSession = Depends(get_async_session),
@@ -1580,6 +1707,7 @@ async def create_project(
         )
 
     parsed_member_ids = parse_member_ids_form(member_ids) or []
+    parsed_member_ids.extend(await get_team_member_ids(session, team_id))
     validated_member_ids = await ensure_valid_member_ids(session, parsed_member_ids, current_user.id)
     await ensure_team_exists(session, team_id)
     image_path = await save_image(image, "project") if image else None
@@ -1593,7 +1721,7 @@ async def create_project(
             project_url=project_url,
             project_image=image_path,
             deadline=normalize_project_datetime(deadline),
-            telegram_group_id=telegram_group_id.strip() if telegram_group_id else None,
+            telegram_group_id=(telegram_group_chat_id or telegram_group_id).strip() if (telegram_group_chat_id or telegram_group_id) else None,
             created_by=current_user.id,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
@@ -1724,6 +1852,7 @@ async def update_project(
     team_id: Optional[int] = Form(None),
     deadline: Optional[datetime] = Form(None),
     telegram_group_id: Optional[str] = Form(None),
+    telegram_group_chat_id: Optional[str] = Form(None),
     member_ids: Optional[List[str]] = Form(None),
     image: Optional[UploadFile] = File(None),
     session: AsyncSession = Depends(get_async_session),
@@ -1750,11 +1879,15 @@ async def update_project(
         update_values["team_id"] = team_id
     if deadline is not None:
         update_values["deadline"] = normalize_project_datetime(deadline)
-    if telegram_group_id is not None:
-        update_values["telegram_group_id"] = telegram_group_id.strip() or None
+    resolved_telegram_group_id = telegram_group_chat_id if telegram_group_chat_id is not None else telegram_group_id
+    if resolved_telegram_group_id is not None:
+        update_values["telegram_group_id"] = resolved_telegram_group_id.strip() or None
 
     parsed_member_ids = parse_member_ids_form(member_ids)
-    if parsed_member_ids is not None:
+    if parsed_member_ids is not None or team_id is not None:
+        parsed_member_ids = parsed_member_ids or []
+        target_team_id = team_id if team_id is not None else project_row.team_id
+        parsed_member_ids.extend(await get_team_member_ids(session, target_team_id))
         parsed_member_ids = await ensure_valid_member_ids(session, parsed_member_ids, current_user.id)
 
     if image is not None:
@@ -1806,7 +1939,7 @@ async def update_project_telegram_group(
         update(project)
         .where(project.c.id == project_id)
         .values(
-            telegram_group_id=group_data.telegram_group_id.strip() if group_data.telegram_group_id else None,
+            telegram_group_id=(group_data.telegram_group_chat_id or group_data.telegram_group_id).strip() if (group_data.telegram_group_chat_id or group_data.telegram_group_id) else None,
             updated_at=datetime.utcnow(),
         )
     )

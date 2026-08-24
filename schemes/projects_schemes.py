@@ -71,6 +71,7 @@ class ProjectTeamUpdateRequest(BaseModel):
 
 class ProjectTelegramGroupRequest(BaseModel):
     telegram_group_id: Optional[str] = Field(None, max_length=100)
+    telegram_group_chat_id: Optional[str] = Field(None, max_length=100)
 
 
 class CardStatusHistoryResponse(BaseModel):
@@ -95,6 +96,10 @@ class CardResponse(BaseModel):
     assignee_ids: List[int] = Field(default_factory=list)
     due_date: Optional[datetime]
     completed_at: Optional[datetime] = None
+    telegram_source_chat_id: Optional[str] = None
+    telegram_source_message_id: Optional[str] = None
+    telegram_source_command: Optional[str] = None
+    telegram_source_kind: Optional[str] = None
     completion_duration_seconds: Optional[int] = None
     current_status_duration_seconds: Optional[int] = None
     created_by: Optional[int]
@@ -222,6 +227,7 @@ class ProjectCreateRequest(BaseModel):
     team_id: Optional[int] = None
     deadline: Optional[datetime] = None
     telegram_group_id: Optional[str] = Field(None, max_length=100)
+    telegram_group_chat_id: Optional[str] = Field(None, max_length=100)
     member_ids: List[int] = Field(default_factory=list)
 
     @field_validator("project_name")
@@ -238,6 +244,7 @@ class ProjectUpdateRequest(BaseModel):
     team_id: Optional[int] = None
     deadline: Optional[datetime] = None
     telegram_group_id: Optional[str] = Field(None, max_length=100)
+    telegram_group_chat_id: Optional[str] = Field(None, max_length=100)
     member_ids: Optional[List[int]] = None
 
     @field_validator("project_name")

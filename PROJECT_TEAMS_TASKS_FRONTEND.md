@@ -1,45 +1,114 @@
-# CIMS Project Team / Task Update
+# CIMS Project Team + Telegram Task Bot
 
-Backend changes:
+## Project form
 
-- Teams:
-  - `GET /projects/teams`
-  - `POST /projects/teams`
-  - `GET /projects/teams/{team_id}`
-  - `PATCH /projects/teams/{team_id}`
-  - `DELETE /projects/teams/{team_id}`
+Project create/edit formda quyilar bo'lishi kerak:
 
-- Project:
-  - `project.team_id`
-  - `project.deadline`
-  - `project.telegram_group_id`
-  - `PATCH /projects/{project_id}/telegram-group`
+- `team_id`: team tanlanadi. Backend/frontend user alohida tanlanmaydi.
+- `deadline`: project umumiy deadline.
+- `telegram_group_id` yoki `telegram_group_chat_id`: project Telegram group chat id.
 
-- Task/card:
-  - `due_date` = task deadline
-  - `completed_at`
-  - `completion_duration_seconds`
-  - `current_status_duration_seconds`
-  - `status_history[]`
+Form-data endpointlar:
 
-- Status history:
-  - Card boshqa column/statusga move bo‘lsa backend eski status vaqtini yopadi.
-  - Yangi status vaqtini ochadi.
-  - `Done` columniga kirsa `completed_at` yoziladi.
+- `POST /projects`
+- `PATCH /projects/{project_id}`
+- `PATCH /projects/{project_id}/telegram-group`
 
-- Updates:
-  - Telegram update bot disabled.
-  - Card move bo‘lsa system o‘sha user uchun `daily_update_log` ga update yozadi.
+`telegram_group_id` va `telegram_group_chat_id` ikkalasi ham backendda qabul qilinadi. Response field hozircha `telegram_group_id`.
 
-- Telegram group task:
-  - Projectga `telegram_group_id` bind qilinadi.
-  - Bot token server `.env`: `PROJECT_TASK_BOT_TOKEN` yoki mavjud `TELEGRAM_UPDATE_BOT_TOKEN`.
-  - User botga private chatda `/start` yuboradi; backend `user.chat_id` ni saqlaydi.
-  - Group command:
-    - `/backend deadline:2026-08-15 Task text`
-    - `/frontend deadline:2026-08-15 18:00 Task text`
-  - Backend/Frontend board alohida yaratiladi.
-  - Task birinchi column (`To Do`) ga tushadi.
-  - Assignee project team/project member ichidan `job_title`, `role_name`, `email`, `company_code` bo‘yicha backend/frontend qilib topiladi.
-  - Assignee topilsa userga Telegram xabar boradi.
-  - CIMS UI dan task qo‘shilganda ham assignee userlarga Telegram xabar boradi.
+## Team logic
+
+Projectga team tanlansa backend team memberlarni project memberlarga ham qo'shadi.
+
+Task bot guruhdan task yaratganda assignee team ichidan topiladi:
+
+- `/add_task_front` yoki `/frontend`: frontend user.
+- `/add_task_back` yoki `/backend`: backend user.
+- Teamda 1ta user bo'lsa shu user frontend ham backend ham bo'ladi.
+
+Frontend/backend aniqlash user `job_title`, `role_name`, `company_code`, `email` ichidagi so'zlar orqali bo'ladi.
+
+## Bot registration
+
+Har bir developer private chatda `@cognilabs_tasks_bot` ga `/start` yuboradi.
+
+Agar Telegram username CIMS `telegram_id` bilan mos bo'lmasa:
+
+```text
+/start email@example.com
+```
+
+Backend user `chat_id` ni saqlaydi. Shundan keyin task notification shu botdan boradi.
+
+## Group commands
+
+Bot project Telegram guruhiga admin qilib qo'shiladi.
+
+Yangi message ichida command:
+
+```text
+Login page responsive fix qilish kerak /add_task_front 25.08
+Payment API bug fix /add_task_back 25.08 19:00
+```
+
+Oldingi messagega reply qilib task qilish:
+
+```text
+/add_task_front 25.08
+/add_task_back 25.08 19:00
+```
+
+Legacy commandlar ham ishlaydi:
+
+```text
+/frontend 2026-08-25 19:00 Task text
+/backend deadline:2026-08-25 19:00 Task text
+```
+
+Date qoidasi:
+
+- `25.08` = joriy yil, soat `18:00`.
+- `25.08 19:00` = shu sana va vaqt.
+- `2026-08-25 19:00` ham ishlaydi.
+
+## Task response
+
+Task card responsega qo'shilgan fieldlar:
+
+- `telegram_source_chat_id`
+- `telegram_source_message_id`
+- `telegram_source_command`
+- `telegram_source_kind`
+
+Bu fieldlar task Telegramdan yaratilganini ko'rsatadi.
+
+## Duplicate rule
+
+Reply qilingan bir xil Telegram message uchun bir xil yo'nalishda task qayta yaratilmaydi.
+
+Backend groupga:
+
+```text
+Bu message oldin task qilingan: #123
+```
+
+deb qaytaradi.
+
+## Private notification
+
+Developerga private bot xabari shunday formatda boradi:
+
+```text
+Yangi task
+
+Project: Project nomi
+Task:
+Task matni
+
+Izoh:
+Qo'shimcha izoh
+
+Priority: Medium
+Muddat: 2026-08-25 19:00
+Kim berdi: username
+```

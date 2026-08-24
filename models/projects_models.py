@@ -120,6 +120,10 @@ project_board_card = Table(
     Column("assignee_id", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("due_date", DateTime, nullable=True),
     Column("completed_at", DateTime, nullable=True),
+    Column("telegram_source_chat_id", String(100), nullable=True),
+    Column("telegram_source_message_id", String(100), nullable=True),
+    Column("telegram_source_command", String(50), nullable=True),
+    Column("telegram_source_kind", String(20), nullable=True),
     Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
@@ -193,6 +197,7 @@ Index("idx_project_board_card_column_id", project_board_card.c.column_id)
 Index("idx_project_board_card_assignee_id", project_board_card.c.assignee_id)
 Index("idx_project_board_card_due_date", project_board_card.c.due_date)
 Index("idx_project_board_card_completed_at", project_board_card.c.completed_at)
+Index("idx_project_board_card_telegram_source", project_board_card.c.telegram_source_chat_id, project_board_card.c.telegram_source_message_id)
 Index("idx_project_card_status_history_card_id", project_board_card_status_history.c.card_id)
 Index("idx_project_card_status_history_open", project_board_card_status_history.c.card_id, project_board_card_status_history.c.left_at)
 Index("idx_project_board_card_assignee_card_id", project_board_card_assignee.c.card_id)

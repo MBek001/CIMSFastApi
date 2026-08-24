@@ -1,11 +1,12 @@
 import logging
+import html
 from datetime import date, datetime
 from telegram import Bot
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from fastapi import UploadFile, HTTPException
 import io
-from config import PROJECT_TASK_BOT_TOKEN, TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID, TELEGRAM_UPDATE_BOT_TOKEN
+from config import PROJECT_TASK_BOT_TOKEN, TELEGRAM_AUDIO_BOT_TOKEN, TELEGRAM_AUDIO_CHAT_ID
 
 # Log konfiguratsiyasi
 logging.basicConfig(
@@ -142,16 +143,20 @@ async def send_card_assignment_notification(
     assigner_name: str,
     project_name: str | None = None,
 ) -> None:
-    token = PROJECT_TASK_BOT_TOKEN or TELEGRAM_UPDATE_BOT_TOKEN
+    token = PROJECT_TASK_BOT_TOKEN
     if not token:
         return
     try:
-        lines = ["📋 <b>Sizga yangi task berildi!</b>", ""]
+        lines = ["📌 <b>Yangi task</b>", ""]
         if project_name:
-            lines.append(f"🗂 <b>Project:</b> {project_name}")
-        lines.append(f"📌 <b>Task:</b> {title}")
+            lines.append(f"🗂 <b>Project:</b> {html.escape(str(project_name))}")
+        lines.append(f"🧩 <b>Task:</b>")
+        lines.append(html.escape(str(title)))
         if description:
-            lines.append(f"📝 <b>Tavsif:</b> {description}")
+            lines.append("")
+            lines.append(f"📝 <b>Izoh:</b>")
+            lines.append(html.escape(str(description)))
+        lines.append("")
         lines.append(f"🎯 <b>Priority:</b> {priority.capitalize()}")
         if due_date:
             if isinstance(due_date, datetime):
@@ -161,7 +166,7 @@ async def send_card_assignment_notification(
             else:
                 due_date_text = str(due_date)
             lines.append(f"📅 <b>Muddat:</b> {due_date_text}")
-        lines.append(f"👤 <b>Kim berdi:</b> {assigner_name}")
+        lines.append(f"👤 <b>Kim berdi:</b> {html.escape(str(assigner_name))}")
 
         update_bot = Bot(token=token, request=request)
         await update_bot.send_message(
