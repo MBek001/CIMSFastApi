@@ -142,6 +142,7 @@ async def send_card_assignment_notification(
     due_date,
     assigner_name: str,
     project_name: str | None = None,
+    status_name: str | None = None,
 ) -> None:
     token = PROJECT_TASK_BOT_TOKEN
     if not token:
@@ -157,6 +158,8 @@ async def send_card_assignment_notification(
             lines.append(f"📝 <b>Izoh:</b>")
             lines.append(html.escape(str(description)))
         lines.append("")
+        if status_name:
+            lines.append(f"📍 <b>Status:</b> {html.escape(str(status_name))}")
         lines.append(f"🎯 <b>Priority:</b> {priority.capitalize()}")
         if due_date:
             if isinstance(due_date, datetime):

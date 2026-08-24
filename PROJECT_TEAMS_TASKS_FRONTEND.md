@@ -55,6 +55,8 @@ Yangi message ichida command:
 ```text
 Login page responsive fix qilish kerak /add_task_front 25.08
 Payment API bug fix /add_task_back 25.08 19:00
+Login page responsive fix qilish kerak /add_task_front 25.08 status:Doing
+Payment API bug fix /add_task_back 25.08 status:To Test
 ```
 
 Oldingi messagega reply qilib task qilish:
@@ -62,6 +64,8 @@ Oldingi messagega reply qilib task qilish:
 ```text
 /add_task_front 25.08
 /add_task_back 25.08 19:00
+/add_task_front 25.08 status:Doing
+/add_task_back 25.08 status:Refix
 ```
 
 Legacy commandlar ham ishlaydi:
@@ -76,6 +80,23 @@ Date qoidasi:
 - `25.08` = joriy yil, soat `18:00`.
 - `25.08 19:00` = shu sana va vaqt.
 - `2026-08-25 19:00` ham ishlaydi.
+
+Status qoidasi:
+
+- `status:To Do`
+- `status:Doing`
+- `status:Done`
+- `status:To Test`
+- `status:Refix`
+
+Aliaslar ham ishlaydi:
+
+- `status:todo`
+- `status:progress`
+- `status:test`
+- `status:fix`
+
+Status topilmasa task `To Do`ga tushadi va bot groupga warning qaytaradi.
 
 ## Task response
 
@@ -146,6 +167,7 @@ Izoh:
 Qo'shimcha izoh
 
 Priority: Medium
+Status: Doing
 Muddat: 2026-08-25 19:00
 Kim berdi: username
 ```

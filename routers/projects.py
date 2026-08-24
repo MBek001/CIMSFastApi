@@ -76,6 +76,25 @@ _project_card_schema_ready = False
 _project_task_bot_app: Optional[Application] = None
 PROJECTS_TZ = ZoneInfo("Asia/Tashkent")
 TASK_COMMAND_RE = re.compile(r"/(?P<command>add_task_front|add_task_back|frontend|backend)(?:@\w+)?", re.IGNORECASE)
+TASK_STATUS_ALIASES = {
+    "todo": "To Do",
+    "to_do": "To Do",
+    "to-do": "To Do",
+    "to do": "To Do",
+    "doing": "Doing",
+    "progress": "Doing",
+    "inprogress": "Doing",
+    "in_progress": "Doing",
+    "done": "Done",
+    "completed": "Done",
+    "test": "To Test",
+    "totest": "To Test",
+    "to_test": "To Test",
+    "to-test": "To Test",
+    "to test": "To Test",
+    "refix": "Refix",
+    "fix": "Refix",
+}
 
 
 def normalize_project_datetime(value: Optional[datetime]) -> Optional[datetime]:
@@ -974,15 +993,41 @@ def parse_project_task_deadline(text_value: str) -> Tuple[str, Optional[datetime
     return cleaned, due_date
 
 
-def parse_project_task_command(text_value: str, reply_text: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[datetime], Optional[str]]:
+def normalize_task_status(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    raw_value = re.sub(r"\s+", " ", value).strip(" -:_\n\t")
+    if not raw_value:
+        return None
+    key = raw_value.lower().replace("_", " ").replace("-", " ")
+    compact_key = key.replace(" ", "")
+    return TASK_STATUS_ALIASES.get(key) or TASK_STATUS_ALIASES.get(compact_key) or raw_value
+
+
+def parse_project_task_status(text_value: str) -> Tuple[str, Optional[str]]:
+    match = re.search(
+        r"(?:status|column|holat|ustun):\s*([A-Za-zА-Яа-я0-9 _-]+?)(?=$|\s+(?:deadline|due|muddat):|\s+\d{4}-\d{2}-\d{2}|\s+\d{1,2}[./-]\d{1,2})",
+        text_value,
+        re.IGNORECASE,
+    )
+    if not match:
+        return text_value, None
+    status_text = normalize_task_status(match.group(1))
+    cleaned = text_value[: match.start()] + text_value[match.end():]
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:\n\t")
+    return cleaned, status_text
+
+
+def parse_project_task_command(text_value: str, reply_text: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[datetime], Optional[str], Optional[str]]:
     text_value = text_value.strip()
     command_match = TASK_COMMAND_RE.search(text_value)
     if not command_match:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     command = command_match.group("command").lower()
     kind = "frontend" if command in {"add_task_front", "frontend"} else "backend"
     body = f"{text_value[:command_match.start()]} {text_value[command_match.end():]}"
+    body, status_name = parse_project_task_status(body)
     body, due_date = parse_project_task_deadline(body)
     reply_body = re.sub(r"\s+", " ", str(reply_text or "")).strip()
 
@@ -993,7 +1038,7 @@ def parse_project_task_command(text_value: str, reply_text: Optional[str] = None
         title = body[:200]
         description = f"Telegram groupdan qo'shildi: {kind}"
 
-    return kind, title or None, description, due_date, command
+    return kind, title or None, description, due_date, command, status_name
 
 
 async def find_user_by_telegram_username(session: AsyncSession, username: Optional[str]):
@@ -1194,6 +1239,29 @@ async def get_first_board_column(session: AsyncSession, board_id: int):
     return result.fetchone()
 
 
+async def resolve_board_column_for_task(session: AsyncSession, board_id: int, status_name: Optional[str]):
+    if not status_name:
+        return await get_first_board_column(session, board_id), None
+
+    normalized_status = normalize_task_status(status_name)
+    column_row = (
+        await session.execute(
+            select(project_board_column)
+            .where(
+                project_board_column.c.board_id == board_id,
+                func.lower(project_board_column.c.name) == str(normalized_status).lower(),
+            )
+            .order_by(project_board_column.c.order.asc(), project_board_column.c.id.asc())
+            .limit(1)
+        )
+    ).fetchone()
+    if column_row:
+        return column_row, None
+
+    fallback_column = await get_first_board_column(session, board_id)
+    return fallback_column, f"Status topilmadi: {status_name}. Task {fallback_column.name} ga qo'yildi."
+
+
 async def create_project_task_from_group_message(
     chat_id: int,
     sender_username: Optional[str],
@@ -1204,7 +1272,7 @@ async def create_project_task_from_group_message(
 ) -> dict:
     await ensure_project_card_schema()
     try:
-        kind, task_title, task_description, due_date, command = parse_project_task_command(text_value, reply_text)
+        kind, task_title, task_description, due_date, command, status_name = parse_project_task_command(text_value, reply_text)
     except ValueError:
         return {"status": "error", "message": "Sana formati noto'g'ri. Masalan: /add_task_front 25.08 yoki /add_task_front 25.08 19:00"}
     duplicate_message_id = reply_message_id or source_message_id
@@ -1245,7 +1313,7 @@ async def create_project_task_from_group_message(
             "Backend" if kind == "backend" else "Frontend",
             sender_row.id if sender_row else None,
         )
-        column_row = await get_first_board_column(session, board_row.id)
+        column_row, status_warning = await resolve_board_column_for_task(session, board_row.id, status_name)
         count_result = await session.execute(
             select(func.count(project_board_card.c.id)).where(project_board_card.c.column_id == column_row.id)
         )
@@ -1285,14 +1353,17 @@ async def create_project_task_from_group_message(
                 due_date,
                 sender_username or "Telegram group",
                 project_row.project_name,
+                column_row.name,
             )
         return {
             "status": "ok",
             "card_id": card_id,
             "project_id": project_row.id,
             "board": board_row.name,
+            "column": column_row.name,
             "assignee_ids": assignee_ids,
             "due_date": due_date,
+            "warning": status_warning,
         }
 
 
@@ -1463,7 +1534,8 @@ async def project_task_command_handler(update_obj: TelegramUpdate, context: Cont
         return
     assignee_count = len(result.get("assignee_ids") or [])
     assignee_text = f" assignees={assignee_count}" if assignee_count else " assignee topilmadi"
-    await message.reply_text(f"Task yaratildi: #{result['card_id']} ({result['board']}){assignee_text}")
+    warning_text = f"\n{result['warning']}" if result.get("warning") else ""
+    await message.reply_text(f"Task yaratildi: #{result['card_id']} ({result['board']} / {result['column']}){assignee_text}{warning_text}")
 
 
 async def project_task_text_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2693,6 +2765,7 @@ async def create_card(
                 normalized_due_date,
                 assigner_name,
                 project_row.project_name if project_row else None,
+                column_row.name,
             )
 
     return CreateResponse(message="Card muvaffaqiyatli yaratildi", id=card_id)
@@ -3081,6 +3154,7 @@ async def update_card(
                 card_due_date,
                 assigner_name,
                 project_row.project_name if project_row else None,
+                column_row.name,
             )
 
     return SuccessResponse(message="Card muvaffaqiyatli yangilandi")
