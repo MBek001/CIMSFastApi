@@ -1496,49 +1496,45 @@ async def update_card_status_from_task_bot(
     if not is_allowed:
         return False, "Bu task sizga biriktirilmagan.", None, None
 
-    if source_column.id != target_column.id:
-        source_result = await session.execute(
-            select(project_board_card.c.id)
-            .where(project_board_card.c.column_id == source_column.id)
-            .order_by(project_board_card.c.order.asc(), project_board_card.c.id.asc())
-        )
-        target_result = await session.execute(
-            select(project_board_card.c.id)
-            .where(project_board_card.c.column_id == target_column.id)
-            .order_by(project_board_card.c.order.asc(), project_board_card.c.id.asc())
-        )
-        source_ids = [row.id for row in source_result.fetchall()]
-        target_ids = [row.id for row in target_result.fetchall()]
-        if card_id in source_ids:
-            source_ids.remove(card_id)
+    if source_column.id == target_column.id:
+        return True, f"Status allaqachon: {target_column.name}", None, target_column.id
+
+    source_result = await session.execute(
+        select(project_board_card.c.id)
+        .where(project_board_card.c.column_id == source_column.id)
+        .order_by(project_board_card.c.order.asc(), project_board_card.c.id.asc())
+    )
+    target_result = await session.execute(
+        select(project_board_card.c.id)
+        .where(project_board_card.c.column_id == target_column.id)
+        .order_by(project_board_card.c.order.asc(), project_board_card.c.id.asc())
+    )
+    source_ids = [row.id for row in source_result.fetchall()]
+    target_ids = [row.id for row in target_result.fetchall()]
+    if card_id in source_ids:
+        source_ids.remove(card_id)
+    await session.execute(
+        update(project_board_card)
+        .where(project_board_card.c.id == card_id)
+        .values(column_id=target_column.id, order=-(card_id + 1000), updated_at=datetime.utcnow())
+    )
+    target_ids.append(card_id)
+    await resequence_cards(session, source_ids)
+    await resequence_cards(session, target_ids)
+    await close_open_card_status_history(session, card_id)
+    await open_card_status_history(session, card_id, target_column.id, target_column.name, target_user.id)
+    complete_values = {}
+    if is_done_column_name(target_column.name) and card_row.completed_at is None:
+        complete_values["completed_at"] = datetime.utcnow()
+    elif not is_done_column_name(target_column.name):
+        complete_values["completed_at"] = None
+    if complete_values:
         await session.execute(
             update(project_board_card)
             .where(project_board_card.c.id == card_id)
-            .values(column_id=target_column.id, order=-(card_id + 1000), updated_at=datetime.utcnow())
+            .values(**complete_values)
         )
-        target_ids.append(card_id)
-        await resequence_cards(session, source_ids)
-        await resequence_cards(session, target_ids)
-        await close_open_card_status_history(session, card_id)
-        await open_card_status_history(session, card_id, target_column.id, target_column.name, target_user.id)
-        complete_values = {}
-        if is_done_column_name(target_column.name) and card_row.completed_at is None:
-            complete_values["completed_at"] = datetime.utcnow()
-        elif not is_done_column_name(target_column.name):
-            complete_values["completed_at"] = None
-        if complete_values:
-            await session.execute(
-                update(project_board_card)
-                .where(project_board_card.c.id == card_id)
-                .values(**complete_values)
-            )
-        await write_task_move_daily_update(session, target_user.id, card_row.title, source_column.name, target_column.name)
-    else:
-        await session.execute(
-            update(project_board_card)
-            .where(project_board_card.c.id == card_id)
-            .values(updated_at=datetime.utcnow())
-        )
+    await write_task_move_daily_update(session, target_user.id, card_row.title, source_column.name, target_column.name)
 
     await session.commit()
     status_options = await get_board_status_options(session, target_board.id)
