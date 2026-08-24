@@ -1379,6 +1379,21 @@ def task_priority_value(value) -> str:
     return str(value or "-")
 
 
+def task_status_emoji(status_name: Optional[str]) -> str:
+    normalized = str(status_name or "").strip().lower()
+    if normalized == "to do":
+        return "⚪"
+    if normalized == "doing":
+        return "🔵"
+    if normalized == "done":
+        return "🟢"
+    if normalized == "to test":
+        return "🟡"
+    if normalized == "refix":
+        return "🔴"
+    return "📍"
+
+
 async def build_user_task_report(session: AsyncSession, lookup: str) -> Tuple[Optional[str], Optional[str]]:
     target_user = await find_user_for_task_report(session, lookup)
     if not target_user:
@@ -1406,10 +1421,12 @@ async def build_user_task_report(session: AsyncSession, lookup: str) -> Tuple[Op
 
     full_name = f"{target_user.name} {target_user.surname}".strip()
     role_text = target_user.job_title or target_user.role_name or "-"
+    total_open_count = sum(1 for row in rows if not row.completed_at and not is_done_column_name(row.column_name))
+    total_done_count = len(rows) - total_open_count
     lines = [
         f"👤 {full_name}",
-        f"🏷 Role: {role_text}",
-        f"📌 Tasklar: {len(rows)}",
+        f"🏷 {role_text}",
+        f"📌 Jami: {len(rows)} · Ochiq: {total_open_count} · Done: {total_done_count}",
         "",
     ]
 
@@ -1425,17 +1442,21 @@ async def build_user_task_report(session: AsyncSession, lookup: str) -> Tuple[Op
     for project_name, project_rows in grouped.items():
         open_count = sum(1 for row in project_rows if not row.completed_at and not is_done_column_name(row.column_name))
         done_count = len(project_rows) - open_count
+        lines.append("━━━━━━━━━━━━━━")
         lines.append(f"🗂 {project_name}")
-        lines.append(f"   Ochiq: {open_count} | Done: {done_count}")
+        lines.append(f"Ochiq: {open_count} · Done: {done_count}")
+        lines.append("")
         for index, row in enumerate(project_rows, start=1):
             status_text = row.column_name or "-"
-            deadline_text = format_project_task_date(row.due_date)
+            deadline_text = format_project_task_date(row.due_date) if row.due_date else "belgilanmagan"
             overdue_text = ""
             if row.due_date and not row.completed_at and not is_done_column_name(status_text) and row.due_date < now:
-                overdue_text = " | ⚠️ overdue"
-            lines.append(f"   {index}. #{row.id} {row.title}")
-            lines.append(f"      Status: {status_text} | Board: {row.board_name}")
-            lines.append(f"      Deadline: {deadline_text}{overdue_text} | Priority: {task_priority_value(row.priority)}")
+                overdue_text = " · ⚠️ kechikkan"
+            lines.append(f"{index}. #{row.id} · {task_status_emoji(status_text)} {status_text}")
+            lines.append(f"{row.title}")
+            lines.append(f"Board: {row.board_name}")
+            lines.append(f"Muddat: {deadline_text}{overdue_text} · Priority: {task_priority_value(row.priority)}")
+            lines.append("")
         lines.append("")
 
     return "\n".join(lines).strip(), None
