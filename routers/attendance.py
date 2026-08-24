@@ -181,7 +181,7 @@ async def list_attendance_users(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=500),
     session: AsyncSession = Depends(get_async_session),
-    _: None = Depends(require_attendance_api_key),
+    current_user=Depends(get_current_active_user),
 ):
     await ensure_attendance_schema()
     query = (
@@ -835,7 +835,7 @@ async def get_daily_record(
     employee_id: int,
     attendance_date: date_type,
     session: AsyncSession = Depends(get_async_session),
-    _: None = Depends(require_attendance_api_key),
+    current_user=Depends(get_current_active_user),
 ):
     await ensure_attendance_schema()
     result = await session.execute(
@@ -908,7 +908,7 @@ async def list_daily_records(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
     session: AsyncSession = Depends(get_async_session),
-    _: None = Depends(require_attendance_api_key),
+    current_user=Depends(get_current_active_user),
 ):
     await ensure_attendance_schema()
     conditions = [attendance_daily_record.c.is_deleted == False]  # noqa: E712
