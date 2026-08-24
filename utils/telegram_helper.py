@@ -31,6 +31,21 @@ request = HTTPXRequest(
 bot = Bot(token=TELEGRAM_AUDIO_BOT_TOKEN, request=request)
 
 
+def task_status_button_emoji(status_name: str | None) -> str:
+    normalized = str(status_name or "").strip().lower()
+    if normalized == "to do":
+        return "⚪"
+    if normalized == "doing":
+        return "🔵"
+    if normalized == "done":
+        return "🟢"
+    if normalized == "to test":
+        return "🟡"
+    if normalized == "refix":
+        return "🔴"
+    return "📍"
+
+
 async def upload_audio_to_telegram(audio_file: UploadFile) -> str:
     """
     Audio faylni Telegramga yuklash va file_id qaytarish
@@ -179,7 +194,7 @@ async def send_card_assignment_notification(
         if card_id and status_options:
             buttons = [
                 InlineKeyboardButton(
-                    f"✅ {name}" if current_column_id == column_id else str(name),
+                    f"▸ {name}" if current_column_id == column_id else f"{task_status_button_emoji(name)} {name}",
                     callback_data=f"task_status:{card_id}:{column_id}",
                 )
                 for column_id, name in status_options

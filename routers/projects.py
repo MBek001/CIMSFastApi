@@ -1449,9 +1449,27 @@ def project_task_status_markup(card_id: int, status_options: List[Tuple[int, str
 
     buttons = []
     for column_id, name in status_options:
-        label = f"✅ {name}" if current_column_id == column_id else str(name)
+        prefix = "▸" if current_column_id == column_id else task_status_emoji(name)
+        label = f"{prefix} {name}"
         buttons.append(InlineKeyboardButton(label, callback_data=f"task_status:{card_id}:{column_id}"))
     return InlineKeyboardMarkup([buttons[index:index + 2] for index in range(0, len(buttons), 2)]) if buttons else None
+
+
+def update_task_message_status_text(text_value: Optional[str], status_name: str) -> str:
+    status_line = f"📍 Status: {status_name}"
+    if not text_value:
+        return status_line
+    lines = text_value.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().startswith("📍 Status:"):
+            lines[index] = status_line
+            return "\n".join(lines)
+    for index, line in enumerate(lines):
+        if line.strip().startswith("🎯 Priority:"):
+            lines.insert(index, status_line)
+            return "\n".join(lines)
+    lines.append(status_line)
+    return "\n".join(lines)
 
 
 async def find_project_task_bot_user(session: AsyncSession, chat_id: int, username: Optional[str]):
@@ -1564,7 +1582,9 @@ async def project_task_status_callback_handler(update_obj: TelegramUpdate, conte
         return
     await query.answer(message_text)
     if status_options:
-        await query.edit_message_reply_markup(
+        updated_text = update_task_message_status_text(query.message.text if query.message else None, message_text.split(": ", 1)[-1])
+        await query.edit_message_text(
+            text=updated_text,
             reply_markup=project_task_status_markup(card_id, status_options, current_column_id)
         )
 
@@ -2933,6 +2953,7 @@ async def create_card(
     await sync_card_assignees(session, card_id, validated_assignee_ids)
     await open_card_status_history(session, card_id, column_row.id, column_row.name, current_user.id)
     await save_card_images(session, card_id, images)
+    status_options = await get_board_status_options(session, board_row.id)
     sibling_ids.insert(target_order, card_id)
     await resequence_cards(session, sibling_ids)
     await session.commit()
@@ -2961,6 +2982,9 @@ async def create_card(
                 assigner_name,
                 project_row.project_name if project_row else None,
                 column_row.name,
+                card_id,
+                status_options,
+                column_row.id,
             )
 
     return CreateResponse(message="Card muvaffaqiyatli yaratildi", id=card_id)
