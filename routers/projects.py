@@ -8,7 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, 
 from sqlalchemy import delete, exists, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update as TelegramUpdate
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from auth_utils.auth_func import get_current_active_user
 from config import PROJECT_TASK_BOT_TOKEN, PROJECT_TASK_REPORT_CHAT_ID, PROJECT_TASK_REPORT_THREAD_ID
@@ -1376,6 +1376,7 @@ async def create_project_task_from_group_message(
         card_id = result.scalar_one()
         await sync_card_assignees(session, card_id, assignee_ids)
         await open_card_status_history(session, card_id, column_row.id, column_row.name, sender_row.id if sender_row else None)
+        status_options = await get_board_status_options(session, board_row.id)
         await session.commit()
         for assignee_row in assignee_rows:
             if not assignee_row.chat_id:
@@ -1389,6 +1390,9 @@ async def create_project_task_from_group_message(
                 sender_username or "Telegram group",
                 project_row.project_name,
                 column_row.name,
+                card_id,
+                status_options,
+                column_row.id,
             )
         return {
             "status": "ok",
@@ -1427,6 +1431,146 @@ def task_status_emoji(status_name: Optional[str]) -> str:
     if normalized == "refix":
         return "🔴"
     return "📍"
+
+
+async def get_board_status_options(session: AsyncSession, board_id: int) -> List[Tuple[int, str]]:
+    rows = (
+        await session.execute(
+            select(project_board_column.c.id, project_board_column.c.name)
+            .where(project_board_column.c.board_id == board_id)
+            .order_by(project_board_column.c.order.asc(), project_board_column.c.id.asc())
+        )
+    ).fetchall()
+    return [(row.id, row.name) for row in rows]
+
+
+def project_task_status_markup(card_id: int, status_options: List[Tuple[int, str]], current_column_id: Optional[int] = None):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    buttons = []
+    for column_id, name in status_options:
+        label = f"✅ {name}" if current_column_id == column_id else str(name)
+        buttons.append(InlineKeyboardButton(label, callback_data=f"task_status:{card_id}:{column_id}"))
+    return InlineKeyboardMarkup([buttons[index:index + 2] for index in range(0, len(buttons), 2)]) if buttons else None
+
+
+async def find_project_task_bot_user(session: AsyncSession, chat_id: int, username: Optional[str]):
+    lookup_filter = user.c.chat_id == str(chat_id)
+    if username:
+        lookup_filter = lookup_filter | (
+            func.lower(func.replace(user.c.telegram_id, "@", "")) == username.lower().lstrip("@")
+        )
+    return (
+        await session.execute(
+            select(user)
+            .where(user.c.is_active == True)
+            .where(lookup_filter)
+            .order_by(user.c.id.asc())
+            .limit(1)
+        )
+    ).fetchone()
+
+
+async def update_card_status_from_task_bot(
+    session: AsyncSession,
+    card_id: int,
+    target_column_id: int,
+    chat_id: int,
+    username: Optional[str],
+) -> Tuple[bool, str, Optional[List[Tuple[int, str]]], Optional[int]]:
+    target_user = await find_project_task_bot_user(session, chat_id, username)
+    if not target_user:
+        return False, "User topilmadi. Botga /start email@example.com yuboring.", None, None
+
+    card_row = await get_card_or_404(session, card_id)
+    source_column = await get_column_or_404(session, card_row.column_id)
+    source_board = await get_board_or_404(session, source_column.board_id)
+    target_column = await get_column_or_404(session, target_column_id)
+    target_board = await get_board_or_404(session, target_column.board_id)
+    if source_board.id != target_board.id:
+        return False, "Bu status boshqa boardga tegishli.", None, None
+
+    assignee_ids_map = await get_card_assignee_ids_map(session, [card_id])
+    visible_assignee_ids = set(get_card_assignee_ids(card_row, assignee_ids_map))
+    is_allowed = target_user.id in visible_assignee_ids or card_row.created_by == target_user.id or is_ceo_user(target_user)
+    if not is_allowed:
+        return False, "Bu task sizga biriktirilmagan.", None, None
+
+    if source_column.id != target_column.id:
+        source_result = await session.execute(
+            select(project_board_card.c.id)
+            .where(project_board_card.c.column_id == source_column.id)
+            .order_by(project_board_card.c.order.asc(), project_board_card.c.id.asc())
+        )
+        target_result = await session.execute(
+            select(project_board_card.c.id)
+            .where(project_board_card.c.column_id == target_column.id)
+            .order_by(project_board_card.c.order.asc(), project_board_card.c.id.asc())
+        )
+        source_ids = [row.id for row in source_result.fetchall()]
+        target_ids = [row.id for row in target_result.fetchall()]
+        if card_id in source_ids:
+            source_ids.remove(card_id)
+        await session.execute(
+            update(project_board_card)
+            .where(project_board_card.c.id == card_id)
+            .values(column_id=target_column.id, order=-(card_id + 1000), updated_at=datetime.utcnow())
+        )
+        target_ids.append(card_id)
+        await resequence_cards(session, source_ids)
+        await resequence_cards(session, target_ids)
+        await close_open_card_status_history(session, card_id)
+        await open_card_status_history(session, card_id, target_column.id, target_column.name, target_user.id)
+        complete_values = {}
+        if is_done_column_name(target_column.name) and card_row.completed_at is None:
+            complete_values["completed_at"] = datetime.utcnow()
+        elif not is_done_column_name(target_column.name):
+            complete_values["completed_at"] = None
+        if complete_values:
+            await session.execute(
+                update(project_board_card)
+                .where(project_board_card.c.id == card_id)
+                .values(**complete_values)
+            )
+        await write_task_move_daily_update(session, target_user.id, card_row.title, source_column.name, target_column.name)
+    else:
+        await session.execute(
+            update(project_board_card)
+            .where(project_board_card.c.id == card_id)
+            .values(updated_at=datetime.utcnow())
+        )
+
+    await session.commit()
+    status_options = await get_board_status_options(session, target_board.id)
+    return True, f"Status yangilandi: {target_column.name}", status_options, target_column.id
+
+
+async def project_task_status_callback_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update_obj.callback_query
+    if not query or not query.data or not update_obj.effective_chat:
+        return
+    match = re.fullmatch(r"task_status:(\d+):(\d+)", query.data)
+    if not match:
+        await query.answer("Noto'g'ri callback", show_alert=True)
+        return
+    card_id = int(match.group(1))
+    target_column_id = int(match.group(2))
+    async with async_session_maker() as session:
+        ok, message_text, status_options, current_column_id = await update_card_status_from_task_bot(
+            session,
+            card_id,
+            target_column_id,
+            update_obj.effective_chat.id,
+            update_obj.effective_user.username if update_obj.effective_user else None,
+        )
+    if not ok:
+        await query.answer(message_text, show_alert=True)
+        return
+    await query.answer(message_text)
+    if status_options:
+        await query.edit_message_reply_markup(
+            reply_markup=project_task_status_markup(card_id, status_options, current_column_id)
+        )
 
 
 async def build_user_task_report(session: AsyncSession, lookup: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1607,6 +1751,7 @@ async def start_project_task_bot() -> None:
     _project_task_bot_app.add_handler(CommandHandler("backend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("frontend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("management", project_task_command_handler))
+    _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_status_callback_handler, pattern=r"^task_status:\d+:\d+$"))
     _project_task_bot_app.add_handler(MessageHandler(filters.TEXT, project_task_text_handler))
     _project_task_bot_app.add_handler(MessageHandler(filters.COMMAND, project_task_report_handler), group=1)
     await _project_task_bot_app.initialize()
@@ -3188,6 +3333,7 @@ async def update_card(
             select(project.c.project_name).where(project.c.id == board_row.project_id)
         )
         project_row = project_result.fetchone()
+        status_options = await get_board_status_options(session, board_row.id)
         assigner_name = f"{current_user.name} {current_user.surname}".strip()
         card_title = update_values.get("title", card_row.title)
         card_description = update_values.get("description", card_row.description)
@@ -3209,6 +3355,9 @@ async def update_card(
                 assigner_name,
                 project_row.project_name if project_row else None,
                 column_row.name,
+                card_id,
+                status_options,
+                column_row.id,
             )
 
     return SuccessResponse(message="Card muvaffaqiyatli yangilandi")

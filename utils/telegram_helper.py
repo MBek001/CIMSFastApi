@@ -1,7 +1,7 @@
 import logging
 import html
 from datetime import date, datetime
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from fastapi import UploadFile, HTTPException
@@ -143,6 +143,9 @@ async def send_card_assignment_notification(
     assigner_name: str,
     project_name: str | None = None,
     status_name: str | None = None,
+    card_id: int | None = None,
+    status_options: list[tuple[int, str]] | None = None,
+    current_column_id: int | None = None,
 ) -> None:
     token = PROJECT_TASK_BOT_TOKEN
     if not token:
@@ -172,10 +175,21 @@ async def send_card_assignment_notification(
         lines.append(f"👤 <b>Kim berdi:</b> {html.escape(str(assigner_name))}")
 
         update_bot = Bot(token=token, request=request)
+        reply_markup = None
+        if card_id and status_options:
+            buttons = [
+                InlineKeyboardButton(
+                    f"✅ {name}" if current_column_id == column_id else str(name),
+                    callback_data=f"task_status:{card_id}:{column_id}",
+                )
+                for column_id, name in status_options
+            ]
+            reply_markup = InlineKeyboardMarkup([buttons[index:index + 2] for index in range(0, len(buttons), 2)])
         await update_bot.send_message(
             chat_id=chat_id,
             text="\n".join(lines),
             parse_mode="HTML",
+            reply_markup=reply_markup,
         )
     except Exception as e:
         logging.warning(f"Card assignment notification yuborishda xatolik: {e}")
