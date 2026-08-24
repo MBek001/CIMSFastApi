@@ -45,6 +45,8 @@ TELEGRAM_AUDIO_BOT_TOKEN = os.environ.get('TELEGRAM_AUDIO_BOT_TOKEN')  # Audio b
 TELEGRAM_UPDATE_BOT_TOKEN = os.environ.get('TELEGRAM_UPDATE_BOT_TOKEN')  # Update bot tokeni
 TELEGRAM_RECALL_BOT_TOKEN = os.environ.get('TELEGRAM_RECALL_BOT_TOKEN')  # Recall reminder bot tokeni
 PROJECT_TASK_BOT_TOKEN = os.environ.get('PROJECT_TASK_BOT_TOKEN')
+PROJECT_TASK_REPORT_CHAT_ID = os.environ.get('PROJECT_TASK_REPORT_CHAT_ID')
+PROJECT_TASK_REPORT_THREAD_ID = os.environ.get('PROJECT_TASK_REPORT_THREAD_ID')
 
 # Telegram Chat IDs - har bir bot uchun alohida guruh
 TELEGRAM_AUDIO_CHAT_ID = os.environ.get('TELEGRAM_AUDIO_CHAT_ID')  # Audio yuborilayotgan guruh ID

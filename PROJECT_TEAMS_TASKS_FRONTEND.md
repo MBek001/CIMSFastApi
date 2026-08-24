@@ -40,6 +40,12 @@ Agar Telegram username CIMS `telegram_id` bilan mos bo'lmasa:
 
 Backend user `chat_id` ni saqlaydi. Shundan keyin task notification shu botdan boradi.
 
+Server env:
+
+- `PROJECT_TASK_BOT_TOKEN`: task bot token.
+- `PROJECT_TASK_REPORT_CHAT_ID`: Cognilabs group chat id.
+- `PROJECT_TASK_REPORT_THREAD_ID`: task report thread id.
+
 ## Group commands
 
 Bot project Telegram guruhiga admin qilib qo'shiladi.
@@ -93,6 +99,37 @@ Bu message oldin task qilingan: #123
 ```
 
 deb qaytaradi.
+
+## User task report
+
+Cognilabs groupdagi maxsus threadda user nomi command qilib yozilsa user tasklari chiqadi:
+
+```text
+/Ahmad
+/Abdugani
+/Alisher
+```
+
+Backend userni quyidagilar bo'yicha topadi:
+
+- `telegram_id`
+- email prefix
+- name/surname
+
+Report ichida:
+
+- user full name
+- role/job title
+- umumiy task count
+- project bo'yicha group
+- ochiq/done task count
+- card id
+- task title
+- board
+- current status column
+- deadline
+- overdue flag
+- priority
 
 ## Private notification
 

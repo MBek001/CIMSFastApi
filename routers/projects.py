@@ -11,7 +11,7 @@ from telegram import Update as TelegramUpdate
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from auth_utils.auth_func import get_current_active_user
-from config import PROJECT_TASK_BOT_TOKEN
+from config import PROJECT_TASK_BOT_TOKEN, PROJECT_TASK_REPORT_CHAT_ID, PROJECT_TASK_REPORT_THREAD_ID
 from database import async_session_maker, engine, get_async_session
 from models.admin_models import daily_update_log
 from models.projects_models import (
@@ -1009,6 +1009,53 @@ async def find_user_by_telegram_username(session: AsyncSession, username: Option
     ).fetchone()
 
 
+def normalize_task_report_lookup(value: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+async def find_user_for_task_report(session: AsyncSession, lookup: str):
+    normalized = normalize_task_report_lookup(lookup)
+    if not normalized:
+        return None
+
+    rows = (
+        await session.execute(
+            select(
+                user.c.id,
+                user.c.name,
+                user.c.surname,
+                user.c.email,
+                user.c.telegram_id,
+                user.c.chat_id,
+                user.c.job_title,
+                user.c.role_name,
+            )
+            .order_by(user.c.is_active.desc(), user.c.id.asc())
+        )
+    ).fetchall()
+
+    for row in rows:
+        candidates = [
+            row.telegram_id,
+            str(row.telegram_id or "").lstrip("@"),
+            row.email,
+            str(row.email or "").split("@", 1)[0],
+            row.name,
+            row.surname,
+            f"{row.name}{row.surname}",
+            f"{row.surname}{row.name}",
+        ]
+        if any(normalize_task_report_lookup(candidate) == normalized for candidate in candidates):
+            return row
+
+    for row in rows:
+        candidates = [row.telegram_id, row.email, row.name, row.surname, f"{row.name}{row.surname}"]
+        if any(normalized in normalize_task_report_lookup(candidate) for candidate in candidates):
+            return row
+
+    return None
+
+
 async def register_project_task_chat(session: AsyncSession, username: Optional[str], chat_id: int, email: Optional[str] = None) -> bool:
     target = await find_user_by_telegram_username(session, username)
     if not target and email:
@@ -1249,6 +1296,124 @@ async def create_project_task_from_group_message(
         }
 
 
+def format_project_task_date(value: Optional[datetime]) -> str:
+    if not value:
+        return "-"
+    return value.strftime("%d.%m.%Y %H:%M")
+
+
+def task_priority_value(value) -> str:
+    if hasattr(value, "value"):
+        return str(value.value)
+    return str(value or "-")
+
+
+async def build_user_task_report(session: AsyncSession, lookup: str) -> Tuple[Optional[str], Optional[str]]:
+    target_user = await find_user_for_task_report(session, lookup)
+    if not target_user:
+        return None, "User topilmadi"
+
+    rows = (
+        await session.execute(
+            select(
+                project_board_card,
+                project_board_column.c.name.label("column_name"),
+                project_board.c.name.label("board_name"),
+                project.c.project_name.label("project_name"),
+                project.c.id.label("project_id"),
+            )
+            .select_from(
+                project_board_card
+                .join(project_board_column, project_board_card.c.column_id == project_board_column.c.id)
+                .join(project_board, project_board_column.c.board_id == project_board.c.id)
+                .join(project, project_board.c.project_id == project.c.id)
+            )
+            .where(build_card_user_filter(target_user.id))
+            .order_by(project.c.project_name.asc(), project_board_card.c.completed_at.is_(None).desc(), project_board_card.c.due_date.asc().nullslast(), project_board_card.c.updated_at.desc())
+        )
+    ).fetchall()
+
+    full_name = f"{target_user.name} {target_user.surname}".strip()
+    role_text = target_user.job_title or target_user.role_name or "-"
+    lines = [
+        f"👤 {full_name}",
+        f"🏷 Role: {role_text}",
+        f"📌 Tasklar: {len(rows)}",
+        "",
+    ]
+
+    if not rows:
+        lines.append("Aktiv yoki eski task topilmadi.")
+        return "\n".join(lines), None
+
+    now = datetime.utcnow()
+    grouped: Dict[str, List] = {}
+    for row in rows:
+        grouped.setdefault(row.project_name or "Projectsiz", []).append(row)
+
+    for project_name, project_rows in grouped.items():
+        open_count = sum(1 for row in project_rows if not row.completed_at and not is_done_column_name(row.column_name))
+        done_count = len(project_rows) - open_count
+        lines.append(f"🗂 {project_name}")
+        lines.append(f"   Ochiq: {open_count} | Done: {done_count}")
+        for index, row in enumerate(project_rows, start=1):
+            status_text = row.column_name or "-"
+            deadline_text = format_project_task_date(row.due_date)
+            overdue_text = ""
+            if row.due_date and not row.completed_at and not is_done_column_name(status_text) and row.due_date < now:
+                overdue_text = " | ⚠️ overdue"
+            lines.append(f"   {index}. #{row.id} {row.title}")
+            lines.append(f"      Status: {status_text} | Board: {row.board_name}")
+            lines.append(f"      Deadline: {deadline_text}{overdue_text} | Priority: {task_priority_value(row.priority)}")
+        lines.append("")
+
+    return "\n".join(lines).strip(), None
+
+
+def is_project_task_report_target(update_obj: TelegramUpdate) -> bool:
+    chat = update_obj.effective_chat
+    message = update_obj.effective_message
+    if not chat or not message:
+        return False
+    if PROJECT_TASK_REPORT_CHAT_ID and str(chat.id) != str(PROJECT_TASK_REPORT_CHAT_ID):
+        return False
+    if PROJECT_TASK_REPORT_THREAD_ID:
+        return str(getattr(message, "message_thread_id", "") or "") == str(PROJECT_TASK_REPORT_THREAD_ID)
+    return True
+
+
+def split_telegram_text(text_value: str, limit: int = 3900) -> List[str]:
+    chunks = []
+    current = ""
+    for line in text_value.splitlines():
+        next_value = f"{current}\n{line}" if current else line
+        if len(next_value) > limit and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = next_value
+    if current:
+        chunks.append(current)
+    return chunks or [text_value[:limit]]
+
+
+async def project_task_report_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update_obj.effective_message
+    if not message or not message.text or not is_project_task_report_target(update_obj):
+        return
+
+    command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lstrip("/")
+    if command.lower() in {"start", "add_task_front", "add_task_back", "backend", "frontend"}:
+        return
+    async with async_session_maker() as session:
+        report, error = await build_user_task_report(session, command)
+    if error:
+        await message.reply_text(error)
+        return
+    for chunk in split_telegram_text(report or ""):
+        await message.reply_text(chunk)
+
+
 async def project_task_start_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update_obj.effective_message
     if not message or not update_obj.effective_chat or not update_obj.effective_user:
@@ -1316,7 +1481,8 @@ async def start_project_task_bot() -> None:
     _project_task_bot_app.add_handler(CommandHandler("add_task_back", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("backend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("frontend", project_task_command_handler))
-    _project_task_bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, project_task_text_handler))
+    _project_task_bot_app.add_handler(MessageHandler(filters.TEXT, project_task_text_handler))
+    _project_task_bot_app.add_handler(MessageHandler(filters.COMMAND, project_task_report_handler), group=1)
     await _project_task_bot_app.initialize()
     await _project_task_bot_app.start()
     await _project_task_bot_app.updater.start_polling(drop_pending_updates=True)
