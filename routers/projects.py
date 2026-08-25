@@ -78,6 +78,7 @@ _project_task_bot_app: Optional[Application] = None
 PROJECTS_TZ = ZoneInfo("Asia/Tashkent")
 TASK_COMMAND_RE = re.compile(r"/(?P<command>add_task_front|add_task_back|frontend|backend|management)(?:@\w+)?", re.IGNORECASE)
 MANAGEMENT_ASSIGNEE_LOOKUPS = {"muhammadali", "saidbek"}
+PROJECT_TASK_UNAUTHORIZED_MESSAGE = "Uzr faqat Cognilabs jamoasi uchun javob beraman ."
 TASK_STATUS_ALIASES = {
     "todo": "To Do",
     "to_do": "To Do",
@@ -1055,7 +1056,29 @@ async def find_user_by_telegram_username(session: AsyncSession, username: Option
     return (
         await session.execute(
             select(user)
-            .where(func.lower(func.replace(user.c.telegram_id, "@", "")) == normalized)
+            .where(
+                func.lower(func.replace(user.c.telegram_id, "@", "")) == normalized,
+                user.c.is_active == True,
+            )
+            .limit(1)
+        )
+    ).fetchone()
+
+
+async def find_project_task_bot_actor(session: AsyncSession, telegram_user):
+    if not telegram_user:
+        return None
+    lookup_filter = user.c.chat_id == str(telegram_user.id)
+    if telegram_user.username:
+        lookup_filter = lookup_filter | (
+            func.lower(func.replace(user.c.telegram_id, "@", "")) == telegram_user.username.lower().lstrip("@")
+        )
+    return (
+        await session.execute(
+            select(user)
+            .where(user.c.is_active == True)
+            .where(lookup_filter)
+            .order_by(user.c.id.asc())
             .limit(1)
         )
     ).fetchone()
@@ -1114,7 +1137,10 @@ async def register_project_task_chat(session: AsyncSession, username: Optional[s
         target = (
             await session.execute(
                 select(user)
-                .where(func.lower(user.c.email) == email.strip().lower())
+                .where(
+                    func.lower(user.c.email) == email.strip().lower(),
+                    user.c.is_active == True,
+                )
                 .limit(1)
             )
         ).fetchone()
@@ -1551,7 +1577,7 @@ async def get_private_task_detail_for_bot(
 ) -> Tuple[bool, str, Optional[List[Tuple[int, str]]], Optional[int]]:
     target_user = await find_project_task_bot_user(session, chat_id, username)
     if not target_user:
-        return False, "User topilmadi. Botga /start email@example.com yuboring.", None, None
+        return False, PROJECT_TASK_UNAUTHORIZED_MESSAGE, None, None
     card_row = await get_card_or_404(session, card_id)
     column_row = await get_column_or_404(session, card_row.column_id)
     board_row = await get_board_or_404(session, column_row.board_id)
@@ -1591,7 +1617,7 @@ async def update_card_status_from_task_bot(
 ) -> Tuple[bool, str, Optional[List[Tuple[int, str]]], Optional[int]]:
     target_user = await find_project_task_bot_user(session, chat_id, username)
     if not target_user:
-        return False, "User topilmadi. Botga /start email@example.com yuboring.", None, None
+        return False, PROJECT_TASK_UNAUTHORIZED_MESSAGE, None, None
 
     card_row = await get_card_or_404(session, card_id)
     source_column = await get_column_or_404(session, card_row.column_id)
@@ -1724,7 +1750,7 @@ async def project_task_my_tasks_handler(update_obj: TelegramUpdate, context: Con
             update_obj.effective_user.username if update_obj.effective_user else None,
         )
         if not target_user:
-            await message.reply_text("User topilmadi. Botga /start email@example.com yuboring.")
+            await message.reply_text(PROJECT_TASK_UNAUTHORIZED_MESSAGE)
             return
         rows = await build_private_task_rows(session, target_user.id)
     await message.reply_text(
@@ -1835,6 +1861,10 @@ async def project_task_report_handler(update_obj: TelegramUpdate, context: Conte
     if command.lower() in {"start", "add_task_front", "add_task_back", "backend", "frontend", "management"}:
         return
     async with async_session_maker() as session:
+        actor_row = await find_project_task_bot_actor(session, update_obj.effective_user)
+        if not actor_row:
+            await message.reply_text(PROJECT_TASK_UNAUTHORIZED_MESSAGE)
+            return
         report, error = await build_user_task_report(session, command)
     if error:
         await message.reply_text(error)
@@ -1848,7 +1878,7 @@ async def project_task_start_handler(update_obj: TelegramUpdate, context: Contex
     if not message or not update_obj.effective_chat or not update_obj.effective_user:
         return
     if update_obj.effective_chat.type not in {"private"}:
-        await message.reply_text("Botga private chatda /start yuboring.")
+        await message.reply_text(PROJECT_TASK_UNAUTHORIZED_MESSAGE)
         return
     async with async_session_maker() as session:
         registered = await register_project_task_chat(
@@ -1860,7 +1890,7 @@ async def project_task_start_handler(update_obj: TelegramUpdate, context: Contex
     if registered:
         await message.reply_text("Task bot ulandi. Endi tasklar shu chatga keladi.")
     else:
-        await message.reply_text("User topilmadi. CIMS profile telegram_id username bilan bir xil bo'lishi kerak yoki /start email@example.com yuboring.")
+        await message.reply_text(PROJECT_TASK_UNAUTHORIZED_MESSAGE)
 
 
 async def project_task_command_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1868,6 +1898,13 @@ async def project_task_command_handler(update_obj: TelegramUpdate, context: Cont
     if not message or not message.text or not update_obj.effective_chat:
         return
     if update_obj.effective_chat.type not in {"group", "supergroup"}:
+        return
+    if not TASK_COMMAND_RE.search(message.text):
+        return
+    async with async_session_maker() as session:
+        actor_row = await find_project_task_bot_actor(session, update_obj.effective_user)
+    if not actor_row:
+        await message.reply_text(PROJECT_TASK_UNAUTHORIZED_MESSAGE)
         return
     reply_text = None
     reply_message_id = None
