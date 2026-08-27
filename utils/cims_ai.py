@@ -1773,7 +1773,6 @@ async def _call_llm(
     """
     payload = {
         "model": model,
-        "temperature": temperature,
         "max_completion_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system},
@@ -1782,6 +1781,8 @@ async def _call_llm(
     }
     if str(model).strip().lower().startswith("gpt-5"):
         payload["reasoning_effort"] = "low"
+    else:
+        payload["temperature"] = temperature
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     url = f"{base_url.rstrip('/')}/chat/completions"
     try:
