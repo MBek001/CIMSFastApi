@@ -568,6 +568,8 @@ def _detect_actions(question: str, employee: Optional[dict[str, Any]], sales_man
     )
     if project_base or project_via_card:
         actions.append("project_overview")
+    if any(x in q for x in ["task", "card", "vazifa", "topshiriq"]):
+        actions.append("task_detail")
 
     # Company overview — only as fallback
     if any(x in q for x in ["company", "kompaniya", "umumiy", "overview", "dashboard", "xulosa"]):
@@ -1137,6 +1139,90 @@ async def _project_overview_context(session: AsyncSession) -> dict[str, Any]:
     return {"total_projects": total_projects, "total_boards": total_boards, "total_cards": total_cards, "open_cards": open_cards, "done_cards": done_cards, "overdue_cards": overdue_cards, "projects": [{"id": row.id, "project_name": row.project_name, "members_count": row.members_count, "boards_count": row.boards_count, "cards_count": row.cards_count, "open_cards_count": row.open_cards_count, "done_cards_count": row.done_cards_count} for row in rows[:20]]}
 
 
+async def _task_detail_context(session: AsyncSession, period: PeriodSpec, employee: Optional[dict[str, Any]]) -> dict[str, Any]:
+    done_names = ["done", "finished", "completed", "complete", "bajarildi", "tugadi"]
+    status_name = func.lower(project_board_column.c.name)
+    assignee_name = (func.coalesce(user.c.name, "") + " " + func.coalesce(user.c.surname, "")).label("assignee_name")
+    source = (
+        project_board_card
+        .join(project_board_column, project_board_card.c.column_id == project_board_column.c.id)
+        .join(project_board, project_board_column.c.board_id == project_board.c.id)
+        .join(project, project_board.c.project_id == project.c.id)
+        .outerjoin(project_board_card_assignee, project_board_card_assignee.c.card_id == project_board_card.c.id)
+        .outerjoin(user, or_(user.c.id == project_board_card.c.assignee_id, user.c.id == project_board_card_assignee.c.user_id))
+    )
+    filters = [status_name.notin_(done_names)]
+    if employee:
+        filters.append(or_(project_board_card.c.assignee_id == employee["id"], project_board_card_assignee.c.user_id == employee["id"]))
+    total_open = (
+        await session.execute(
+            select(func.count(func.distinct(project_board_card.c.id))).select_from(source).where(and_(*filters))
+        )
+    ).scalar() or 0
+    overdue_open = (
+        await session.execute(
+            select(func.count(func.distinct(project_board_card.c.id))).select_from(source).where(and_(*filters, project_board_card.c.due_date.is_not(None), project_board_card.c.due_date < date.today()))
+        )
+    ).scalar() or 0
+    rows = (
+        await session.execute(
+            select(
+                project_board_card.c.id,
+                project_board_card.c.title,
+                project_board_card.c.description,
+                project_board_card.c.priority,
+                project_board_card.c.due_date,
+                project_board_card.c.created_at,
+                project_board.c.name.label("board_name"),
+                project_board_column.c.name.label("status_name"),
+                project.c.id.label("project_id"),
+                project.c.project_name,
+                assignee_name,
+            )
+            .select_from(source)
+            .where(and_(*filters))
+            .group_by(
+                project_board_card.c.id,
+                project_board_card.c.title,
+                project_board_card.c.description,
+                project_board_card.c.priority,
+                project_board_card.c.due_date,
+                project_board_card.c.created_at,
+                project_board.c.name,
+                project_board_column.c.name,
+                project.c.id,
+                project.c.project_name,
+                user.c.name,
+                user.c.surname,
+            )
+            .order_by(project_board_card.c.due_date.asc().nulls_last(), project_board_card.c.updated_at.desc())
+            .limit(50)
+        )
+    ).fetchall()
+    return {
+        "period": period.as_dict(),
+        "employee": employee,
+        "total_open_tasks": int(total_open or 0),
+        "overdue_open_tasks": int(overdue_open or 0),
+        "tasks": [
+            {
+                "id": row.id,
+                "title": row.title,
+                "description": _clip(row.description or "", 300) if row.description else None,
+                "priority": _enum(row.priority),
+                "due_date": row.due_date.isoformat() if row.due_date else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "project_id": row.project_id,
+                "project_name": row.project_name,
+                "board_name": row.board_name,
+                "status": row.status_name,
+                "assignee": row.assignee_name.strip() if row.assignee_name else None,
+            }
+            for row in rows
+        ],
+    }
+
+
 async def _company_data_hub_context(session: AsyncSession, period: PeriodSpec) -> dict[str, Any]:
     today = date.today()
 
@@ -1610,6 +1696,8 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
         context["sales_manager_stats"] = await _sales_manager_stats_context(session, sales_manager, period)
     if "project_overview" in intents:
         context["project_overview"] = await _project_overview_context(session)
+    if "task_detail" in intents:
+        context["task_detail"] = await _task_detail_context(session, period, employee)
     if "company_overview" in intents:
         context["company_overview"] = {
             "period": period.as_dict(),
@@ -1714,6 +1802,12 @@ def build_cims_ai_fallback_answer(context: dict[str, Any]) -> str:
     project_overview = context.get("project_overview")
     if project_overview:
         out.append(f"Projects moduli bo'yicha jami {project_overview['total_projects']} ta project, {project_overview['total_boards']} ta board, {project_overview['total_cards']} ta card bor. Ochiq cardlar {project_overview.get('open_cards', 0)} ta, done cardlar {project_overview.get('done_cards', 0)} ta.")
+    task_detail = context.get("task_detail")
+    if task_detail:
+        owner = task_detail.get("employee", {}).get("full_name") if task_detail.get("employee") else "Tizim"
+        out.append(f"{owner} bo'yicha ochiq tasklar {task_detail.get('total_open_tasks', 0)} ta, overdue {task_detail.get('overdue_open_tasks', 0)} ta.")
+        if task_detail.get("tasks"):
+            out.append("Ochiq tasklar: " + "; ".join(f"#{item['id']} {item['title']} ({item['project_name']} / {item['status']})" for item in task_detail["tasks"][:8]))
     company_overview = context.get("company_overview")
     if company_overview:
         out.append(
