@@ -1127,9 +1127,14 @@ async def _project_overview_context(session: AsyncSession) -> dict[str, Any]:
     total_projects = (await session.execute(select(func.count(project.c.id)))).scalar() or 0
     total_boards = (await session.execute(select(func.count(project_board.c.id)).where(project_board.c.is_archived == False))).scalar() or 0
     total_cards = (await session.execute(select(func.count(project_board_card.c.id)))).scalar() or 0
-    overdue_cards = (await session.execute(select(func.count(project_board_card.c.id)).where(and_(project_board_card.c.due_date.is_not(None), project_board_card.c.due_date < date.today())))).scalar() or 0
-    rows = (await session.execute(select(project.c.id, project.c.project_name, func.count(func.distinct(project_member.c.user_id)).label("members_count"), func.count(func.distinct(project_board.c.id)).label("boards_count"), func.count(func.distinct(project_board_card.c.id)).label("cards_count")).select_from(project.outerjoin(project_member, project.c.id == project_member.c.project_id).outerjoin(project_board, project.c.id == project_board.c.project_id).outerjoin(project_board_column, project_board.c.id == project_board_column.c.board_id).outerjoin(project_board_card, project_board_column.c.id == project_board_card.c.column_id)).group_by(project.c.id, project.c.project_name).order_by(project.c.project_name.asc()))).fetchall()
-    return {"total_projects": total_projects, "total_boards": total_boards, "total_cards": total_cards, "overdue_cards": overdue_cards, "projects": [{"id": row.id, "project_name": row.project_name, "members_count": row.members_count, "boards_count": row.boards_count, "cards_count": row.cards_count} for row in rows[:20]]}
+    done_names = ["done", "finished", "completed", "complete", "bajarildi", "tugadi"]
+    done_cond = func.lower(project_board_column.c.name).in_(done_names)
+    base = project_board_card.join(project_board_column, project_board_card.c.column_id == project_board_column.c.id)
+    open_cards = (await session.execute(select(func.count(project_board_card.c.id)).select_from(base).where(~done_cond))).scalar() or 0
+    done_cards = (await session.execute(select(func.count(project_board_card.c.id)).select_from(base).where(done_cond))).scalar() or 0
+    overdue_cards = (await session.execute(select(func.count(project_board_card.c.id)).select_from(base).where(and_(project_board_card.c.due_date.is_not(None), project_board_card.c.due_date < date.today(), ~done_cond)))).scalar() or 0
+    rows = (await session.execute(select(project.c.id, project.c.project_name, func.count(func.distinct(project_member.c.user_id)).label("members_count"), func.count(func.distinct(project_board.c.id)).label("boards_count"), func.count(func.distinct(project_board_card.c.id)).label("cards_count"), func.count(func.distinct(project_board_card.c.id)).filter(~done_cond).label("open_cards_count"), func.count(func.distinct(project_board_card.c.id)).filter(done_cond).label("done_cards_count")).select_from(project.outerjoin(project_member, project.c.id == project_member.c.project_id).outerjoin(project_board, project.c.id == project_board.c.project_id).outerjoin(project_board_column, project_board.c.id == project_board_column.c.board_id).outerjoin(project_board_card, project_board_column.c.id == project_board_card.c.column_id)).group_by(project.c.id, project.c.project_name).order_by(project.c.project_name.asc()))).fetchall()
+    return {"total_projects": total_projects, "total_boards": total_boards, "total_cards": total_cards, "open_cards": open_cards, "done_cards": done_cards, "overdue_cards": overdue_cards, "projects": [{"id": row.id, "project_name": row.project_name, "members_count": row.members_count, "boards_count": row.boards_count, "cards_count": row.cards_count, "open_cards_count": row.open_cards_count, "done_cards_count": row.done_cards_count} for row in rows[:20]]}
 
 
 async def _company_data_hub_context(session: AsyncSession, period: PeriodSpec) -> dict[str, Any]:
@@ -1367,10 +1372,13 @@ async def _company_data_hub_context(session: AsyncSession, period: PeriodSpec) -
                 func.count(func.distinct(project.c.id)).label("projects_count"),
                 func.count(func.distinct(project_board.c.id)).filter(project_board.c.is_archived == False).label("boards_count"),  # noqa: E712
                 func.count(func.distinct(project_board_card.c.id)).label("cards_count"),
+                func.count(func.distinct(project_board_card.c.id)).filter(func.lower(project_board_column.c.name).notin_(["done", "finished", "completed", "complete", "bajarildi", "tugadi"])).label("open_cards_count"),
+                func.count(func.distinct(project_board_card.c.id)).filter(func.lower(project_board_column.c.name).in_(["done", "finished", "completed", "complete", "bajarildi", "tugadi"])).label("done_cards_count"),
                 func.count(func.distinct(project_board_card.c.id)).filter(
                     and_(
                         project_board_card.c.due_date.is_not(None),
                         project_board_card.c.due_date < today,
+                        func.lower(project_board_column.c.name).notin_(["done", "finished", "completed", "complete", "bajarildi", "tugadi"]),
                     )
                 ).label("overdue_cards"),
             ).select_from(
@@ -1388,6 +1396,8 @@ async def _company_data_hub_context(session: AsyncSession, period: PeriodSpec) -
                 project.c.project_name,
                 func.count(func.distinct(project_member.c.user_id)).label("members_count"),
                 func.count(func.distinct(project_board_card.c.id)).label("cards_count"),
+                func.count(func.distinct(project_board_card.c.id)).filter(func.lower(project_board_column.c.name).notin_(["done", "finished", "completed", "complete", "bajarildi", "tugadi"])).label("open_cards_count"),
+                func.count(func.distinct(project_board_card.c.id)).filter(func.lower(project_board_column.c.name).in_(["done", "finished", "completed", "complete", "bajarildi", "tugadi"])).label("done_cards_count"),
             )
             .select_from(
                 project.outerjoin(project_member, project.c.id == project_member.c.project_id)
@@ -1465,6 +1475,8 @@ async def _company_data_hub_context(session: AsyncSession, period: PeriodSpec) -
             "projects_count": int(project_counts.projects_count or 0),
             "boards_count": int(project_counts.boards_count or 0),
             "cards_count": int(project_counts.cards_count or 0),
+            "open_cards_count": int(project_counts.open_cards_count or 0),
+            "done_cards_count": int(project_counts.done_cards_count or 0),
             "overdue_cards": int(project_counts.overdue_cards or 0),
             "projects": [
                 {
@@ -1472,6 +1484,8 @@ async def _company_data_hub_context(session: AsyncSession, period: PeriodSpec) -
                     "project_name": row.project_name,
                     "members_count": int(row.members_count or 0),
                     "cards_count": int(row.cards_count or 0),
+                    "open_cards_count": int(row.open_cards_count or 0),
+                    "done_cards_count": int(row.done_cards_count or 0),
                 }
                 for row in recent_project_rows
             ],
@@ -1699,7 +1713,7 @@ def build_cims_ai_fallback_answer(context: dict[str, Any]) -> str:
         )
     project_overview = context.get("project_overview")
     if project_overview:
-        out.append(f"Projects moduli bo'yicha jami {project_overview['total_projects']} ta project, {project_overview['total_boards']} ta board va {project_overview['total_cards']} ta card bor.")
+        out.append(f"Projects moduli bo'yicha jami {project_overview['total_projects']} ta project, {project_overview['total_boards']} ta board, {project_overview['total_cards']} ta card bor. Ochiq cardlar {project_overview.get('open_cards', 0)} ta, done cardlar {project_overview.get('done_cards', 0)} ta.")
     company_overview = context.get("company_overview")
     if company_overview:
         out.append(
