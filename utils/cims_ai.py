@@ -20,21 +20,40 @@ from models.admin_models import (
     CustomerType,
     FinanceType,
     TransactionStatus,
+    audit_log,
     company_recurring_payment,
     customer,
+    customer_note,
+    customer_status_table,
     customer_status_change_log,
     daily_update_log,
     exchange_rate,
     finance,
     sales_manager_assignment,
+    user_role_table,
     workday_override,
 )
-from models.projects_models import project, project_board, project_board_card, project_board_column, project_member
+from models.projects_models import (
+    project,
+    project_attachment,
+    project_board,
+    project_board_card,
+    project_board_card_assignee,
+    project_board_card_status_history,
+    project_board_column,
+    project_member,
+    project_team,
+    project_team_member,
+)
 from models.user_models import (
     UserRole,
+    attendance_daily_record,
     attendance_log,
+    attendance_raw_event,
     compensation_bonus,
     compensation_mistake,
+    monthly_bonus,
+    monthly_penalty,
     monthly_update,
     user,
     user_payment,
@@ -70,24 +89,37 @@ MONTH_NAMES_UZ = {
 }
 SQL_ANALYTICS_TABLES: dict[str, list[str]] = {
     "user": ["id", "email", "name", "surname", "company_code", "role", "role_name", "job_title", "is_active"],
+    "user_role": ["id", "name", "display_name", "description", "is_active", "is_system", "created_at", "updated_at"],
     "monthly_update": ["id", "user_id", "year", "month", "update_date", "update_percentage", "salary_amount", "next_payment_date", "note"],
+    "monthly_penalty": ["id", "user_id", "year", "month", "penalty_amount", "reason", "created_by", "created_at"],
+    "monthly_bonus": ["id", "user_id", "year", "month", "bonus_amount", "reason", "created_by", "created_at"],
     "daily_update_log": ["id", "user_id", "telegram_username", "update_date", "update_content", "is_valid", "created_at"],
     "customer": ["id", "platform", "username", "status", "status_name", "type", "assistant_name", "notes", "aisummary", "recall_time", "created_at"],
+    "customer_note": ["id", "customer_id", "note", "created_by", "created_at", "updated_at"],
+    "customer_status": ["id", "name", "display_name", "description", "color", "order", "is_active", "is_system", "created_at", "updated_at"],
     "sales_manager_assignment": ["id", "customer_id", "sales_manager_id", "assigned_at", "assigned_by", "is_active"],
     "customer_status_change_log": ["id", "customer_id", "from_status", "to_status", "changed_at"],
+    "audit_log": ["id", "created_at", "actor_user_id", "actor_email", "actor_name", "module", "table_name", "entity_type", "entity_id", "action", "summary", "changed_fields", "request_id", "is_system_action"],
     "finance": ["id", "type", "status", "card", "service", "summ", "currency", "date", "donation", "donation_percentage", "tax_percentage", "exchange_rate", "transaction_status", "initial_date"],
     "exchange_rate": ["id", "usd_to_uzs", "updated_at"],
     "user_payment": ["id", "project", "date", "summ", "payment"],
     "company_recurring_payment": ["id", "title", "amount", "payment_day", "payment_time", "note", "is_active", "created_at", "updated_at"],
     "workday_override": ["id", "special_date", "target_type", "target_key", "user_id", "day_type", "title", "note", "workday_hours", "update_required", "created_by", "created_at", "updated_at"],
     "attendance_log": ["id", "employee_id", "attendance_date", "check_in_time", "check_out_time", "created_by", "created_at", "updated_at"],
+    "attendance_daily_record": ["id", "source_system", "source_session_id", "employee_id", "attendance_date", "check_in_at", "check_out_at", "check_in_time", "check_out_time", "worked_minutes", "worked_hours_decimal", "status", "shift_id", "shift_name", "is_manual", "note", "is_deleted", "created_at", "updated_at"],
+    "attendance_raw_event": ["id", "source_system", "source_event_id", "employee_id", "event_time", "action", "source", "terminal_ip", "face_confidence", "photo_available", "is_manual", "manual_created_by", "manual_created_at", "manual_comment", "created_at", "updated_at"],
     "compensation_mistake": ["id", "employee_id", "reviewer_id", "project_id", "category", "severity", "title", "incident_date", "reached_client", "unclear_task", "created_by", "created_at", "updated_at"],
     "compensation_bonus": ["id", "employee_id", "project_id", "bonus_type", "title", "award_date", "created_by", "created_at", "updated_at"],
-    "project": ["id", "project_name", "project_description", "project_url", "project_image", "created_by", "created_at", "updated_at"],
+    "project": ["id", "team_id", "project_name", "project_description", "project_url", "project_image", "deadline", "telegram_group_id", "created_by", "created_at", "updated_at"],
+    "project_team": ["id", "name", "description", "created_by", "created_at", "updated_at"],
+    "project_team_member": ["id", "team_id", "user_id", "created_at"],
     "project_member": ["id", "project_id", "user_id", "created_at"],
     "project_board": ["id", "project_id", "name", "description", "created_by", "created_at", "is_archived"],
     "project_board_column": ["id", "board_id", "name", "order", "color", "created_at"],
-    "project_board_card": ["id", "column_id", "title", "description", "order", "priority", "assignee_id", "due_date", "created_by", "created_at", "updated_at"],
+    "project_board_card": ["id", "column_id", "title", "description", "order", "priority", "assignee_id", "due_date", "completed_at", "telegram_source_chat_id", "telegram_source_message_id", "telegram_source_command", "telegram_source_kind", "created_by", "created_at", "updated_at"],
+    "project_board_card_assignee": ["id", "card_id", "user_id", "created_at"],
+    "project_board_card_status_history": ["id", "card_id", "column_id", "column_name", "entered_at", "left_at", "duration_seconds", "moved_by"],
+    "project_attachment": ["id", "project_id", "attachment_type", "file_name", "url_path", "mime_type", "file_size", "description", "created_by", "created_at", "updated_at"],
 }
 
 SALES_NOTE_STOPWORDS = {
@@ -234,25 +266,36 @@ def _next_company_payment_occurrence(payment_day: int, payment_time: Any, base_d
 
 
 def _should_run_sql_analytics(question: str, context: dict[str, Any]) -> bool:
-    populated_sections = [
+    q = _n(question)
+    detail_markers = [
+        "ro'yxat", "royxat", "list", "oxirgi", "so'nggi", "songgi",
+        "detail", "detal", "qaysilar", "qaysi", "kimlar", "kimda",
+        "task", "card", "board", "status history", "qancha vaqt",
+        "note", "izoh", "audit", "log",
+    ]
+    if any(marker in q for marker in detail_markers):
+        return True
+    populated_specific_sections = [
         key for key in [
             "employee_update", "all_employees_update",
             "lead_stats", "customer_detail",
-            "finance_summary", "payment_summary",
+            "finance_summary",
             "recall_summary", "sales_manager_stats",
-            "project_overview", "company_overview",
+            "project_overview",
             "attendance_detail", "compensation_detail",
         ]
         if context.get(key)
     ]
-    if populated_sections:
+    if populated_specific_sections:
         return False
-    q = _n(question)
     explicit_markers = [
         "sql", "query", "jadval", "table",
         "ro'yxat", "royxat", "list",
         "taqqosla", "solishtir", "trend",
         "kunma-kun", "oyma-oy", "haftama-hafta", "group by",
+        "oxirgi", "so'nggi", "songgi", "top", "detail", "detal",
+        "qaysilar", "qaysi", "kimlar", "kimda", "nimalar",
+        "tasklari", "tasklar", "statuslari", "note", "izoh",
     ]
     return any(marker in q for marker in explicit_markers)
 
@@ -1436,6 +1479,26 @@ async def _company_data_hub_context(session: AsyncSession, period: PeriodSpec) -
     }
 
 
+def _compact_internal_snapshot(data_hub: dict[str, Any]) -> dict[str, Any]:
+    if not data_hub:
+        return {}
+    keys = [
+        "company_overview",
+        "updates_overview",
+        "attendance_overview",
+        "payments_overview",
+        "workday_overrides_overview",
+        "compensation_overview",
+        "projects_overview",
+    ]
+    snapshot = {"period": data_hub.get("period")}
+    for key in keys:
+        value = data_hub.get(key)
+        if isinstance(value, dict):
+            snapshot[key] = value
+    return snapshot
+
+
 async def _company_overview_context(session: AsyncSession, period: PeriodSpec) -> dict[str, Any]:
     active_users = (await session.execute(select(func.count(user.c.id)).where(user.c.is_active == True))).scalar() or 0
     total_users = (await session.execute(select(func.count(user.c.id)))).scalar() or 0
@@ -1492,9 +1555,7 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
             "customer_type_filter": None,
         }
 
-    # data_hub faqat kerak bo'lganda yuklanadi — company_overview yoki payment_summary uchun
-    needs_data_hub = any(i in intents for i in ("company_overview", "payment_summary"))
-    data_hub = await _company_data_hub_context(session, period) if needs_data_hub else {}
+    data_hub = await _company_data_hub_context(session, period)
 
     context: dict[str, Any] = {
         "question": question.strip(),
@@ -1505,6 +1566,7 @@ async def build_cims_ai_context(session: AsyncSession, question: str, history: l
         "sales_manager": sales_manager,
         "customer_match": customer_match,
         "customer_type_filter": customer_type,
+        "internal_snapshot": _compact_internal_snapshot(data_hub),
     }
     if data_hub:
         context["data_hub"] = data_hub
