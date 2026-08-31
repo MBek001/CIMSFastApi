@@ -47,6 +47,7 @@ TELEGRAM_RECALL_BOT_TOKEN = os.environ.get('TELEGRAM_RECALL_BOT_TOKEN')  # Recal
 PROJECT_TASK_BOT_TOKEN = os.environ.get('PROJECT_TASK_BOT_TOKEN')
 PROJECT_TASK_REPORT_CHAT_ID = os.environ.get('PROJECT_TASK_REPORT_CHAT_ID')
 PROJECT_TASK_REPORT_THREAD_ID = os.environ.get('PROJECT_TASK_REPORT_THREAD_ID')
+PROJECT_TASK_WEBAPP_URL = os.environ.get('PROJECT_TASK_WEBAPP_URL', 'https://api.project.cims.cognilabs.org/projects/task-webapp')
 
 # Telegram Chat IDs - har bir bot uchun alohida guruh
 TELEGRAM_AUDIO_CHAT_ID = os.environ.get('TELEGRAM_AUDIO_CHAT_ID')  # Audio yuborilayotgan guruh ID

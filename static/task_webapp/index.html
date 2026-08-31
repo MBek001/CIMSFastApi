@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>CIMS Tasklar</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #f5f5f7;
+      --card: rgba(255, 255, 255, 0.78);
+      --card-solid: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --line: rgba(17, 24, 39, 0.08);
+      --blue: #007aff;
+      --green: #34c759;
+      --orange: #ff9500;
+      --red: #ff3b30;
+      --shadow: 0 18px 48px rgba(15, 23, 42, 0.12);
+      --radius: 26px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+      background:
+        radial-gradient(circle at 18% 0%, rgba(0, 122, 255, 0.18), transparent 28%),
+        radial-gradient(circle at 86% 10%, rgba(52, 199, 89, 0.14), transparent 24%),
+        linear-gradient(180deg, #fbfbfd 0%, var(--bg) 52%, #efeff4 100%);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+    .shell {
+      max-width: 520px;
+      margin: 0 auto;
+      padding: calc(16px + env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom));
+    }
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 2px 18px;
+    }
+    .title {
+      margin: 0;
+      font-size: 34px;
+      line-height: 1.02;
+      letter-spacing: -0.9px;
+      font-weight: 800;
+    }
+    .subtitle {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 500;
+    }
+    .refresh {
+      width: 46px;
+      height: 46px;
+      border: 0;
+      border-radius: 50%;
+      background: var(--card);
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+      font-size: 20px;
+      backdrop-filter: blur(18px);
+    }
+    .tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 6px;
+      margin-bottom: 18px;
+      border-radius: 18px;
+      background: rgba(118, 118, 128, 0.14);
+    }
+    .tab {
+      min-height: 44px;
+      border: 0;
+      border-radius: 14px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .tab.active {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08);
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .metric {
+      padding: 16px;
+      border-radius: 22px;
+      background: var(--card);
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.07);
+      backdrop-filter: blur(18px);
+    }
+    .metric .num {
+      font-size: 30px;
+      font-weight: 850;
+      letter-spacing: -0.6px;
+    }
+    .metric .label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      margin-top: 2px;
+    }
+    .list {
+      display: grid;
+      gap: 14px;
+    }
+    .card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px);
+      animation: pop 260ms ease both;
+    }
+    @keyframes pop {
+      from { opacity: 0; transform: translateY(10px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .task-title {
+      font-size: 17px;
+      line-height: 1.24;
+      font-weight: 800;
+      letter-spacing: -0.25px;
+    }
+    .badge {
+      flex: 0 0 auto;
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      background: rgba(0, 122, 255, 0.1);
+      color: var(--blue);
+    }
+    .badge.done { color: var(--green); background: rgba(52, 199, 89, 0.12); }
+    .badge.overdue { color: var(--red); background: rgba(255, 59, 48, 0.12); }
+    .meta {
+      display: grid;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 600;
+      margin-top: 12px;
+    }
+    .desc {
+      margin-top: 10px;
+      color: #374151;
+      font-size: 14px;
+      line-height: 1.38;
+      white-space: pre-wrap;
+    }
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .status-btn {
+      min-height: 44px;
+      border: 0;
+      border-radius: 15px;
+      background: rgba(118, 118, 128, 0.13);
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 800;
+    }
+    .status-btn.current {
+      background: var(--text);
+      color: white;
+    }
+    .empty, .error {
+      padding: 28px 20px;
+      border-radius: var(--radius);
+      text-align: center;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      color: var(--muted);
+      font-weight: 700;
+      line-height: 1.4;
+    }
+    .error { color: var(--red); }
+    .loader {
+      padding: 36px 0;
+      text-align: center;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    button { cursor: pointer; touch-action: manipulation; }
+    button:active { transform: scale(0.97); }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="top">
+      <div>
+        <h1 class="title">Tasklar</h1>
+        <div class="subtitle" id="userLine">CIMS Task Bot</div>
+      </div>
+      <button class="refresh" id="refreshBtn" aria-label="Yangilash">↻</button>
+    </section>
+
+    <section class="tabs">
+      <button class="tab active" data-filter="open" id="openTab">🔥 Ochiq</button>
+      <button class="tab" data-filter="done" id="doneTab">✅ Done</button>
+    </section>
+
+    <section class="summary">
+      <div class="metric">
+        <div class="num" id="openCount">0</div>
+        <div class="label">Ochiq task</div>
+      </div>
+      <div class="metric">
+        <div class="num" id="doneCount">0</div>
+        <div class="label">Done task</div>
+      </div>
+    </section>
+
+    <section id="content" class="list">
+      <div class="loader">Yuklanmoqda...</div>
+    </section>
+  </main>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    const state = { filter: "open", initData: tg?.initData || "" };
+    const content = document.getElementById("content");
+    const userLine = document.getElementById("userLine");
+    const openCount = document.getElementById("openCount");
+    const doneCount = document.getElementById("doneCount");
+
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      tg.setHeaderColor("#f5f5f7");
+      tg.setBackgroundColor("#f5f5f7");
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      }[char]));
+    }
+
+    function formatDate(value) {
+      if (!value) return "Belgilanmagan";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString("uz-UZ", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    }
+
+    function setActiveTab() {
+      document.querySelectorAll(".tab").forEach(button => {
+        button.classList.toggle("active", button.dataset.filter === state.filter);
+      });
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Init-Data": state.initData,
+          ...(options.headers || {})
+        }
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "So'rov bajarilmadi");
+      return data;
+    }
+
+    function renderTasks(tasks) {
+      if (!tasks.length) {
+        content.innerHTML = `<div class="empty">${state.filter === "done" ? "✅ Done task yo'q" : "📭 Ochiq task yo'q"}</div>`;
+        return;
+      }
+      content.innerHTML = tasks.map((task, index) => {
+        const badgeClass = task.is_overdue ? "overdue" : (task.is_done ? "done" : "");
+        const badgeText = task.is_overdue ? "⚠️ Kechikkan" : `${task.status_emoji} ${escapeHtml(task.column_name)}`;
+        const buttons = task.status_options.map(option => `
+          <button class="status-btn ${option.id === task.column_id ? "current" : ""}" data-card="${task.id}" data-column="${option.id}">
+            ${escapeHtml(option.emoji)} ${escapeHtml(option.name)}
+          </button>
+        `).join("");
+        return `
+          <article class="card" style="animation-delay:${Math.min(index * 35, 280)}ms">
+            <div class="card-head">
+              <div class="task-title">#${task.id} · ${escapeHtml(task.title)}</div>
+              <div class="badge ${badgeClass}">${badgeText}</div>
+            </div>
+            ${task.description ? `<div class="desc">${escapeHtml(task.description)}</div>` : ""}
+            <div class="meta">
+              <div>🗂 ${escapeHtml(task.project_name)} / ${escapeHtml(task.board_name)}</div>
+              <div>📅 ${formatDate(task.due_date)} · 🎯 ${escapeHtml(task.priority)}</div>
+            </div>
+            <div class="status-grid">${buttons}</div>
+          </article>
+        `;
+      }).join("");
+      document.querySelectorAll(".status-btn").forEach(button => {
+        button.addEventListener("click", () => updateStatus(Number(button.dataset.card), Number(button.dataset.column)));
+      });
+    }
+
+    async function loadTasks() {
+      setActiveTab();
+      content.innerHTML = `<div class="loader">Yuklanmoqda...</div>`;
+      try {
+        const data = await api(`/projects/task-webapp/tasks?status=${state.filter}`);
+        const fullName = `${data.user?.name || ""} ${data.user?.surname || ""}`.trim();
+        userLine.textContent = fullName || "CIMS Task Bot";
+        openCount.textContent = data.counts?.open ?? 0;
+        doneCount.textContent = data.counts?.done ?? 0;
+        renderTasks(data.tasks || []);
+      } catch (error) {
+        content.innerHTML = `<div class="error">⛔ ${escapeHtml(error.message)}<br><br>Botga /start bosing va qayta oching.</div>`;
+      }
+    }
+
+    async function updateStatus(cardId, columnId) {
+      try {
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
+        await api(`/projects/task-webapp/tasks/${cardId}/status`, {
+          method: "PATCH",
+          body: JSON.stringify({ column_id: columnId })
+        });
+        await loadTasks();
+      } catch (error) {
+        if (tg?.showAlert) tg.showAlert(error.message);
+        else alert(error.message);
+      }
+    }
+
+    document.querySelectorAll(".tab").forEach(button => {
+      button.addEventListener("click", () => {
+        state.filter = button.dataset.filter;
+        loadTasks();
+      });
+    });
+    document.getElementById("refreshBtn").addEventListener("click", loadTasks);
+    loadTasks();
+  </script>
+</body>
+</html>

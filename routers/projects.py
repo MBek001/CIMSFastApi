@@ -1,18 +1,24 @@
 import asyncio
+import hashlib
+import hmac
 import html
+import json
 import re
 from datetime import date, datetime, time
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
+from urllib.parse import parse_qsl
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Form, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status, UploadFile, File, Form, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import delete, exists, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from telegram import Update as TelegramUpdate
+from telegram import Update as TelegramUpdate, WebAppInfo
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from auth_utils.auth_func import get_current_active_user
-from config import PROJECT_TASK_BOT_TOKEN, PROJECT_TASK_REPORT_CHAT_ID, PROJECT_TASK_REPORT_THREAD_ID
+from config import PROJECT_TASK_BOT_TOKEN, PROJECT_TASK_REPORT_CHAT_ID, PROJECT_TASK_REPORT_THREAD_ID, PROJECT_TASK_WEBAPP_URL
 from database import async_session_maker, engine, get_async_session
 from models.admin_models import daily_update_log
 from models.projects_models import (
@@ -76,6 +82,7 @@ DEFAULT_BOARD_COLUMNS = [
 _project_card_schema_ready = False
 _project_task_bot_app: Optional[Application] = None
 PROJECTS_TZ = ZoneInfo("Asia/Tashkent")
+PROJECT_TASK_WEBAPP_INDEX = Path(__file__).resolve().parent.parent / "static" / "task_webapp" / "index.html"
 TASK_COMMAND_RE = re.compile(r"/(?P<command>add_task_front|add_task_back|frontend|backend|management)(?:@\w+)?", re.IGNORECASE)
 MANAGEMENT_ASSIGNEE_LOOKUPS = {"muhammadali", "saidbek"}
 PROJECT_TASK_UNAUTHORIZED_MESSAGE = "Uzr faqat Cognilabs jamoasi uchun javob beraman ."
@@ -1471,7 +1478,12 @@ async def get_board_status_options(session: AsyncSession, board_id: int) -> List
     return [(row.id, row.name) for row in rows]
 
 
-def project_task_status_markup(card_id: int, status_options: List[Tuple[int, str]], current_column_id: Optional[int] = None):
+def project_task_status_markup(
+    card_id: int,
+    status_options: List[Tuple[int, str]],
+    current_column_id: Optional[int] = None,
+    include_back: bool = False,
+):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     buttons = []
@@ -1479,7 +1491,10 @@ def project_task_status_markup(card_id: int, status_options: List[Tuple[int, str
         prefix = "📌" if current_column_id == column_id else task_status_emoji(name)
         label = f"{prefix} {name}"
         buttons.append(InlineKeyboardButton(label, callback_data=f"task_status:{card_id}:{column_id}"))
-    return InlineKeyboardMarkup([buttons[index:index + 2] for index in range(0, len(buttons), 2)]) if buttons else None
+    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+    if include_back:
+        rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="task_back")])
+    return InlineKeyboardMarkup(rows) if rows else None
 
 
 def update_task_message_status_text(text_value: Optional[str], status_name: str) -> str:
@@ -1553,6 +1568,8 @@ def private_task_list_markup(rows):
     for row in rows:
         label = f"#{row.id} · {task_status_emoji(row.column_name)} {format_private_task_button_title(row.title)}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"task_open:{row.id}")])
+    if PROJECT_TASK_WEBAPP_URL:
+        buttons.append([InlineKeyboardButton("📱 Task WebApp", web_app=WebAppInfo(url=PROJECT_TASK_WEBAPP_URL))])
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 
@@ -1705,8 +1722,30 @@ async def project_task_status_callback_handler(update_obj: TelegramUpdate, conte
         await query.edit_message_text(
             text=updated_text,
             parse_mode="HTML",
-            reply_markup=project_task_status_markup(card_id, status_options, current_column_id)
+            reply_markup=project_task_status_markup(card_id, status_options, current_column_id, include_back=True)
         )
+
+
+async def project_task_back_callback_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update_obj.callback_query
+    if not query or not update_obj.effective_chat:
+        return
+    async with async_session_maker() as session:
+        target_user = await find_project_task_bot_user(
+            session,
+            update_obj.effective_chat.id,
+            update_obj.effective_user.username if update_obj.effective_user else None,
+        )
+        if not target_user:
+            await query.answer(PROJECT_TASK_UNAUTHORIZED_MESSAGE, show_alert=True)
+            return
+        rows = await build_private_task_rows(session, target_user.id)
+    await query.answer("Tasklar")
+    await query.edit_message_text(
+        format_private_task_list_text(rows),
+        parse_mode="HTML",
+        reply_markup=private_task_list_markup(rows),
+    )
 
 
 async def project_task_open_callback_handler(update_obj: TelegramUpdate, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1732,7 +1771,7 @@ async def project_task_open_callback_handler(update_obj: TelegramUpdate, context
     await query.edit_message_text(
         text=text_value,
         parse_mode="HTML",
-        reply_markup=project_task_status_markup(card_id, status_options or [], current_column_id),
+        reply_markup=project_task_status_markup(card_id, status_options or [], current_column_id, include_back=True),
     )
 
 
@@ -1888,7 +1927,11 @@ async def project_task_start_handler(update_obj: TelegramUpdate, context: Contex
             context.args[0] if context.args else None,
         )
     if registered:
-        await message.reply_text("Task bot ulandi. Endi tasklar shu chatga keladi.")
+        reply_markup = None
+        if PROJECT_TASK_WEBAPP_URL:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("📱 Task WebApp", web_app=WebAppInfo(url=PROJECT_TASK_WEBAPP_URL))]])
+        await message.reply_text("Task bot ulandi. Endi tasklar shu chatga keladi.", reply_markup=reply_markup)
     else:
         await message.reply_text(PROJECT_TASK_UNAUTHORIZED_MESSAGE)
 
@@ -1952,6 +1995,7 @@ async def start_project_task_bot() -> None:
     _project_task_bot_app.add_handler(CommandHandler("management", project_task_command_handler))
     _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_open_callback_handler, pattern=r"^task_open:\d+$"))
     _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_status_callback_handler, pattern=r"^task_status:\d+:\d+$"))
+    _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_back_callback_handler, pattern=r"^task_back$"))
     _project_task_bot_app.add_handler(MessageHandler(filters.TEXT, project_task_text_handler))
     _project_task_bot_app.add_handler(MessageHandler(filters.COMMAND, project_task_report_handler), group=1)
     await _project_task_bot_app.initialize()
@@ -2382,6 +2426,169 @@ async def create_project(
     await session.commit()
 
     return CreateResponse(message="Project muvaffaqiyatli yaratildi", id=project_id)
+
+
+def validate_project_task_webapp_init_data(init_data: str) -> dict:
+    if not PROJECT_TASK_BOT_TOKEN:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Task bot token sozlanmagan")
+    parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+    received_hash = parsed.pop("hash", None)
+    if not received_hash:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Telegram initData noto'g'ri")
+    data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(parsed.items()))
+    secret_key = hmac.new(b"WebAppData", PROJECT_TASK_BOT_TOKEN.encode(), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, received_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Telegram initData tasdiqlanmadi")
+    try:
+        auth_date = int(parsed.get("auth_date", "0"))
+    except ValueError:
+        auth_date = 0
+    if auth_date <= 0 or datetime.utcnow().timestamp() - auth_date > 86400:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Telegram sessiya muddati tugagan")
+    try:
+        telegram_user = json.loads(parsed.get("user") or "{}")
+    except json.JSONDecodeError:
+        telegram_user = {}
+    if not telegram_user.get("id"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Telegram user topilmadi")
+    return telegram_user
+
+
+async def get_project_task_webapp_user(session: AsyncSession, init_data: Optional[str]):
+    if not init_data:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Telegram initData yuborilmagan")
+    telegram_user = validate_project_task_webapp_init_data(init_data)
+    row = (
+        await session.execute(
+            select(user)
+            .where(user.c.is_active == True)
+            .where(user.c.chat_id == str(telegram_user.get("id")))
+            .order_by(user.c.id.asc())
+            .limit(1)
+        )
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PROJECT_TASK_UNAUTHORIZED_MESSAGE)
+    return row, telegram_user
+
+
+def webapp_task_payload(row, status_options: List[Tuple[int, str]]) -> dict:
+    return {
+        "id": row.id,
+        "title": row.title,
+        "description": row.description,
+        "priority": task_priority_value(row.priority),
+        "due_date": row.due_date.isoformat() if row.due_date else None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "project_id": row.project_id,
+        "project_name": row.project_name,
+        "board_id": row.board_id,
+        "board_name": row.board_name,
+        "column_id": row.column_id,
+        "column_name": row.column_name,
+        "status_emoji": task_status_emoji(row.column_name),
+        "is_done": is_done_column_name(row.column_name),
+        "is_overdue": bool(row.due_date and not is_done_column_name(row.column_name) and row.due_date < datetime.utcnow()),
+        "status_options": [{"id": column_id, "name": name, "emoji": task_status_emoji(name)} for column_id, name in status_options],
+    }
+
+
+async def build_project_task_webapp_rows(session: AsyncSession, target_user_id: int, filter_value: str):
+    done_names = ["done", "completed", "finish", "finished", "yakunlandi", "bajarildi"]
+    query = (
+        select(
+            project_board_card,
+            project_board_column.c.name.label("column_name"),
+            project_board.c.id.label("board_id"),
+            project_board.c.name.label("board_name"),
+            project.c.id.label("project_id"),
+            project.c.project_name.label("project_name"),
+        )
+        .select_from(
+            project_board_card
+            .join(project_board_column, project_board_card.c.column_id == project_board_column.c.id)
+            .join(project_board, project_board_column.c.board_id == project_board.c.id)
+            .join(project, project_board.c.project_id == project.c.id)
+        )
+        .where(build_card_user_filter(target_user_id))
+    )
+    normalized_filter = str(filter_value or "open").lower()
+    if normalized_filter == "done":
+        query = query.where(func.lower(project_board_column.c.name).in_(done_names))
+    elif normalized_filter != "all":
+        query = query.where(~func.lower(project_board_column.c.name).in_(done_names))
+    query = query.order_by(project_board_card.c.due_date.asc().nullslast(), project_board_card.c.updated_at.desc()).limit(200)
+    rows = (await session.execute(query)).fetchall()
+    options_cache: Dict[int, List[Tuple[int, str]]] = {}
+    tasks = []
+    for row in rows:
+        if row.board_id not in options_cache:
+            options_cache[row.board_id] = await get_board_status_options(session, row.board_id)
+        tasks.append(webapp_task_payload(row, options_cache[row.board_id]))
+    return tasks
+
+
+@router.get("/projects/task-webapp", include_in_schema=False)
+async def project_task_webapp_page():
+    if not PROJECT_TASK_WEBAPP_INDEX.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task WebApp topilmadi")
+    return FileResponse(PROJECT_TASK_WEBAPP_INDEX)
+
+
+@router.get("/projects/task-webapp/tasks", summary="Task bot WebApp tasklar")
+async def project_task_webapp_tasks(
+    status_filter: str = Query("open", alias="status"),
+    x_telegram_init_data: Optional[str] = Header(None),
+    session: AsyncSession = Depends(get_async_session),
+):
+    await ensure_project_card_schema()
+    target_user, telegram_user = await get_project_task_webapp_user(session, x_telegram_init_data)
+    tasks = await build_project_task_webapp_rows(session, target_user.id, status_filter)
+    open_count = len(await build_project_task_webapp_rows(session, target_user.id, "open"))
+    done_count = len(await build_project_task_webapp_rows(session, target_user.id, "done"))
+    return {
+        "user": {
+            "id": target_user.id,
+            "name": target_user.name,
+            "surname": target_user.surname,
+            "telegram_id": target_user.telegram_id,
+            "telegram_user": telegram_user,
+        },
+        "counts": {"open": open_count, "done": done_count, "current": len(tasks)},
+        "tasks": tasks,
+    }
+
+
+@router.patch("/projects/task-webapp/tasks/{card_id}/status", summary="Task bot WebApp status update")
+async def project_task_webapp_update_status(
+    card_id: int,
+    payload: dict,
+    x_telegram_init_data: Optional[str] = Header(None),
+    session: AsyncSession = Depends(get_async_session),
+):
+    await ensure_project_card_schema()
+    target_user, telegram_user = await get_project_task_webapp_user(session, x_telegram_init_data)
+    target_column_id = payload.get("column_id")
+    if not isinstance(target_column_id, int):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="column_id kerak")
+    ok, message_text, status_options, current_column_id = await update_card_status_from_task_bot(
+        session,
+        card_id,
+        target_column_id,
+        int(telegram_user.get("id")),
+        telegram_user.get("username"),
+    )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message_text)
+    return {
+        "message": message_text,
+        "card_id": card_id,
+        "current_column_id": current_column_id,
+        "status_options": [{"id": column_id, "name": name, "emoji": task_status_emoji(name)} for column_id, name in (status_options or [])],
+        "user_id": target_user.id,
+    }
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetailResponse, summary="Project detail")
