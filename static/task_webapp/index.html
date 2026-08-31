@@ -240,13 +240,16 @@
       min-height: 126px;
       border-radius: 27px;
       animation: rise 360ms cubic-bezier(.2,.95,.18,1) both;
-      transition: grid-column 320ms cubic-bezier(.2,.95,.18,1), border-radius 320ms cubic-bezier(.2,.95,.18,1), transform 220ms ease, border-color 220ms ease;
+      transform-origin: center top;
+      will-change: transform, border-radius, filter;
+      transition: border-radius 520ms cubic-bezier(.16,1,.3,1), transform 520ms cubic-bezier(.16,1,.3,1), border-color 420ms ease, filter 420ms ease;
     }
     .task.expanded {
       grid-column: 1 / -1;
       border-radius: 36px;
       border-color: var(--rim-hot);
-      transform: translateY(-1px);
+      transform: translateY(-2px) scale(1.008);
+      filter: saturate(1.12);
     }
     .task-body {
       position: relative;
@@ -299,6 +302,7 @@
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
+      transition: font-size 420ms cubic-bezier(.16,1,.3,1), line-height 420ms cubic-bezier(.16,1,.3,1), letter-spacing 420ms cubic-bezier(.16,1,.3,1), min-height 420ms cubic-bezier(.16,1,.3,1);
     }
     .task.expanded .task-title {
       min-height: auto;
@@ -315,6 +319,7 @@
       font-size: 11.7px;
       line-height: 1.2;
       font-weight: 780;
+      transition: color 340ms ease, font-size 420ms cubic-bezier(.16,1,.3,1);
     }
     .task-meta div {
       overflow: hidden;
@@ -327,17 +332,25 @@
       font-size: 13px;
     }
     .reveal {
-      display: grid;
-      grid-template-rows: 0fr;
+      max-height: 0;
       opacity: 0;
-      transition: grid-template-rows 380ms cubic-bezier(.2,.95,.18,1), opacity 260ms ease, margin-top 260ms ease;
+      overflow: hidden;
+      transform: translateY(-8px) scale(0.985);
+      filter: blur(6px);
+      transition: max-height 620ms cubic-bezier(.16,1,.3,1), opacity 360ms ease, transform 520ms cubic-bezier(.16,1,.3,1), filter 420ms ease, margin-top 420ms cubic-bezier(.16,1,.3,1);
     }
     .task.expanded .reveal {
-      grid-template-rows: 1fr;
+      max-height: 620px;
       opacity: 1;
       margin-top: 12px;
+      transform: translateY(0) scale(1);
+      filter: blur(0);
     }
-    .reveal-inner { overflow: hidden; }
+    .reveal-inner {
+      transform: translateY(-6px);
+      transition: transform 520ms cubic-bezier(.16,1,.3,1);
+    }
+    .task.expanded .reveal-inner { transform: translateY(0); }
     .desc {
       color: rgba(247,255,245,0.84);
       font-size: 14px;
@@ -349,7 +362,10 @@
       grid-template-columns: 1fr 1fr;
       gap: 8px;
       margin-top: 14px;
+      transform: translateY(8px);
+      transition: transform 520ms cubic-bezier(.16,1,.3,1);
     }
+    .task.expanded .status-grid { transform: translateY(0); }
     .status {
       min-height: 42px;
       border-radius: 16px;
