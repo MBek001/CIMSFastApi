@@ -7,18 +7,35 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      --bg: #f5f5f7;
-      --card: rgba(255, 255, 255, 0.78);
-      --card-solid: #ffffff;
-      --text: #111827;
-      --muted: #6b7280;
-      --line: rgba(17, 24, 39, 0.08);
+      color-scheme: light dark;
+      --bg0: #fbfbfd;
+      --bg1: #f2f2f7;
+      --glass: rgba(255, 255, 255, 0.58);
+      --glass-strong: rgba(255, 255, 255, 0.74);
+      --text: #101114;
+      --muted: rgba(60, 60, 67, 0.68);
+      --line: rgba(255, 255, 255, 0.62);
       --blue: #007aff;
       --green: #34c759;
       --orange: #ff9500;
       --red: #ff3b30;
-      --shadow: 0 18px 48px rgba(15, 23, 42, 0.12);
-      --radius: 26px;
+      --violet: #af52de;
+      --shadow: 0 24px 70px rgba(31, 35, 48, 0.16);
+      --inner: inset 0 1px 0 rgba(255,255,255,0.68), inset 0 -1px 0 rgba(255,255,255,0.22);
+      --radius: 24px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg0: #050508;
+        --bg1: #111217;
+        --glass: rgba(28, 28, 33, 0.56);
+        --glass-strong: rgba(42, 42, 48, 0.76);
+        --text: #f5f5f7;
+        --muted: rgba(235, 235, 245, 0.62);
+        --line: rgba(255, 255, 255, 0.13);
+        --shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
+        --inner: inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -1px 0 rgba(255,255,255,0.06);
+      }
     }
     * { box-sizing: border-box; }
     body {
@@ -26,16 +43,28 @@
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
       background:
-        radial-gradient(circle at 18% 0%, rgba(0, 122, 255, 0.18), transparent 28%),
-        radial-gradient(circle at 86% 10%, rgba(52, 199, 89, 0.14), transparent 24%),
-        linear-gradient(180deg, #fbfbfd 0%, var(--bg) 52%, #efeff4 100%);
+        radial-gradient(circle at 18% -4%, rgba(0, 122, 255, 0.32), transparent 30%),
+        radial-gradient(circle at 86% 4%, rgba(175, 82, 222, 0.22), transparent 28%),
+        radial-gradient(circle at 50% 74%, rgba(52, 199, 89, 0.12), transparent 32%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
       min-height: 100vh;
       -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(115deg, transparent 0 38%, rgba(255,255,255,0.18) 47%, transparent 58%),
+        radial-gradient(circle at 50% 0%, rgba(255,255,255,0.22), transparent 40%);
+      mix-blend-mode: soft-light;
     }
     .shell {
       max-width: 520px;
       margin: 0 auto;
-      padding: calc(16px + env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom));
+      padding: calc(14px + env(safe-area-inset-top)) 14px calc(28px + env(safe-area-inset-bottom));
     }
     .top {
       display: flex;
@@ -46,7 +75,7 @@
     }
     .title {
       margin: 0;
-      font-size: 34px;
+      font-size: 32px;
       line-height: 1.02;
       letter-spacing: -0.9px;
       font-weight: 800;
@@ -62,19 +91,21 @@
       height: 46px;
       border: 0;
       border-radius: 50%;
-      background: var(--card);
-      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+      background: var(--glass);
+      box-shadow: var(--shadow), var(--inner);
       font-size: 20px;
-      backdrop-filter: blur(18px);
+      backdrop-filter: blur(28px) saturate(1.8);
     }
     .tabs {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 6px;
       padding: 6px;
-      margin-bottom: 18px;
-      border-radius: 18px;
-      background: rgba(118, 118, 128, 0.14);
+      margin-bottom: 14px;
+      border-radius: 20px;
+      background: rgba(118, 118, 128, 0.18);
+      box-shadow: var(--inner);
+      backdrop-filter: blur(26px) saturate(1.6);
     }
     .tab {
       min-height: 44px;
@@ -87,24 +118,25 @@
     }
     .tab.active {
       color: var(--text);
-      background: rgba(255, 255, 255, 0.92);
-      box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08);
+      background: var(--glass-strong);
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12), var(--inner);
     }
     .summary {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      margin-bottom: 18px;
+      gap: 10px;
+      margin-bottom: 14px;
     }
     .metric {
-      padding: 16px;
+      padding: 13px 15px;
+      border: 1px solid var(--line);
       border-radius: 22px;
-      background: var(--card);
-      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.07);
-      backdrop-filter: blur(18px);
+      background: var(--glass);
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.1), var(--inner);
+      backdrop-filter: blur(28px) saturate(1.8);
     }
     .metric .num {
-      font-size: 30px;
+      font-size: 27px;
       font-weight: 850;
       letter-spacing: -0.6px;
     }
@@ -116,16 +148,31 @@
     }
     .list {
       display: grid;
-      gap: 14px;
+      gap: 10px;
     }
     .card {
-      padding: 18px;
+      position: relative;
+      padding: 13px 14px;
       border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: var(--card);
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(22px);
+      border-radius: 22px;
+      background: linear-gradient(145deg, var(--glass-strong), var(--glass));
+      box-shadow: 0 16px 46px rgba(0, 0, 0, 0.13), var(--inner);
+      backdrop-filter: blur(34px) saturate(1.9);
       animation: pop 260ms ease both;
+      overflow: hidden;
+      transition: padding 260ms cubic-bezier(.2,.9,.2,1), transform 220ms ease, border-radius 260ms ease;
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(120deg, rgba(255,255,255,0.32), transparent 24%, transparent 70%, rgba(255,255,255,0.12));
+      opacity: 0.7;
+    }
+    .card.expanded {
+      padding: 17px;
+      border-radius: 28px;
     }
     @keyframes pop {
       from { opacity: 0; transform: translateY(10px) scale(0.98); }
@@ -136,22 +183,33 @@
       align-items: flex-start;
       justify-content: space-between;
       gap: 12px;
-      margin-bottom: 10px;
+      margin-bottom: 0;
+      position: relative;
+      z-index: 1;
     }
     .task-title {
-      font-size: 17px;
-      line-height: 1.24;
+      font-size: 15.5px;
+      line-height: 1.2;
       font-weight: 800;
       letter-spacing: -0.25px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .card.expanded .task-title {
+      font-size: 17px;
+      -webkit-line-clamp: unset;
     }
     .badge {
       flex: 0 0 auto;
-      padding: 7px 10px;
+      padding: 6px 9px;
       border-radius: 999px;
-      font-size: 12px;
+      font-size: 11.5px;
       font-weight: 800;
-      background: rgba(0, 122, 255, 0.1);
+      background: rgba(0, 122, 255, 0.14);
       color: var(--blue);
+      box-shadow: var(--inner);
     }
     .badge.done { color: var(--green); background: rgba(52, 199, 89, 0.12); }
     .badge.overdue { color: var(--red); background: rgba(255, 59, 48, 0.12); }
@@ -159,17 +217,45 @@
       display: grid;
       gap: 7px;
       color: var(--muted);
-      font-size: 14px;
+      font-size: 13.5px;
       font-weight: 600;
       margin-top: 12px;
     }
     .desc {
       margin-top: 10px;
-      color: #374151;
+      color: var(--text);
+      opacity: 0.82;
       font-size: 14px;
       line-height: 1.38;
       white-space: pre-wrap;
     }
+    .expand {
+      display: grid;
+      grid-template-rows: 0fr;
+      opacity: 0;
+      transition: grid-template-rows 320ms cubic-bezier(.2,.9,.2,1), opacity 220ms ease, margin-top 260ms ease;
+      position: relative;
+      z-index: 1;
+    }
+    .expand > div {
+      overflow: hidden;
+    }
+    .card.expanded .expand {
+      grid-template-rows: 1fr;
+      opacity: 1;
+      margin-top: 10px;
+    }
+    .quick-meta {
+      margin-top: 8px;
+      display: flex;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 700;
+      position: relative;
+      z-index: 1;
+    }
+    .card.expanded .quick-meta { display: none; }
     .status-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -180,21 +266,23 @@
       min-height: 44px;
       border: 0;
       border-radius: 15px;
-      background: rgba(118, 118, 128, 0.13);
+      background: rgba(118, 118, 128, 0.18);
       color: var(--text);
       font-size: 14px;
       font-weight: 800;
+      box-shadow: var(--inner);
     }
     .status-btn.current {
-      background: var(--text);
+      background: linear-gradient(135deg, rgba(0,122,255,0.96), rgba(88,86,214,0.92));
       color: white;
     }
     .empty, .error {
       padding: 28px 20px;
       border-radius: var(--radius);
       text-align: center;
-      background: var(--card);
+      background: var(--glass);
       box-shadow: var(--shadow);
+      backdrop-filter: blur(30px) saturate(1.7);
       color: var(--muted);
       font-weight: 700;
       line-height: 1.4;
@@ -208,6 +296,9 @@
     }
     button { cursor: pointer; touch-action: manipulation; }
     button:active { transform: scale(0.97); }
+    @media (prefers-reduced-motion: reduce) {
+      .card, .expand, button { transition: none; animation: none; }
+    }
   </style>
 </head>
 <body>
@@ -307,20 +398,39 @@
           </button>
         `).join("");
         return `
-          <article class="card" style="animation-delay:${Math.min(index * 35, 280)}ms">
+          <article class="card" data-card-id="${task.id}" style="animation-delay:${Math.min(index * 28, 220)}ms">
             <div class="card-head">
               <div class="task-title">#${task.id} · ${escapeHtml(task.title)}</div>
               <div class="badge ${badgeClass}">${badgeText}</div>
             </div>
-            ${task.description ? `<div class="desc">${escapeHtml(task.description)}</div>` : ""}
-            <div class="meta">
-              <div>🗂 ${escapeHtml(task.project_name)} / ${escapeHtml(task.board_name)}</div>
-              <div>📅 ${formatDate(task.due_date)} · 🎯 ${escapeHtml(task.priority)}</div>
+            <div class="quick-meta">
+              <span>🗂 ${escapeHtml(task.project_name)}</span>
+              <span>📅 ${formatDate(task.due_date)}</span>
             </div>
-            <div class="status-grid">${buttons}</div>
+            <div class="expand">
+              <div>
+                ${task.description ? `<div class="desc">${escapeHtml(task.description)}</div>` : ""}
+                <div class="meta">
+                  <div>🗂 ${escapeHtml(task.project_name)} / ${escapeHtml(task.board_name)}</div>
+                  <div>📅 ${formatDate(task.due_date)} · 🎯 ${escapeHtml(task.priority)}</div>
+                </div>
+                <div class="status-grid">${buttons}</div>
+              </div>
+            </div>
           </article>
         `;
       }).join("");
+      document.querySelectorAll(".card").forEach(card => {
+        card.addEventListener("click", event => {
+          if (event.target.closest(".status-btn")) return;
+          const wasExpanded = card.classList.contains("expanded");
+          document.querySelectorAll(".card.expanded").forEach(item => {
+            if (item !== card) item.classList.remove("expanded");
+          });
+          card.classList.toggle("expanded", !wasExpanded);
+          if (!wasExpanded && tg?.HapticFeedback) tg.HapticFeedback.selectionChanged();
+        });
+      });
       document.querySelectorAll(".status-btn").forEach(button => {
         button.addEventListener("click", () => updateStatus(Number(button.dataset.card), Number(button.dataset.column)));
       });
