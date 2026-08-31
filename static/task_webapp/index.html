@@ -7,35 +7,22 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      color-scheme: dark light;
-      --bg: #05060a;
-      --ink: #f6f8ff;
-      --muted: rgba(235, 238, 255, 0.62);
-      --soft: rgba(235, 238, 255, 0.42);
-      --glass: rgba(22, 25, 36, 0.48);
-      --glass-hot: rgba(255, 255, 255, 0.12);
-      --line: rgba(255, 255, 255, 0.17);
-      --line-hot: rgba(255, 255, 255, 0.38);
-      --blue: #5ac8fa;
-      --green: #32d74b;
+      color-scheme: dark;
+      --bg: #020403;
+      --ink: #f7fff5;
+      --muted: rgba(235, 246, 232, 0.62);
+      --weak: rgba(235, 246, 232, 0.38);
+      --glass: rgba(23, 27, 24, 0.46);
+      --glass-2: rgba(64, 70, 62, 0.34);
+      --rim: rgba(255, 255, 255, 0.2);
+      --rim-hot: rgba(255, 255, 255, 0.42);
+      --green: #5dff63;
+      --green-soft: rgba(93, 255, 99, 0.18);
+      --blue: #64d2ff;
+      --orange: #ffd60a;
       --red: #ff453a;
-      --radius: 28px;
-      --shadow: 0 26px 72px rgba(0, 0, 0, 0.46);
-      --inner: inset 0 1px 0 rgba(255, 255, 255, 0.23), inset 0 -1px 0 rgba(255, 255, 255, 0.06);
-    }
-    @media (prefers-color-scheme: light) {
-      :root {
-        --bg: #eef2f8;
-        --ink: #0c1020;
-        --muted: rgba(34, 39, 56, 0.64);
-        --soft: rgba(34, 39, 56, 0.44);
-        --glass: rgba(255, 255, 255, 0.44);
-        --glass-hot: rgba(255, 255, 255, 0.62);
-        --line: rgba(255, 255, 255, 0.7);
-        --line-hot: rgba(255, 255, 255, 0.94);
-        --shadow: 0 24px 70px rgba(54, 66, 96, 0.18);
-        --inner: inset 0 1px 0 rgba(255, 255, 255, 0.86), inset 0 -1px 0 rgba(255, 255, 255, 0.34);
-      }
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.58);
+      --inner: inset 0 1px 0 rgba(255,255,255,0.22), inset 0 -1px 0 rgba(255,255,255,0.06);
     }
     * { box-sizing: border-box; }
     html { background: var(--bg); }
@@ -45,325 +32,344 @@
       color: var(--ink);
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
       background:
-        radial-gradient(circle at 14% 4%, rgba(90, 200, 250, 0.46), transparent 28%),
-        radial-gradient(circle at 86% 0%, rgba(191, 90, 242, 0.34), transparent 26%),
-        radial-gradient(circle at 58% 84%, rgba(50, 215, 75, 0.22), transparent 32%),
-        linear-gradient(155deg, #05060a, #101321 46%, #05060a);
+        radial-gradient(circle at 14% 0%, rgba(93, 255, 99, 0.18), transparent 28%),
+        radial-gradient(circle at 82% 12%, rgba(255, 255, 255, 0.12), transparent 18%),
+        radial-gradient(circle at 48% 90%, rgba(100, 210, 255, 0.13), transparent 31%),
+        linear-gradient(145deg, #020403 0%, #121512 44%, #020403 100%);
       -webkit-font-smoothing: antialiased;
       overflow-x: hidden;
-    }
-    @media (prefers-color-scheme: light) {
-      body {
-        background:
-          radial-gradient(circle at 10% 3%, rgba(0, 122, 255, 0.34), transparent 28%),
-          radial-gradient(circle at 92% 2%, rgba(255, 45, 85, 0.18), transparent 24%),
-          radial-gradient(circle at 58% 80%, rgba(52, 199, 89, 0.18), transparent 34%),
-          linear-gradient(155deg, #f8fbff, #e9eef8 48%, #f5f8ff);
-      }
     }
     body::before, body::after {
       content: "";
       position: fixed;
-      inset: -20%;
+      inset: -15%;
       pointer-events: none;
     }
     body::before {
       background:
-        linear-gradient(115deg, transparent 0 39%, rgba(255, 255, 255, 0.22) 45%, transparent 52%),
-        repeating-linear-gradient(135deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 14px);
-      mix-blend-mode: soft-light;
-      animation: drift 14s ease-in-out infinite alternate;
+        linear-gradient(118deg, transparent 0 39%, rgba(255,255,255,0.16) 45%, transparent 52%),
+        radial-gradient(ellipse at 52% 42%, transparent 0 34%, rgba(255,255,255,0.055) 35%, transparent 48%);
+      filter: blur(2px);
+      mix-blend-mode: screen;
+      animation: ambient 12s ease-in-out infinite alternate;
     }
     body::after {
-      background: radial-gradient(circle at var(--mx, 50%) var(--my, 12%), rgba(255,255,255,0.2), transparent 18%);
-      opacity: 0.68;
-      filter: blur(10px);
+      background: radial-gradient(circle at var(--mx, 54%) var(--my, 15%), rgba(255,255,255,0.22), transparent 16%);
+      opacity: 0.65;
+      filter: blur(18px);
     }
     button {
-      cursor: pointer;
       border: 0;
+      cursor: pointer;
       touch-action: manipulation;
       font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
     }
     button:active { transform: scale(0.97); }
-    .shell {
+    .app {
       position: relative;
       max-width: 520px;
+      min-height: 100vh;
       margin: 0 auto;
       padding: calc(14px + env(safe-area-inset-top)) 14px calc(26px + env(safe-area-inset-bottom));
     }
-    .hero {
-      position: sticky;
-      top: 0;
-      z-index: 5;
-      padding: 8px 0 12px;
-      backdrop-filter: blur(26px) saturate(1.35);
-    }
-    .hero-row {
+    .topbar {
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
       gap: 12px;
-      margin-bottom: 12px;
+      margin: 2px 0 18px;
     }
-    .eyebrow {
+    .hello {
       color: var(--muted);
       font-size: 13px;
-      font-weight: 700;
+      font-weight: 760;
       letter-spacing: 0.2px;
     }
     .title {
-      margin: 2px 0 0;
-      font-size: clamp(32px, 9vw, 46px);
-      line-height: 0.95;
-      letter-spacing: -1.9px;
+      margin: 4px 0 0;
+      font-size: 34px;
+      line-height: 0.94;
+      letter-spacing: -1.4px;
       font-weight: 900;
     }
-    .refresh {
-      width: 50px;
-      height: 50px;
+    .round {
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
       border-radius: 999px;
       color: var(--ink);
-      font-size: 21px;
-      background: linear-gradient(145deg, var(--glass-hot), var(--glass));
-      border: 1px solid var(--line);
-      box-shadow: var(--shadow), var(--inner);
-      backdrop-filter: blur(34px) saturate(1.8);
-    }
-    .panel {
-      position: relative;
-      border: 1px solid var(--line);
+      font-size: 19px;
       background:
-        linear-gradient(140deg, rgba(255,255,255,0.18), transparent 26%),
-        linear-gradient(180deg, var(--glass-hot), var(--glass));
+        linear-gradient(140deg, rgba(255,255,255,0.2), rgba(255,255,255,0.04)),
+        rgba(44, 50, 45, 0.42);
+      border: 1px solid var(--rim);
       box-shadow: var(--shadow), var(--inner);
-      backdrop-filter: blur(38px) saturate(1.85);
-      overflow: hidden;
+      backdrop-filter: blur(34px) saturate(1.7);
     }
-    .panel::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background: linear-gradient(112deg, rgba(255,255,255,0.3), transparent 20%, transparent 74%, rgba(255,255,255,0.12));
-      opacity: 0.72;
-      pointer-events: none;
-    }
-    .metrics {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-    .metric {
-      min-height: 86px;
-      padding: 14px 15px;
-      border-radius: 25px;
-    }
-    .metric-icon {
-      font-size: 18px;
-      margin-bottom: 4px;
-    }
-    .metric-num {
-      font-size: 30px;
-      line-height: 1;
-      font-weight: 900;
-      letter-spacing: -1px;
-    }
-    .metric-label {
-      margin-top: 4px;
-      color: var(--muted);
-      font-size: 12.5px;
-      font-weight: 750;
-    }
-    .dock {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
-      padding: 6px;
-      border-radius: 23px;
-      background: rgba(120, 120, 128, 0.18);
-      border: 1px solid rgba(255,255,255,0.08);
-      box-shadow: var(--inner);
-      backdrop-filter: blur(30px) saturate(1.6);
-    }
-    .tab {
-      min-height: 43px;
-      border-radius: 17px;
-      color: var(--muted);
-      background: transparent;
-      font-size: 15px;
-      font-weight: 850;
-      transition: transform 180ms ease, color 180ms ease, background 180ms ease;
-    }
-    .tab.active {
-      color: var(--ink);
-      background: linear-gradient(145deg, var(--glass-hot), rgba(255,255,255,0.1));
-      border: 1px solid var(--line);
-      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.14), var(--inner);
-    }
-    .list {
-      display: grid;
-      gap: 9px;
-      padding-top: 2px;
-    }
-    .task {
+    .glass {
       position: relative;
-      border-radius: 24px;
-      border: 1px solid var(--line);
+      border: 1px solid var(--rim);
       background:
-        radial-gradient(circle at var(--mx-card, 18%) 0%, rgba(255,255,255,0.22), transparent 26%),
-        linear-gradient(150deg, rgba(255,255,255,0.16), rgba(255,255,255,0.04) 44%, rgba(255,255,255,0.1));
-      box-shadow: 0 16px 38px rgba(0, 0, 0, 0.25), var(--inner);
-      backdrop-filter: blur(34px) saturate(1.8);
+        radial-gradient(circle at var(--card-x, 20%) 0%, rgba(255,255,255,0.24), transparent 30%),
+        linear-gradient(150deg, rgba(255,255,255,0.17), rgba(255,255,255,0.045) 45%, rgba(255,255,255,0.11));
+      box-shadow: var(--shadow), var(--inner);
+      backdrop-filter: blur(36px) saturate(1.75);
       overflow: hidden;
       isolation: isolate;
-      animation: rise 360ms cubic-bezier(.2,.95,.18,1) both;
-      transition: border-radius 340ms cubic-bezier(.2,.95,.18,1), transform 240ms ease, border-color 240ms ease;
     }
-    .task::before {
+    .glass::before {
       content: "";
       position: absolute;
       inset: 1px;
       border-radius: inherit;
-      background: linear-gradient(120deg, rgba(255,255,255,0.28), transparent 18%, transparent 72%, rgba(255,255,255,0.12));
-      opacity: 0.58;
+      background: linear-gradient(122deg, rgba(255,255,255,0.25), transparent 23%, transparent 70%, rgba(255,255,255,0.13));
+      opacity: 0.72;
+      pointer-events: none;
       z-index: -1;
     }
-    .task::after {
+    .glass::after {
       content: "";
       position: absolute;
-      left: 13px;
-      right: 13px;
+      left: 16px;
+      right: 16px;
       top: 0;
       height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.72), transparent);
-      opacity: 0.72;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.78), transparent);
+      pointer-events: none;
     }
-    .task.expanded {
-      border-radius: 31px;
-      border-color: var(--line-hot);
-      transform: translateY(-1px);
-    }
-    .task-main {
-      min-height: 78px;
-      padding: 12px 12px 11px;
-    }
-    .task-line {
+    .scene {
+      min-height: 156px;
+      border-radius: 34px;
+      padding: 16px;
+      margin-bottom: 12px;
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 12px;
+    }
+    .scene-title {
+      position: relative;
+      z-index: 1;
+      font-size: 15px;
+      font-weight: 820;
+      color: var(--muted);
+    }
+    .big-number {
+      position: relative;
+      z-index: 1;
+      margin-top: 12px;
+      font-size: 58px;
+      line-height: 0.88;
+      letter-spacing: -3px;
+      font-weight: 930;
+    }
+    .big-number span {
+      color: var(--green);
+      text-shadow: 0 0 22px rgba(93,255,99,0.5);
+    }
+    .scene-sub {
+      position: relative;
+      z-index: 1;
+      margin-top: 9px;
+      color: var(--weak);
+      font-size: 13px;
+      font-weight: 760;
+    }
+    .mini-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      gap: 9px;
+    }
+    .mini {
+      border-radius: 24px;
+      padding: 12px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: var(--inner);
+    }
+    .mini .value {
+      font-size: 25px;
+      line-height: 1;
+      font-weight: 900;
+      letter-spacing: -0.8px;
+    }
+    .mini .label {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .dock {
+      position: sticky;
+      top: calc(10px + env(safe-area-inset-top));
+      z-index: 8;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 12px;
+      padding: 6px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.09);
+      border: 1px solid rgba(255,255,255,0.13);
+      box-shadow: 0 18px 48px rgba(0,0,0,0.36), var(--inner);
+      backdrop-filter: blur(32px) saturate(1.9);
+    }
+    .tab {
+      min-height: 42px;
+      border-radius: 999px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 14px;
+      font-weight: 880;
+      transition: color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+    }
+    .tab.active {
+      color: #061008;
+      background: linear-gradient(135deg, rgba(93,255,99,0.98), rgba(211,255,207,0.9));
+      box-shadow: 0 0 30px rgba(93,255,99,0.32), inset 0 1px 0 rgba(255,255,255,0.74);
+    }
+    .tasks {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
       gap: 10px;
       align-items: start;
     }
+    .task {
+      min-height: 126px;
+      border-radius: 27px;
+      animation: rise 360ms cubic-bezier(.2,.95,.18,1) both;
+      transition: grid-column 320ms cubic-bezier(.2,.95,.18,1), border-radius 320ms cubic-bezier(.2,.95,.18,1), transform 220ms ease, border-color 220ms ease;
+    }
+    .task.expanded {
+      grid-column: 1 / -1;
+      border-radius: 36px;
+      border-color: var(--rim-hot);
+      transform: translateY(-1px);
+    }
+    .task-body {
+      position: relative;
+      z-index: 1;
+      padding: 13px;
+    }
+    .task-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .device-dot {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 16px rgba(93,255,99,0.76);
+      flex: 0 0 auto;
+    }
+    .device-dot.done {
+      background: var(--blue);
+      box-shadow: 0 0 16px rgba(100,210,255,0.64);
+    }
+    .device-dot.overdue {
+      background: var(--red);
+      box-shadow: 0 0 16px rgba(255,69,58,0.72);
+    }
+    .status-pill {
+      max-width: calc(100% - 22px);
+      padding: 6px 8px;
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.1);
+      font-size: 11px;
+      font-weight: 850;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .task-title {
-      font-size: 15px;
+      min-height: 38px;
+      font-size: 14px;
       line-height: 1.18;
-      letter-spacing: -0.22px;
-      font-weight: 870;
+      letter-spacing: -0.2px;
+      font-weight: 880;
       display: -webkit-box;
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
     .task.expanded .task-title {
-      font-size: 18px;
-      line-height: 1.14;
+      min-height: auto;
+      font-size: 19px;
+      line-height: 1.12;
+      letter-spacing: -0.5px;
       -webkit-line-clamp: unset;
     }
-    .pill {
-      padding: 6px 9px;
-      border-radius: 999px;
-      color: var(--blue);
-      background: rgba(90, 200, 250, 0.13);
-      border: 1px solid rgba(90, 200, 250, 0.22);
-      font-size: 11.5px;
-      line-height: 1;
-      white-space: nowrap;
-      font-weight: 900;
-    }
-    .pill.done {
-      color: var(--green);
-      background: rgba(50, 215, 75, 0.13);
-      border-color: rgba(50, 215, 75, 0.22);
-    }
-    .pill.overdue {
-      color: var(--red);
-      background: rgba(255, 69, 58, 0.14);
-      border-color: rgba(255, 69, 58, 0.26);
-    }
-    .quick {
-      display: flex;
-      gap: 7px;
-      flex-wrap: wrap;
-      margin-top: 9px;
-      color: var(--soft);
-      font-size: 12px;
+    .task-meta {
+      display: grid;
+      gap: 5px;
+      margin-top: 12px;
+      color: var(--weak);
+      font-size: 11.7px;
+      line-height: 1.2;
       font-weight: 780;
     }
-    .chip {
-      max-width: 100%;
-      padding: 5px 8px;
-      border-radius: 999px;
-      background: rgba(118, 118, 128, 0.15);
+    .task-meta div {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+    .task.expanded .task-meta {
+      grid-template-columns: 1fr 1fr;
+      color: var(--muted);
+      font-size: 13px;
     }
     .reveal {
       display: grid;
       grid-template-rows: 0fr;
       opacity: 0;
-      transition: grid-template-rows 380ms cubic-bezier(.2,.95,.18,1), opacity 260ms ease;
+      transition: grid-template-rows 380ms cubic-bezier(.2,.95,.18,1), opacity 260ms ease, margin-top 260ms ease;
     }
     .task.expanded .reveal {
       grid-template-rows: 1fr;
       opacity: 1;
+      margin-top: 12px;
     }
-    .reveal-inner {
-      overflow: hidden;
-    }
+    .reveal-inner { overflow: hidden; }
     .desc {
-      margin-top: 10px;
-      color: rgba(246, 248, 255, 0.84);
+      color: rgba(247,255,245,0.84);
       font-size: 14px;
       line-height: 1.42;
       white-space: pre-wrap;
     }
-    @media (prefers-color-scheme: light) {
-      .desc { color: rgba(12, 16, 32, 0.82); }
-    }
-    .details {
-      display: grid;
-      gap: 7px;
-      margin-top: 12px;
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 720;
-    }
-    .statuses {
+    .status-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
-      margin-top: 15px;
+      margin-top: 14px;
     }
     .status {
       min-height: 42px;
       border-radius: 16px;
       color: var(--ink);
-      background: rgba(118, 118, 128, 0.18);
-      border: 1px solid rgba(255,255,255,0.09);
+      background: rgba(255,255,255,0.075);
+      border: 1px solid rgba(255,255,255,0.12);
       box-shadow: var(--inner);
-      font-size: 13.5px;
-      font-weight: 850;
+      font-size: 13px;
+      font-weight: 860;
     }
     .status.current {
-      color: #fff;
-      background: linear-gradient(135deg, #0a84ff, #64d2ff 48%, #bf5af2);
-      border-color: rgba(255,255,255,0.44);
-      box-shadow: 0 14px 28px rgba(10, 132, 255, 0.32), var(--inner);
+      color: #051006;
+      background: linear-gradient(135deg, var(--green), #d7ffd2);
+      border-color: rgba(255,255,255,0.56);
+      box-shadow: 0 0 28px rgba(93,255,99,0.32), var(--inner);
     }
-    .loader, .empty, .error {
-      padding: 28px 20px;
-      border-radius: var(--radius);
+    .empty, .loader, .error {
+      grid-column: 1 / -1;
+      padding: 30px 18px;
+      border-radius: 32px;
       text-align: center;
       color: var(--muted);
       font-weight: 780;
@@ -371,12 +377,17 @@
     }
     .error { color: var(--red); }
     @keyframes rise {
-      from { opacity: 0; transform: translateY(12px) scale(0.985); }
+      from { opacity: 0; transform: translateY(14px) scale(0.98); }
       to { opacity: 1; transform: translateY(0) scale(1); }
     }
-    @keyframes drift {
-      from { transform: translate3d(-2%, -1%, 0) rotate(-1deg); }
-      to { transform: translate3d(2%, 1%, 0) rotate(1deg); }
+    @keyframes ambient {
+      from { transform: translate3d(-2%, -1%, 0) rotate(-2deg); }
+      to { transform: translate3d(2%, 1%, 0) rotate(2deg); }
+    }
+    @media (max-width: 360px) {
+      .tasks { grid-template-columns: 1fr; }
+      .task.expanded { grid-column: auto; }
+      .scene { grid-template-columns: 1fr; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -384,35 +395,40 @@
   </style>
 </head>
 <body>
-  <main class="shell">
-    <section class="hero">
-      <div class="hero-row">
-        <div>
-          <div class="eyebrow" id="userLine">CIMS Task Bot</div>
-          <h1 class="title">Tasklar</h1>
-        </div>
-        <button class="refresh" id="refreshBtn" aria-label="Yangilash">↻</button>
+  <main class="app">
+    <section class="topbar">
+      <div>
+        <div class="hello" id="userLine">CIMS Task Bot</div>
+        <h1 class="title">Tasklar</h1>
       </div>
-      <div class="metrics">
-        <div class="panel metric">
-          <div class="metric-icon">🔥</div>
-          <div class="metric-num" id="openCount">0</div>
-          <div class="metric-label">Ochiq task</div>
-        </div>
-        <div class="panel metric">
-          <div class="metric-icon">✅</div>
-          <div class="metric-num" id="doneCount">0</div>
-          <div class="metric-label">Done task</div>
-        </div>
+      <button class="round" id="refreshBtn" aria-label="Yangilash">↻</button>
+    </section>
+
+    <section class="glass scene">
+      <div>
+        <div class="scene-title">Bugungi ish paneli</div>
+        <div class="big-number"><span id="openCount">0</span></div>
+        <div class="scene-sub">Ochiq tasklar. Bosib oching, statusni o'zgartiring.</div>
       </div>
-      <div class="dock">
-        <button class="tab active" data-filter="open">Ochiq</button>
-        <button class="tab" data-filter="done">Done</button>
+      <div class="mini-grid">
+        <div class="mini">
+          <div class="value" id="doneCount">0</div>
+          <div class="label">Done task</div>
+        </div>
+        <div class="mini">
+          <div class="value" id="visibleCount">0</div>
+          <div class="label">Ko'rinyapti</div>
+        </div>
       </div>
     </section>
 
-    <section id="content" class="list">
-      <div class="panel loader">Yuklanmoqda...</div>
+    <section class="dock">
+      <button class="tab active" data-filter="open">🔥 Ochiq</button>
+      <button class="tab" data-filter="done">✅ Done</button>
+    </section>
+
+    <section id="content" class="tasks">
+      <div class="glass loader">Yuklanmoqda...</div>
     </section>
   </main>
 
@@ -423,12 +439,13 @@
     const userLine = document.getElementById("userLine");
     const openCount = document.getElementById("openCount");
     const doneCount = document.getElementById("doneCount");
+    const visibleCount = document.getElementById("visibleCount");
 
     if (tg) {
       tg.ready();
       tg.expand();
-      tg.setHeaderColor("#05060a");
-      tg.setBackgroundColor("#05060a");
+      tg.setHeaderColor("#020403");
+      tg.setBackgroundColor("#020403");
     }
 
     function escapeHtml(value) {
@@ -442,7 +459,7 @@
     }
 
     function formatDate(value) {
-      if (!value) return "Belgilanmagan";
+      if (!value) return "Deadline yo'q";
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return value;
       return date.toLocaleString("uz-UZ", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -453,8 +470,8 @@
       const y = Math.round((event.clientY / window.innerHeight) * 100);
       document.body.style.setProperty("--mx", `${x}%`);
       document.body.style.setProperty("--my", `${y}%`);
-      const card = event.target.closest?.(".task");
-      if (card) card.style.setProperty("--mx-card", `${x}%`);
+      const card = event.target.closest?.(".glass");
+      if (card) card.style.setProperty("--card-x", `${x}%`);
     }
 
     function setActiveTab() {
@@ -478,37 +495,39 @@
     }
 
     function renderTasks(tasks) {
+      visibleCount.textContent = tasks.length;
       if (!tasks.length) {
-        content.innerHTML = `<div class="panel empty">${state.filter === "done" ? "✅ Done task yo'q" : "📭 Ochiq task yo'q"}</div>`;
+        content.innerHTML = `<div class="glass empty">${state.filter === "done" ? "✅ Done task yo'q" : "📭 Ochiq task yo'q"}</div>`;
         return;
       }
       content.innerHTML = tasks.map((task, index) => {
         const badgeClass = task.is_overdue ? "overdue" : (task.is_done ? "done" : "");
-        const badgeText = task.is_overdue ? "⚠️ Kechikkan" : `${task.status_emoji} ${escapeHtml(task.column_name)}`;
+        const badgeText = task.is_overdue ? "Kechikkan" : `${task.status_emoji} ${escapeHtml(task.column_name)}`;
         const buttons = task.status_options.map(option => `
           <button class="status ${option.id === task.column_id ? "current" : ""}" data-card="${task.id}" data-column="${option.id}">
             ${escapeHtml(option.emoji)} ${escapeHtml(option.name)}
           </button>
         `).join("");
         return `
-          <article class="task" data-card-id="${task.id}" style="animation-delay:${Math.min(index * 30, 240)}ms">
-            <div class="task-main">
-              <div class="task-line">
-                <div class="task-title">#${task.id} · ${escapeHtml(task.title)}</div>
-                <div class="pill ${badgeClass}">${badgeText}</div>
+          <article class="glass task" data-card-id="${task.id}" style="animation-delay:${Math.min(index * 28, 230)}ms">
+            <div class="task-body">
+              <div class="task-top">
+                <span class="device-dot ${badgeClass}"></span>
+                <span class="status-pill">${badgeText}</span>
               </div>
-              <div class="quick">
-                <span class="chip">🗂 ${escapeHtml(task.project_name)}</span>
-                <span class="chip">📅 ${formatDate(task.due_date)}</span>
+              <div class="task-title">#${task.id} · ${escapeHtml(task.title)}</div>
+              <div class="task-meta">
+                <div>🗂 ${escapeHtml(task.project_name)}</div>
+                <div>📅 ${formatDate(task.due_date)}</div>
               </div>
               <div class="reveal">
                 <div class="reveal-inner">
                   ${task.description ? `<div class="desc">${escapeHtml(task.description)}</div>` : ""}
-                  <div class="details">
-                    <div>🧩 ${escapeHtml(task.project_name)} / ${escapeHtml(task.board_name)}</div>
-                    <div>📅 ${formatDate(task.due_date)} · 🎯 ${escapeHtml(task.priority)}</div>
+                  <div class="task-meta">
+                    <div>🧩 ${escapeHtml(task.board_name)}</div>
+                    <div>🎯 ${escapeHtml(task.priority)}</div>
                   </div>
-                  <div class="statuses">${buttons}</div>
+                  <div class="status-grid">${buttons}</div>
                 </div>
               </div>
             </div>
@@ -533,16 +552,17 @@
 
     async function loadTasks() {
       setActiveTab();
-      content.innerHTML = `<div class="panel loader">Yuklanmoqda...</div>`;
+      content.innerHTML = `<div class="glass loader">Yuklanmoqda...</div>`;
       try {
         const data = await api(`/projects/task-webapp/tasks?status=${state.filter}`);
         const fullName = `${data.user?.name || ""} ${data.user?.surname || ""}`.trim();
-        userLine.textContent = fullName || "CIMS Task Bot";
+        userLine.textContent = fullName ? `Hi, ${fullName}` : "CIMS Task Bot";
         openCount.textContent = data.counts?.open ?? 0;
         doneCount.textContent = data.counts?.done ?? 0;
         renderTasks(data.tasks || []);
       } catch (error) {
-        content.innerHTML = `<div class="panel error">⛔ ${escapeHtml(error.message)}<br><br>Botga /start bosing va qayta oching.</div>`;
+        visibleCount.textContent = 0;
+        content.innerHTML = `<div class="glass error">⛔ ${escapeHtml(error.message)}<br><br>Botga /start bosing va qayta oching.</div>`;
       }
     }
 
