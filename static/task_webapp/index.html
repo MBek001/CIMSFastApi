@@ -7,328 +7,412 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      color-scheme: light dark;
-      --bg0: #fbfbfd;
-      --bg1: #f2f2f7;
-      --glass: rgba(255, 255, 255, 0.58);
-      --glass-strong: rgba(255, 255, 255, 0.74);
-      --text: #101114;
-      --muted: rgba(60, 60, 67, 0.68);
-      --line: rgba(255, 255, 255, 0.62);
-      --blue: #007aff;
-      --green: #34c759;
-      --orange: #ff9500;
-      --red: #ff3b30;
-      --violet: #af52de;
-      --shadow: 0 24px 70px rgba(31, 35, 48, 0.16);
-      --inner: inset 0 1px 0 rgba(255,255,255,0.68), inset 0 -1px 0 rgba(255,255,255,0.22);
-      --radius: 24px;
+      color-scheme: dark light;
+      --bg: #05060a;
+      --ink: #f6f8ff;
+      --muted: rgba(235, 238, 255, 0.62);
+      --soft: rgba(235, 238, 255, 0.42);
+      --glass: rgba(22, 25, 36, 0.48);
+      --glass-hot: rgba(255, 255, 255, 0.12);
+      --line: rgba(255, 255, 255, 0.17);
+      --line-hot: rgba(255, 255, 255, 0.38);
+      --blue: #5ac8fa;
+      --green: #32d74b;
+      --red: #ff453a;
+      --radius: 28px;
+      --shadow: 0 26px 72px rgba(0, 0, 0, 0.46);
+      --inner: inset 0 1px 0 rgba(255, 255, 255, 0.23), inset 0 -1px 0 rgba(255, 255, 255, 0.06);
     }
-    @media (prefers-color-scheme: dark) {
+    @media (prefers-color-scheme: light) {
       :root {
-        --bg0: #050508;
-        --bg1: #111217;
-        --glass: rgba(28, 28, 33, 0.56);
-        --glass-strong: rgba(42, 42, 48, 0.76);
-        --text: #f5f5f7;
-        --muted: rgba(235, 235, 245, 0.62);
-        --line: rgba(255, 255, 255, 0.13);
-        --shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
-        --inner: inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -1px 0 rgba(255,255,255,0.06);
+        --bg: #eef2f8;
+        --ink: #0c1020;
+        --muted: rgba(34, 39, 56, 0.64);
+        --soft: rgba(34, 39, 56, 0.44);
+        --glass: rgba(255, 255, 255, 0.44);
+        --glass-hot: rgba(255, 255, 255, 0.62);
+        --line: rgba(255, 255, 255, 0.7);
+        --line-hot: rgba(255, 255, 255, 0.94);
+        --shadow: 0 24px 70px rgba(54, 66, 96, 0.18);
+        --inner: inset 0 1px 0 rgba(255, 255, 255, 0.86), inset 0 -1px 0 rgba(255, 255, 255, 0.34);
       }
     }
     * { box-sizing: border-box; }
+    html { background: var(--bg); }
     body {
       margin: 0;
-      color: var(--text);
+      min-height: 100vh;
+      color: var(--ink);
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
       background:
-        radial-gradient(circle at 18% -4%, rgba(0, 122, 255, 0.32), transparent 30%),
-        radial-gradient(circle at 86% 4%, rgba(175, 82, 222, 0.22), transparent 28%),
-        radial-gradient(circle at 50% 74%, rgba(52, 199, 89, 0.12), transparent 32%),
-        linear-gradient(180deg, var(--bg0), var(--bg1));
-      min-height: 100vh;
+        radial-gradient(circle at 14% 4%, rgba(90, 200, 250, 0.46), transparent 28%),
+        radial-gradient(circle at 86% 0%, rgba(191, 90, 242, 0.34), transparent 26%),
+        radial-gradient(circle at 58% 84%, rgba(50, 215, 75, 0.22), transparent 32%),
+        linear-gradient(155deg, #05060a, #101321 46%, #05060a);
       -webkit-font-smoothing: antialiased;
       overflow-x: hidden;
     }
-    body::before {
+    @media (prefers-color-scheme: light) {
+      body {
+        background:
+          radial-gradient(circle at 10% 3%, rgba(0, 122, 255, 0.34), transparent 28%),
+          radial-gradient(circle at 92% 2%, rgba(255, 45, 85, 0.18), transparent 24%),
+          radial-gradient(circle at 58% 80%, rgba(52, 199, 89, 0.18), transparent 34%),
+          linear-gradient(155deg, #f8fbff, #e9eef8 48%, #f5f8ff);
+      }
+    }
+    body::before, body::after {
       content: "";
       position: fixed;
-      inset: 0;
+      inset: -20%;
       pointer-events: none;
-      background:
-        linear-gradient(115deg, transparent 0 38%, rgba(255,255,255,0.18) 47%, transparent 58%),
-        radial-gradient(circle at 50% 0%, rgba(255,255,255,0.22), transparent 40%);
-      mix-blend-mode: soft-light;
     }
+    body::before {
+      background:
+        linear-gradient(115deg, transparent 0 39%, rgba(255, 255, 255, 0.22) 45%, transparent 52%),
+        repeating-linear-gradient(135deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 14px);
+      mix-blend-mode: soft-light;
+      animation: drift 14s ease-in-out infinite alternate;
+    }
+    body::after {
+      background: radial-gradient(circle at var(--mx, 50%) var(--my, 12%), rgba(255,255,255,0.2), transparent 18%);
+      opacity: 0.68;
+      filter: blur(10px);
+    }
+    button {
+      cursor: pointer;
+      border: 0;
+      touch-action: manipulation;
+      font-family: inherit;
+    }
+    button:active { transform: scale(0.97); }
     .shell {
+      position: relative;
       max-width: 520px;
       margin: 0 auto;
-      padding: calc(14px + env(safe-area-inset-top)) 14px calc(28px + env(safe-area-inset-bottom));
+      padding: calc(14px + env(safe-area-inset-top)) 14px calc(26px + env(safe-area-inset-bottom));
     }
-    .top {
+    .hero {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      padding: 8px 0 12px;
+      backdrop-filter: blur(26px) saturate(1.35);
+    }
+    .hero-row {
       display: flex;
-      align-items: center;
       justify-content: space-between;
+      align-items: center;
       gap: 12px;
-      padding: 8px 2px 18px;
+      margin-bottom: 12px;
+    }
+    .eyebrow {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
     }
     .title {
-      margin: 0;
-      font-size: 32px;
-      line-height: 1.02;
-      letter-spacing: -0.9px;
-      font-weight: 800;
-    }
-    .subtitle {
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 15px;
-      font-weight: 500;
+      margin: 2px 0 0;
+      font-size: clamp(32px, 9vw, 46px);
+      line-height: 0.95;
+      letter-spacing: -1.9px;
+      font-weight: 900;
     }
     .refresh {
-      width: 46px;
-      height: 46px;
-      border: 0;
-      border-radius: 50%;
-      background: var(--glass);
+      width: 50px;
+      height: 50px;
+      border-radius: 999px;
+      color: var(--ink);
+      font-size: 21px;
+      background: linear-gradient(145deg, var(--glass-hot), var(--glass));
+      border: 1px solid var(--line);
       box-shadow: var(--shadow), var(--inner);
-      font-size: 20px;
-      backdrop-filter: blur(28px) saturate(1.8);
+      backdrop-filter: blur(34px) saturate(1.8);
     }
-    .tabs {
+    .panel {
+      position: relative;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(140deg, rgba(255,255,255,0.18), transparent 26%),
+        linear-gradient(180deg, var(--glass-hot), var(--glass));
+      box-shadow: var(--shadow), var(--inner);
+      backdrop-filter: blur(38px) saturate(1.85);
+      overflow: hidden;
+    }
+    .panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(112deg, rgba(255,255,255,0.3), transparent 20%, transparent 74%, rgba(255,255,255,0.12));
+      opacity: 0.72;
+      pointer-events: none;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .metric {
+      min-height: 86px;
+      padding: 14px 15px;
+      border-radius: 25px;
+    }
+    .metric-icon {
+      font-size: 18px;
+      margin-bottom: 4px;
+    }
+    .metric-num {
+      font-size: 30px;
+      line-height: 1;
+      font-weight: 900;
+      letter-spacing: -1px;
+    }
+    .metric-label {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 750;
+    }
+    .dock {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 6px;
       padding: 6px;
-      margin-bottom: 14px;
-      border-radius: 20px;
-      background: rgba(118, 118, 128, 0.18);
+      border-radius: 23px;
+      background: rgba(120, 120, 128, 0.18);
+      border: 1px solid rgba(255,255,255,0.08);
       box-shadow: var(--inner);
-      backdrop-filter: blur(26px) saturate(1.6);
+      backdrop-filter: blur(30px) saturate(1.6);
     }
     .tab {
-      min-height: 44px;
-      border: 0;
-      border-radius: 14px;
+      min-height: 43px;
+      border-radius: 17px;
       color: var(--muted);
       background: transparent;
       font-size: 15px;
-      font-weight: 700;
+      font-weight: 850;
+      transition: transform 180ms ease, color 180ms ease, background 180ms ease;
     }
     .tab.active {
-      color: var(--text);
-      background: var(--glass-strong);
-      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12), var(--inner);
-    }
-    .summary {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin-bottom: 14px;
-    }
-    .metric {
-      padding: 13px 15px;
+      color: var(--ink);
+      background: linear-gradient(145deg, var(--glass-hot), rgba(255,255,255,0.1));
       border: 1px solid var(--line);
-      border-radius: 22px;
-      background: var(--glass);
-      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.1), var(--inner);
-      backdrop-filter: blur(28px) saturate(1.8);
-    }
-    .metric .num {
-      font-size: 27px;
-      font-weight: 850;
-      letter-spacing: -0.6px;
-    }
-    .metric .label {
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 700;
-      margin-top: 2px;
+      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.14), var(--inner);
     }
     .list {
       display: grid;
-      gap: 10px;
+      gap: 9px;
+      padding-top: 2px;
     }
-    .card {
+    .task {
       position: relative;
-      padding: 13px 14px;
+      border-radius: 24px;
       border: 1px solid var(--line);
-      border-radius: 22px;
-      background: linear-gradient(145deg, var(--glass-strong), var(--glass));
-      box-shadow: 0 16px 46px rgba(0, 0, 0, 0.13), var(--inner);
-      backdrop-filter: blur(34px) saturate(1.9);
-      animation: pop 260ms ease both;
+      background:
+        radial-gradient(circle at var(--mx-card, 18%) 0%, rgba(255,255,255,0.22), transparent 26%),
+        linear-gradient(150deg, rgba(255,255,255,0.16), rgba(255,255,255,0.04) 44%, rgba(255,255,255,0.1));
+      box-shadow: 0 16px 38px rgba(0, 0, 0, 0.25), var(--inner);
+      backdrop-filter: blur(34px) saturate(1.8);
       overflow: hidden;
-      transition: padding 260ms cubic-bezier(.2,.9,.2,1), transform 220ms ease, border-radius 260ms ease;
+      isolation: isolate;
+      animation: rise 360ms cubic-bezier(.2,.95,.18,1) both;
+      transition: border-radius 340ms cubic-bezier(.2,.95,.18,1), transform 240ms ease, border-color 240ms ease;
     }
-    .card::before {
+    .task::before {
       content: "";
       position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background: linear-gradient(120deg, rgba(255,255,255,0.32), transparent 24%, transparent 70%, rgba(255,255,255,0.12));
-      opacity: 0.7;
+      inset: 1px;
+      border-radius: inherit;
+      background: linear-gradient(120deg, rgba(255,255,255,0.28), transparent 18%, transparent 72%, rgba(255,255,255,0.12));
+      opacity: 0.58;
+      z-index: -1;
     }
-    .card.expanded {
-      padding: 17px;
-      border-radius: 28px;
+    .task::after {
+      content: "";
+      position: absolute;
+      left: 13px;
+      right: 13px;
+      top: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.72), transparent);
+      opacity: 0.72;
     }
-    @keyframes pop {
-      from { opacity: 0; transform: translateY(10px) scale(0.98); }
-      to { opacity: 1; transform: translateY(0) scale(1); }
+    .task.expanded {
+      border-radius: 31px;
+      border-color: var(--line-hot);
+      transform: translateY(-1px);
     }
-    .card-head {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 0;
-      position: relative;
-      z-index: 1;
+    .task-main {
+      min-height: 78px;
+      padding: 12px 12px 11px;
+    }
+    .task-line {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: start;
     }
     .task-title {
-      font-size: 15.5px;
-      line-height: 1.2;
-      font-weight: 800;
-      letter-spacing: -0.25px;
+      font-size: 15px;
+      line-height: 1.18;
+      letter-spacing: -0.22px;
+      font-weight: 870;
       display: -webkit-box;
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
-    .card.expanded .task-title {
-      font-size: 17px;
+    .task.expanded .task-title {
+      font-size: 18px;
+      line-height: 1.14;
       -webkit-line-clamp: unset;
     }
-    .badge {
-      flex: 0 0 auto;
+    .pill {
       padding: 6px 9px;
       border-radius: 999px;
-      font-size: 11.5px;
-      font-weight: 800;
-      background: rgba(0, 122, 255, 0.14);
       color: var(--blue);
-      box-shadow: var(--inner);
+      background: rgba(90, 200, 250, 0.13);
+      border: 1px solid rgba(90, 200, 250, 0.22);
+      font-size: 11.5px;
+      line-height: 1;
+      white-space: nowrap;
+      font-weight: 900;
     }
-    .badge.done { color: var(--green); background: rgba(52, 199, 89, 0.12); }
-    .badge.overdue { color: var(--red); background: rgba(255, 59, 48, 0.12); }
-    .meta {
-      display: grid;
+    .pill.done {
+      color: var(--green);
+      background: rgba(50, 215, 75, 0.13);
+      border-color: rgba(50, 215, 75, 0.22);
+    }
+    .pill.overdue {
+      color: var(--red);
+      background: rgba(255, 69, 58, 0.14);
+      border-color: rgba(255, 69, 58, 0.26);
+    }
+    .quick {
+      display: flex;
       gap: 7px;
-      color: var(--muted);
-      font-size: 13.5px;
-      font-weight: 600;
-      margin-top: 12px;
+      flex-wrap: wrap;
+      margin-top: 9px;
+      color: var(--soft);
+      font-size: 12px;
+      font-weight: 780;
     }
-    .desc {
-      margin-top: 10px;
-      color: var(--text);
-      opacity: 0.82;
-      font-size: 14px;
-      line-height: 1.38;
-      white-space: pre-wrap;
+    .chip {
+      max-width: 100%;
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: rgba(118, 118, 128, 0.15);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .expand {
+    .reveal {
       display: grid;
       grid-template-rows: 0fr;
       opacity: 0;
-      transition: grid-template-rows 320ms cubic-bezier(.2,.9,.2,1), opacity 220ms ease, margin-top 260ms ease;
-      position: relative;
-      z-index: 1;
+      transition: grid-template-rows 380ms cubic-bezier(.2,.95,.18,1), opacity 260ms ease;
     }
-    .expand > div {
-      overflow: hidden;
-    }
-    .card.expanded .expand {
+    .task.expanded .reveal {
       grid-template-rows: 1fr;
       opacity: 1;
+    }
+    .reveal-inner {
+      overflow: hidden;
+    }
+    .desc {
       margin-top: 10px;
+      color: rgba(246, 248, 255, 0.84);
+      font-size: 14px;
+      line-height: 1.42;
+      white-space: pre-wrap;
     }
-    .quick-meta {
-      margin-top: 8px;
-      display: flex;
-      gap: 8px;
+    @media (prefers-color-scheme: light) {
+      .desc { color: rgba(12, 16, 32, 0.82); }
+    }
+    .details {
+      display: grid;
+      gap: 7px;
+      margin-top: 12px;
       color: var(--muted);
-      font-size: 12.5px;
-      font-weight: 700;
-      position: relative;
-      z-index: 1;
+      font-size: 13px;
+      font-weight: 720;
     }
-    .card.expanded .quick-meta { display: none; }
-    .status-grid {
+    .statuses {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
-      margin-top: 16px;
+      margin-top: 15px;
     }
-    .status-btn {
-      min-height: 44px;
-      border: 0;
-      border-radius: 15px;
+    .status {
+      min-height: 42px;
+      border-radius: 16px;
+      color: var(--ink);
       background: rgba(118, 118, 128, 0.18);
-      color: var(--text);
-      font-size: 14px;
-      font-weight: 800;
+      border: 1px solid rgba(255,255,255,0.09);
       box-shadow: var(--inner);
+      font-size: 13.5px;
+      font-weight: 850;
     }
-    .status-btn.current {
-      background: linear-gradient(135deg, rgba(0,122,255,0.96), rgba(88,86,214,0.92));
-      color: white;
+    .status.current {
+      color: #fff;
+      background: linear-gradient(135deg, #0a84ff, #64d2ff 48%, #bf5af2);
+      border-color: rgba(255,255,255,0.44);
+      box-shadow: 0 14px 28px rgba(10, 132, 255, 0.32), var(--inner);
     }
-    .empty, .error {
+    .loader, .empty, .error {
       padding: 28px 20px;
       border-radius: var(--radius);
       text-align: center;
-      background: var(--glass);
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(30px) saturate(1.7);
       color: var(--muted);
-      font-weight: 700;
-      line-height: 1.4;
+      font-weight: 780;
+      line-height: 1.45;
     }
     .error { color: var(--red); }
-    .loader {
-      padding: 36px 0;
-      text-align: center;
-      color: var(--muted);
-      font-weight: 700;
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(12px) scale(0.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
     }
-    button { cursor: pointer; touch-action: manipulation; }
-    button:active { transform: scale(0.97); }
+    @keyframes drift {
+      from { transform: translate3d(-2%, -1%, 0) rotate(-1deg); }
+      to { transform: translate3d(2%, 1%, 0) rotate(1deg); }
+    }
     @media (prefers-reduced-motion: reduce) {
-      .card, .expand, button { transition: none; animation: none; }
+      *, *::before, *::after { animation: none !important; transition: none !important; }
     }
   </style>
 </head>
 <body>
   <main class="shell">
-    <section class="top">
-      <div>
-        <h1 class="title">Tasklar</h1>
-        <div class="subtitle" id="userLine">CIMS Task Bot</div>
+    <section class="hero">
+      <div class="hero-row">
+        <div>
+          <div class="eyebrow" id="userLine">CIMS Task Bot</div>
+          <h1 class="title">Tasklar</h1>
+        </div>
+        <button class="refresh" id="refreshBtn" aria-label="Yangilash">↻</button>
       </div>
-      <button class="refresh" id="refreshBtn" aria-label="Yangilash">↻</button>
-    </section>
-
-    <section class="tabs">
-      <button class="tab active" data-filter="open" id="openTab">🔥 Ochiq</button>
-      <button class="tab" data-filter="done" id="doneTab">✅ Done</button>
-    </section>
-
-    <section class="summary">
-      <div class="metric">
-        <div class="num" id="openCount">0</div>
-        <div class="label">Ochiq task</div>
+      <div class="metrics">
+        <div class="panel metric">
+          <div class="metric-icon">🔥</div>
+          <div class="metric-num" id="openCount">0</div>
+          <div class="metric-label">Ochiq task</div>
+        </div>
+        <div class="panel metric">
+          <div class="metric-icon">✅</div>
+          <div class="metric-num" id="doneCount">0</div>
+          <div class="metric-label">Done task</div>
+        </div>
       </div>
-      <div class="metric">
-        <div class="num" id="doneCount">0</div>
-        <div class="label">Done task</div>
+      <div class="dock">
+        <button class="tab active" data-filter="open">Ochiq</button>
+        <button class="tab" data-filter="done">Done</button>
       </div>
     </section>
 
     <section id="content" class="list">
-      <div class="loader">Yuklanmoqda...</div>
+      <div class="panel loader">Yuklanmoqda...</div>
     </section>
   </main>
 
@@ -343,8 +427,8 @@
     if (tg) {
       tg.ready();
       tg.expand();
-      tg.setHeaderColor("#f5f5f7");
-      tg.setBackgroundColor("#f5f5f7");
+      tg.setHeaderColor("#05060a");
+      tg.setBackgroundColor("#05060a");
     }
 
     function escapeHtml(value) {
@@ -362,6 +446,15 @@
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return value;
       return date.toLocaleString("uz-UZ", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    }
+
+    function setPointer(event) {
+      const x = Math.round((event.clientX / window.innerWidth) * 100);
+      const y = Math.round((event.clientY / window.innerHeight) * 100);
+      document.body.style.setProperty("--mx", `${x}%`);
+      document.body.style.setProperty("--my", `${y}%`);
+      const card = event.target.closest?.(".task");
+      if (card) card.style.setProperty("--mx-card", `${x}%`);
     }
 
     function setActiveTab() {
@@ -386,59 +479,61 @@
 
     function renderTasks(tasks) {
       if (!tasks.length) {
-        content.innerHTML = `<div class="empty">${state.filter === "done" ? "✅ Done task yo'q" : "📭 Ochiq task yo'q"}</div>`;
+        content.innerHTML = `<div class="panel empty">${state.filter === "done" ? "✅ Done task yo'q" : "📭 Ochiq task yo'q"}</div>`;
         return;
       }
       content.innerHTML = tasks.map((task, index) => {
         const badgeClass = task.is_overdue ? "overdue" : (task.is_done ? "done" : "");
         const badgeText = task.is_overdue ? "⚠️ Kechikkan" : `${task.status_emoji} ${escapeHtml(task.column_name)}`;
         const buttons = task.status_options.map(option => `
-          <button class="status-btn ${option.id === task.column_id ? "current" : ""}" data-card="${task.id}" data-column="${option.id}">
+          <button class="status ${option.id === task.column_id ? "current" : ""}" data-card="${task.id}" data-column="${option.id}">
             ${escapeHtml(option.emoji)} ${escapeHtml(option.name)}
           </button>
         `).join("");
         return `
-          <article class="card" data-card-id="${task.id}" style="animation-delay:${Math.min(index * 28, 220)}ms">
-            <div class="card-head">
-              <div class="task-title">#${task.id} · ${escapeHtml(task.title)}</div>
-              <div class="badge ${badgeClass}">${badgeText}</div>
-            </div>
-            <div class="quick-meta">
-              <span>🗂 ${escapeHtml(task.project_name)}</span>
-              <span>📅 ${formatDate(task.due_date)}</span>
-            </div>
-            <div class="expand">
-              <div>
-                ${task.description ? `<div class="desc">${escapeHtml(task.description)}</div>` : ""}
-                <div class="meta">
-                  <div>🗂 ${escapeHtml(task.project_name)} / ${escapeHtml(task.board_name)}</div>
-                  <div>📅 ${formatDate(task.due_date)} · 🎯 ${escapeHtml(task.priority)}</div>
+          <article class="task" data-card-id="${task.id}" style="animation-delay:${Math.min(index * 30, 240)}ms">
+            <div class="task-main">
+              <div class="task-line">
+                <div class="task-title">#${task.id} · ${escapeHtml(task.title)}</div>
+                <div class="pill ${badgeClass}">${badgeText}</div>
+              </div>
+              <div class="quick">
+                <span class="chip">🗂 ${escapeHtml(task.project_name)}</span>
+                <span class="chip">📅 ${formatDate(task.due_date)}</span>
+              </div>
+              <div class="reveal">
+                <div class="reveal-inner">
+                  ${task.description ? `<div class="desc">${escapeHtml(task.description)}</div>` : ""}
+                  <div class="details">
+                    <div>🧩 ${escapeHtml(task.project_name)} / ${escapeHtml(task.board_name)}</div>
+                    <div>📅 ${formatDate(task.due_date)} · 🎯 ${escapeHtml(task.priority)}</div>
+                  </div>
+                  <div class="statuses">${buttons}</div>
                 </div>
-                <div class="status-grid">${buttons}</div>
               </div>
             </div>
           </article>
         `;
       }).join("");
-      document.querySelectorAll(".card").forEach(card => {
+      document.querySelectorAll(".task").forEach(card => {
         card.addEventListener("click", event => {
-          if (event.target.closest(".status-btn")) return;
+          if (event.target.closest(".status")) return;
           const wasExpanded = card.classList.contains("expanded");
-          document.querySelectorAll(".card.expanded").forEach(item => {
+          document.querySelectorAll(".task.expanded").forEach(item => {
             if (item !== card) item.classList.remove("expanded");
           });
           card.classList.toggle("expanded", !wasExpanded);
           if (!wasExpanded && tg?.HapticFeedback) tg.HapticFeedback.selectionChanged();
         });
       });
-      document.querySelectorAll(".status-btn").forEach(button => {
+      document.querySelectorAll(".status").forEach(button => {
         button.addEventListener("click", () => updateStatus(Number(button.dataset.card), Number(button.dataset.column)));
       });
     }
 
     async function loadTasks() {
       setActiveTab();
-      content.innerHTML = `<div class="loader">Yuklanmoqda...</div>`;
+      content.innerHTML = `<div class="panel loader">Yuklanmoqda...</div>`;
       try {
         const data = await api(`/projects/task-webapp/tasks?status=${state.filter}`);
         const fullName = `${data.user?.name || ""} ${data.user?.surname || ""}`.trim();
@@ -447,7 +542,7 @@
         doneCount.textContent = data.counts?.done ?? 0;
         renderTasks(data.tasks || []);
       } catch (error) {
-        content.innerHTML = `<div class="error">⛔ ${escapeHtml(error.message)}<br><br>Botga /start bosing va qayta oching.</div>`;
+        content.innerHTML = `<div class="panel error">⛔ ${escapeHtml(error.message)}<br><br>Botga /start bosing va qayta oching.</div>`;
       }
     }
 
@@ -465,6 +560,7 @@
       }
     }
 
+    document.addEventListener("pointermove", setPointer, { passive: true });
     document.querySelectorAll(".tab").forEach(button => {
       button.addEventListener("click", () => {
         state.filter = button.dataset.filter;
