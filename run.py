@@ -26,6 +26,7 @@ from routers.projects import router as projects_router, shutdown_project_task_bo
 from routers.ai_chat import router as ai_chat_router
 from routers.attendance import router as attendance_router
 from routers.audit import router as audit_router
+from routers.developer_kpi import router as developer_kpi_router, auto_freeze_previous_month_snapshots
 from cognilabsai.router import router as cognilabsai_router
 from cognilabsai.service import shutdown_cognilabsai, startup_cognilabsai
 from utils.file_storage import FILES_ROOT, IMAGES_ROOT, ensure_image_directories
@@ -100,6 +101,7 @@ app.include_router(projects_router)
 app.include_router(ai_chat_router)
 app.include_router(attendance_router)
 app.include_router(audit_router)
+app.include_router(developer_kpi_router)
 app.include_router(cognilabsai_router)
 
 
@@ -144,6 +146,7 @@ async def app_startup():
     await start_backup_bot()
     await start_project_task_bot()
     _scheduler.add_job(send_daily_backup, "cron", hour=3, minute=0)
+    _scheduler.add_job(auto_freeze_previous_month_snapshots, "cron", hour=23, minute=55)
     _scheduler.start()
     print("[backup] Scheduler ishga tushdi — har kuni 03:00 (Toshkent)")
 

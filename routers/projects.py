@@ -202,9 +202,15 @@ async def ensure_project_card_schema() -> None:
             )
         )
         await conn.execute(text("""ALTER TABLE project ADD COLUMN IF NOT EXISTS deadline TIMESTAMP NULL"""))
+        await conn.execute(text("""ALTER TABLE project ADD COLUMN IF NOT EXISTS actual_delivery_date DATE NULL"""))
+        await conn.execute(text("""ALTER TABLE project ADD COLUMN IF NOT EXISTS delivery_status VARCHAR(50) NULL"""))
+        await conn.execute(text("""ALTER TABLE project ADD COLUMN IF NOT EXISTS approved_blocked_days INTEGER NOT NULL DEFAULT 0"""))
+        await conn.execute(text("""ALTER TABLE project ADD COLUMN IF NOT EXISTS real_delay_days INTEGER NULL"""))
         await conn.execute(text("""ALTER TABLE project ADD COLUMN IF NOT EXISTS telegram_group_id VARCHAR(100) NULL"""))
         await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_team_id ON project(team_id)"""))
         await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_deadline ON project(deadline)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_actual_delivery_date ON project(actual_delivery_date)"""))
+        await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_delivery_status ON project(delivery_status)"""))
         await conn.execute(text("""CREATE INDEX IF NOT EXISTS idx_project_telegram_group_id ON project(telegram_group_id)"""))
         await conn.execute(text("""ALTER TABLE project_board_card ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP NULL"""))
         await conn.execute(text("""ALTER TABLE project_board_card ADD COLUMN IF NOT EXISTS telegram_source_chat_id VARCHAR(100) NULL"""))
@@ -2233,6 +2239,10 @@ async def list_projects(
             project_url=project_row.project_url,
             project_image=project_row.project_image,
             deadline=project_row.deadline,
+            actual_delivery_date=project_row.actual_delivery_date,
+            delivery_status=project_row.delivery_status,
+            approved_blocked_days=project_row.approved_blocked_days or 0,
+            real_delay_days=project_row.real_delay_days,
             telegram_group_id=project_row.telegram_group_id,
             created_by=project_row.created_by,
             created_at=project_row.created_at,
@@ -2644,6 +2654,10 @@ async def get_project_detail(
         project_url=project_row.project_url,
         project_image=project_row.project_image,
         deadline=project_row.deadline,
+        actual_delivery_date=project_row.actual_delivery_date,
+        delivery_status=project_row.delivery_status,
+        approved_blocked_days=project_row.approved_blocked_days or 0,
+        real_delay_days=project_row.real_delay_days,
         telegram_group_id=project_row.telegram_group_id,
         created_by=project_row.created_by,
         created_at=project_row.created_at,
@@ -3431,6 +3445,10 @@ async def open_list_projects_by_user(
             project_url=project_row.project_url,
             project_image=project_row.project_image,
             deadline=project_row.deadline,
+            actual_delivery_date=project_row.actual_delivery_date,
+            delivery_status=project_row.delivery_status,
+            approved_blocked_days=project_row.approved_blocked_days or 0,
+            real_delay_days=project_row.real_delay_days,
             telegram_group_id=project_row.telegram_group_id,
             created_by=project_row.created_by,
             created_at=project_row.created_at,
@@ -3503,6 +3521,10 @@ async def open_get_project_detail_by_user(
         project_url=project_row.project_url,
         project_image=project_row.project_image,
         deadline=project_row.deadline,
+        actual_delivery_date=project_row.actual_delivery_date,
+        delivery_status=project_row.delivery_status,
+        approved_blocked_days=project_row.approved_blocked_days or 0,
+        real_delay_days=project_row.real_delay_days,
         telegram_group_id=project_row.telegram_group_id,
         created_by=project_row.created_by,
         created_at=project_row.created_at,

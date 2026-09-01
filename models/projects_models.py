@@ -41,6 +41,10 @@ project = Table(
     Column("project_url", String(500), nullable=True),
     Column("project_image", String(500), nullable=True),
     Column("deadline", DateTime, nullable=True),
+    Column("actual_delivery_date", Date, nullable=True),
+    Column("delivery_status", String(50), nullable=True),
+    Column("approved_blocked_days", Integer, nullable=False, default=0),
+    Column("real_delay_days", Integer, nullable=True),
     Column("telegram_group_id", String(100), nullable=True),
     Column("created_by", Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", DateTime, default=datetime.utcnow),
@@ -190,6 +194,8 @@ Index("idx_project_team_member_user_id", project_team_member.c.user_id)
 Index("idx_project_team_created_by", project_team.c.created_by)
 Index("idx_project_team_id", project.c.team_id)
 Index("idx_project_deadline", project.c.deadline)
+Index("idx_project_actual_delivery_date", project.c.actual_delivery_date)
+Index("idx_project_delivery_status", project.c.delivery_status)
 Index("idx_project_telegram_group_id", project.c.telegram_group_id)
 Index("idx_project_board_project_id", project_board.c.project_id)
 Index("idx_project_board_column_board_id", project_board_column.c.board_id)

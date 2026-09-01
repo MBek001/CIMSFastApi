@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -169,6 +169,10 @@ class ProjectSummaryResponse(BaseModel):
     project_url: Optional[str]
     project_image: Optional[str]
     deadline: Optional[datetime] = None
+    actual_delivery_date: Optional[date] = None
+    delivery_status: Optional[str] = None
+    approved_blocked_days: int = 0
+    real_delay_days: Optional[int] = None
     telegram_group_id: Optional[str] = None
     created_by: Optional[int]
     created_at: datetime
@@ -187,6 +191,10 @@ class ProjectDetailResponse(BaseModel):
     project_url: Optional[str]
     project_image: Optional[str]
     deadline: Optional[datetime] = None
+    actual_delivery_date: Optional[date] = None
+    delivery_status: Optional[str] = None
+    approved_blocked_days: int = 0
+    real_delay_days: Optional[int] = None
     telegram_group_id: Optional[str] = None
     created_by: Optional[int]
     created_at: datetime
