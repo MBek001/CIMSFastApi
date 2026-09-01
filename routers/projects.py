@@ -928,9 +928,29 @@ async def write_task_move_daily_update(
     card_title: str,
     source_name: str,
     target_name: str,
+    project_name: Optional[str] = None,
+    board_name: Optional[str] = None,
 ) -> None:
-    today = date.today()
-    line = f"- Task move: {card_title} ({source_name} -> {target_name})"
+    now_local = datetime.now(PROJECTS_TZ)
+    today = now_local.date()
+    if is_done_column_name(target_name):
+        title = "✅ Task bajarildi"
+    elif is_done_column_name(source_name) and not is_done_column_name(target_name):
+        title = "♻️ Task qayta ochildi"
+    else:
+        title = "🔄 Task statusi o'zgardi"
+    line_parts = [
+        title,
+        f"🧩 Task: {card_title}",
+        f"📍 Status: {source_name} → {target_name}",
+        f"🕒 Vaqt: {now_local.strftime('%Y-%m-%d %H:%M')}",
+    ]
+    if project_name:
+        line_parts.insert(1, f"🗂 Project: {project_name}")
+    if board_name:
+        insert_index = 2 if project_name else 1
+        line_parts.insert(insert_index, f"📋 Board: {board_name}")
+    line = "\n".join(line_parts)
     marker = f"system-task-move:{actor_user_id}:{today.isoformat()}"
     existing = (
         await session.execute(
@@ -945,7 +965,7 @@ async def write_task_move_daily_update(
         )
     ).fetchone()
     if existing:
-        content = f"{existing.update_content}\n{line}" if existing.update_content else line
+        content = f"{existing.update_content}\n\n{line}" if existing.update_content else line
         await session.execute(
             update(daily_update_log)
             .where(daily_update_log.c.id == existing.id)
@@ -1645,6 +1665,7 @@ async def update_card_status_from_task_bot(
     card_row = await get_card_or_404(session, card_id)
     source_column = await get_column_or_404(session, card_row.column_id)
     source_board = await get_board_or_404(session, source_column.board_id)
+    project_row = await get_project_or_404(session, source_board.project_id)
     target_column = await get_column_or_404(session, target_column_id)
     target_board = await get_board_or_404(session, target_column.board_id)
     if source_board.id != target_board.id:
@@ -1694,7 +1715,15 @@ async def update_card_status_from_task_bot(
             .where(project_board_card.c.id == card_id)
             .values(**complete_values)
         )
-    await write_task_move_daily_update(session, target_user.id, card_row.title, source_column.name, target_column.name)
+    await write_task_move_daily_update(
+        session,
+        target_user.id,
+        card_row.title,
+        source_column.name,
+        target_column.name,
+        project_row.project_name,
+        source_board.name,
+    )
 
     await session.commit()
     status_options = await get_board_status_options(session, target_board.id)
@@ -3806,6 +3835,7 @@ async def move_card(
     await ensure_project_card_schema()
     card_row = await get_card_or_404(session, card_id)
     source_column, source_board = await ensure_card_access(session, card_row, current_user)
+    project_row = await get_project_or_404(session, source_board.project_id)
 
     target_column = await get_column_or_404(session, move_data.column_id)
     target_board = await get_board_or_404(session, target_column.board_id)
@@ -3866,7 +3896,15 @@ async def move_card(
                 .where(project_board_card.c.id == card_id)
                 .values(**complete_values)
             )
-        await write_task_move_daily_update(session, current_user.id, card_row.title, source_column.name, target_column.name)
+        await write_task_move_daily_update(
+            session,
+            current_user.id,
+            card_row.title,
+            source_column.name,
+            target_column.name,
+            project_row.project_name,
+            source_board.name,
+        )
 
     await session.execute(
         update(project_board_card)
