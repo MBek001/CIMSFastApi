@@ -83,8 +83,12 @@ _project_card_schema_ready = False
 _project_task_bot_app: Optional[Application] = None
 PROJECTS_TZ = ZoneInfo("Asia/Tashkent")
 PROJECT_TASK_WEBAPP_INDEX = Path(__file__).resolve().parent.parent / "static" / "task_webapp" / "index.html"
-TASK_COMMAND_RE = re.compile(r"/(?P<command>add_task_front|add_task_back|frontend|backend|management)(?:@\w+)?", re.IGNORECASE)
-MANAGEMENT_ASSIGNEE_LOOKUPS = {"muhammadali", "saidbek"}
+TASK_COMMAND_RE = re.compile(r"/(?P<command>add_task_front|add_task_back|frontend|backend|management_ceo|management_gm|management)(?:@\w+)?", re.IGNORECASE)
+MANAGEMENT_ASSIGNEE_LOOKUPS = {
+    "management": {"muhammadali", "saidbek"},
+    "management_ceo": {"muhammadali"},
+    "management_gm": {"saidbek"},
+}
 PROJECT_TASK_UNAUTHORIZED_MESSAGE = "Uzr faqat Cognilabs jamoasi uchun javob beraman ."
 TASK_STATUS_ALIASES = {
     "todo": "To Do",
@@ -1061,8 +1065,8 @@ def parse_project_task_command(text_value: str, reply_text: Optional[str] = None
         return None, None, None, None, None, None
 
     command = command_match.group("command").lower()
-    if command == "management":
-        kind = "management"
+    if command in {"management", "management_ceo", "management_gm"}:
+        kind = command
     elif command in {"add_task_front", "frontend"}:
         kind = "frontend"
     else:
@@ -1206,7 +1210,8 @@ def user_matches_task_kind(row, kind: str) -> bool:
 
 
 async def resolve_project_task_assignees(session: AsyncSession, project_row, kind: str) -> List:
-    if kind == "management":
+    if kind.startswith("management"):
+        lookups = MANAGEMENT_ASSIGNEE_LOOKUPS.get(kind, MANAGEMENT_ASSIGNEE_LOOKUPS["management"])
         rows = (
             await session.execute(
                 select(
@@ -1228,10 +1233,10 @@ async def resolve_project_task_assignees(session: AsyncSession, project_row, kin
             row
             for row in rows
             if (
-                normalize_task_report_lookup(row.name) in MANAGEMENT_ASSIGNEE_LOOKUPS
-                or normalize_task_report_lookup(f"{row.name}{row.surname}") in MANAGEMENT_ASSIGNEE_LOOKUPS
-                or normalize_task_report_lookup(row.telegram_id) in MANAGEMENT_ASSIGNEE_LOOKUPS
-                or normalize_task_report_lookup(str(row.email or "").split("@", 1)[0]) in MANAGEMENT_ASSIGNEE_LOOKUPS
+                normalize_task_report_lookup(row.name) in lookups
+                or normalize_task_report_lookup(f"{row.name}{row.surname}") in lookups
+                or normalize_task_report_lookup(row.telegram_id) in lookups
+                or normalize_task_report_lookup(str(row.email or "").split("@", 1)[0]) in lookups
             )
         ]
 
@@ -1405,7 +1410,7 @@ async def create_project_task_from_group_message(
         board_row = await get_or_create_project_board_by_name(
             session,
             project_row.id,
-            "Management" if kind == "management" else ("Backend" if kind == "backend" else "Frontend"),
+            "Management" if kind.startswith("management") else ("Backend" if kind == "backend" else "Frontend"),
             sender_row.id if sender_row else None,
         )
         column_row, status_warning = await resolve_board_column_for_task(session, board_row.id, status_name)
@@ -1932,7 +1937,7 @@ async def project_task_report_handler(update_obj: TelegramUpdate, context: Conte
         return
 
     command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lstrip("/")
-    if command.lower() in {"start", "add_task_front", "add_task_back", "backend", "frontend", "management"}:
+    if command.lower() in {"start", "add_task_front", "add_task_back", "backend", "frontend", "management", "management_ceo", "management_gm"}:
         return
     async with async_session_maker() as session:
         actor_row = await find_project_task_bot_actor(session, update_obj.effective_user)
@@ -2028,6 +2033,8 @@ async def start_project_task_bot() -> None:
     _project_task_bot_app.add_handler(CommandHandler("backend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("frontend", project_task_command_handler))
     _project_task_bot_app.add_handler(CommandHandler("management", project_task_command_handler))
+    _project_task_bot_app.add_handler(CommandHandler("management_ceo", project_task_command_handler))
+    _project_task_bot_app.add_handler(CommandHandler("management_gm", project_task_command_handler))
     _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_open_callback_handler, pattern=r"^task_open:\d+$"))
     _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_status_callback_handler, pattern=r"^task_status:\d+:\d+$"))
     _project_task_bot_app.add_handler(CallbackQueryHandler(project_task_back_callback_handler, pattern=r"^task_back$"))
